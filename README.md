@@ -9,7 +9,7 @@ It includes stages for:
 
 ## Project Structure
 
-(BEGIN CODE BLOCK - TREE STRUCTURE)
+```
 well_plate_analyzer/
 ├── config/
 │   └── pipeline_config.yml       # Main configuration for all stages
@@ -36,7 +36,7 @@ well_plate_analyzer/
 ├── requirements.txt              # Python package dependencies
 ├── .gitignore                    # Specifies intentionally untracked files
 └── README.md                     # This file
-(END CODE BLOCK - TREE STRUCTURE)
+```
 
 ## Prerequisites
 
