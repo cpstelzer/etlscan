@@ -1,0 +1,112 @@
+# Global Settings
+project_base_dir: "D:/sandbox/" # CHANGE THIS to your project's root
+sample_subdir_name: "20250409_plate4_well1" # Example, will be overridden by run_pipeline.py
+
+# Logging Configuration
+logging:
+  level: "INFO" # DEBUG, INFO, WARNING, ERROR, CRITICAL
+  format: "%(asctime)s - %(levelname)s - %(name)s - %(module)s.%(funcName)s - %(message)s"
+  date_format: "%Y-%m-%d %H:%M:%S"
+
+# System and Image Parameters (from original wellcounter_config.yml thinking)
+system:
+  image_width_px: 4504 # Example, used if auto_center_mask is False
+  image_height_px: 4504 # Example, used if auto_center_mask is False
+
+# Stage 1: Initial Detection (derived from ws_background_subtraction & wellcounter_imaging_module)
+stage_01_initial_detection:
+  bg_offset_val: 110 # Frame offset for background selection
+  # Parameters for wellcounter_imaging_module.mask_well_area
+  well_masking:
+    create_mask: True
+    auto_center_mask: True
+    radius_px: 2000 # Effective radius for masking, relative to well size
+    radius_fraction: 0.67 # Factor to shrink auto-detected or fixed radius
+  # Parameters for wellcounter_imaging_module.analyze_microorganisms
+  particle_analysis:
+    microorganism_threshold: 25
+    min_microorganism_area: 200
+    microorganism_blur_kernel: 5 # Must be odd
+    filter_by_shape: False # If True, uses hardcoded quantiles from original wim
+    # Parameters for unsubtracted analysis (if used, currently part of wim.image_analysis_of_sample logic)
+    unsubtracted_threshold: 70
+  # Parameters for compare_detected_particles (used in original wim.image_analysis_of_sample)
+  particle_comparison:
+    search_radius_factor: 2
+    default_particle_area: 500
+  # Parameters for image_analysis_of_sample logic (frames for wim method)
+  wim_image_analysis_frames:
+    frame1_delay: 0
+    frame2_delay: 2
+    frame3_delay: 5
+  # Output settings from original wim if particle_detection=True in outputs
+  debug_outputs_wim_style:
+    enabled: False # Set to true to save intermediate images like original wim
+    output_subdir_suffix: "_wim_particle_detection_debug"
+
+# Stage 2: Quality Filter (derived from ws_extract_sharp_objects & wellscanner_util_module)
+stage_02_quality_filter:
+  # Cropping parameters for wellscanner_util_module.process_single_particle
+  intermediate_crop:
+    mode: "centroid_square" # 'bounding_box' or 'centroid_square'
+    square_size: 150 # Size for intermediate crops for sharpness analysis
+    bbox_column_mapping:
+      x: "bounding_x"
+      y: "bounding_y"
+      w: "bounding_w"
+      h: "bounding_h"
+  # Black mask detection parameters
+  black_mask_check:
+    min_area_ratio: 0.05
+  # Sharpness metrics to calculate
+  sharpness_metrics:
+    - "variance_laplacian"
+    - "tenengrad_variance"
+    - "energy_laplacian"
+    - "energy_gradient"
+  # Criteria for filtering "sharp objects" to be saved
+  final_sharp_object_filter:
+    variance_laplacian_min: 105
+    tenengrad_variance_min: 6700
+    energy_laplacian_min: 1730000
+    energy_gradient_min: 145000000
+  # Final crop size for saved "sharp objects"
+  final_sharp_crop_size: 150
+
+# Stage 3: ML Classification (derived from ws_identify_ideal_fems)
+stage_03_ml_classification:
+  model_filename: "rf_fem_classifier.joblib"
+  scaler_filename: "rf_fem_scaler.joblib"
+  image_extensions: [".png", ".tif", ".tiff", ".jpg", ".jpeg"] # For scanning image dirs
+  # Feature extraction parameters
+  feature_extraction_params:
+    gaussian_sigma: 1.0
+    otsu_threshold_multiplier: 0.5
+    closing_selem_size: 3
+    min_noise_size: 50
+    min_significant_area: 300
+    egg_threshold_quantile: 0.92
+    egg_opening_selem_size: 0 # Set to >0 like 2 or 3 to enable opening
+    egg_pair_min_area: 200
+    egg_pair_max_area: 10000
+    egg_pair_min_solidity: 0.70
+    egg_pair_max_solidity: 0.98
+    egg_pair_min_eccentricity: 0.3
+    max_egg_distance_factor: 0.90
+    posterior_projection_threshold: -0.1 # For egg pair relative to main body axis
+    orientation_diff_tolerance_deg: 50 # For egg pair relative to main body axis
+  # Training parameters for RandomForest
+  training_params:
+    good_data_subdir: "good" # Relative to data/training_data/
+    bad_data_subdir: "bad"   # Relative to data/training_data/
+    test_split_size: 0.25
+    random_state: 42
+    # RandomForest GridSearchCV parameters
+    rf_param_grid:
+      n_estimators: [50, 100, 200]
+      max_depth: [null, 10, 20] # null corresponds to None in Python
+      min_samples_split: [2, 5]
+      min_samples_leaf: [1, 3]
+      class_weight: ["balanced", null]
+    grid_search_cv_folds: 3
+    grid_search_scoring: "f1_weighted" # e.g., 'accuracy', 'f1', 'roc_auc'
