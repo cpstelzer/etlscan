@@ -4,7 +4,7 @@ import argparse
 import logging # Logging will be set up by utils
 import sys
 import time
-from typing import Optional 
+from typing import Optional
 
 
 # Ensure the src directory is in the Python path
@@ -61,10 +61,8 @@ def main():
 
     # --- 1. Load Configuration and Setup Logging ---
     try:
-        # Load config using the provided path or default
-        # The load_config function in utils ensures it's loaded once globally
         loaded_main_config = load_config(args.config)
-        setup_logging() # Now setup logging using the loaded configuration
+        setup_logging()
         logger.info(f"Configuration loaded from: {args.config}")
         logger.info(f"Pipeline run initiated for Sample ID: {args.sample_id}")
         logger.info(f"Stages to run: {args.stages}")
@@ -90,7 +88,6 @@ def main():
 
     if stages_to_run_str == "all":
         run_s1, run_s2, run_s3_predict = True, True, True
-        # By default, 'all' implies predict with existing model unless --force_retrain_ml
         if args.force_retrain_ml:
             run_s3_train = True
     elif stages_to_run_str == "train_ml":
@@ -100,33 +97,25 @@ def main():
         if "1" in selected_stages: run_s1 = True
         if "2" in selected_stages: run_s2 = True
         if "3" in selected_stages:
-            run_s3_predict = True # Default for stage 3 is predict
-            if args.force_retrain_ml: # If specified with stage 3, also train
+            run_s3_predict = True
+            if args.force_retrain_ml:
                  run_s3_train = True
 
-    # --- 3. Define Paths (based on config and sample_id) ---
-    # Input directory for Stage 1 (raw images for the sample)
-    # get_sample_dir constructs data/input/{sample_id}
+    # --- 3. Define Paths ---
     s1_input_image_dir = get_sample_dir(args.sample_id)
-
-    # Base output directory for the current sample
-    # get_output_dir_for_sample constructs data/output/{sample_id}
     sample_output_base_dir = get_output_dir_for_sample(args.sample_id)
 
-    # Specific output directories for each stage
     s1_output_dir = os.path.join(sample_output_base_dir, "stage1_initial_detection")
     s2_output_dir = os.path.join(sample_output_base_dir, "stage2_quality_filter")
-    s3_output_dir = os.path.join(sample_output_base_dir, "stage3_ml_classification") # Base for S3 outputs
+    s3_output_dir = os.path.join(sample_output_base_dir, "stage3_ml_classification")
     
     os.makedirs(s1_output_dir, exist_ok=True)
     os.makedirs(s2_output_dir, exist_ok=True)
     os.makedirs(s3_output_dir, exist_ok=True)
 
-
-    # Paths for data flowing between stages
     s1_output_csv_path: Optional[str] = None
-    s2_output_csv_path: Optional[str] = None # CSV of all analyzed particles from S2
-    s2_sharp_objects_dir: Optional[str] = None # Dir of sharp object crops from S2
+    s2_analyzed_particles_csv_path: Optional[str] = None # Full CSV from S2 (e.g., _stage2_analyzed_particles.csv)
+    s2_sharp_objects_dir: Optional[str] = None         # Dir of sharp object crops from S2
 
     # --- 4. Execute Pipeline Stages ---
     pipeline_start_time = time.time()
@@ -143,100 +132,91 @@ def main():
             )
             s1_duration = time.time() - s1_start_time
             if not s1_output_csv_path:
-                logger.error("Stage 1 failed to produce an output CSV. Subsequent stages depending on it may fail.")
-                # Decide if pipeline should stop or attempt to proceed if possible
-                # For now, let's stop if S1 output is crucial for S2
+                logger.error("Stage 1 failed to produce an output CSV.")
                 if run_s2: raise ProcessingError("Stage 1 failed, cannot proceed to Stage 2.")
             else:
                 logger.info(f"<<< Stage 1 COMPLETED in {s1_duration:.2f} seconds. Output CSV: {s1_output_csv_path} >>>")
-        elif run_s2 or run_s3_predict: # If running S2 or S3_predict but not S1, need S1 output path
+        elif run_s2 or run_s3_predict:
             s1_output_csv_path = os.path.join(s1_output_dir, f"{args.sample_id}_stage1_particles.csv")
             if not os.path.exists(s1_output_csv_path):
-                logger.error(f"Stage 1 output CSV '{s1_output_csv_path}' not found, but required for subsequent stages.")
-                raise FileNotFoundError(f"Missing Stage 1 output: {s1_output_csv_path}")
+                raise FileNotFoundError(f"Stage 1 output CSV '{s1_output_csv_path}' not found, but required.")
             logger.info(f"Using existing Stage 1 output: {s1_output_csv_path}")
-
 
         # --- Stage 2: Quality Filter ---
         if run_s2:
-            if not s1_output_csv_path: # Should have been caught above
-                logger.error("Stage 1 output CSV path is not available. Cannot run Stage 2.")
-                raise ProcessingError("Missing S1 output for S2.")
+            if not s1_output_csv_path:
+                raise ProcessingError("Stage 1 output CSV path is not available. Cannot run Stage 2.")
             
             logger.info(">>> Starting Stage 2: Quality Filtering & Sharp Object Extraction <<<")
             s2_start_time = time.time()
-            s2_output_csv_path = run_stage_02_quality_filter(
+            # run_stage_02 returns the path to the _stage2_analyzed_particles.csv
+            s2_analyzed_particles_csv_path = run_stage_02_quality_filter(
                 input_particles_csv_path=s1_output_csv_path,
-                image_dir_path=s1_input_image_dir, # S2 needs original images for final sharp crops
+                image_dir_path=s1_input_image_dir,
                 output_dir_stage2=s2_output_dir,
                 sample_id=args.sample_id
             )
             s2_duration = time.time() - s2_start_time
-            if not s2_output_csv_path:
-                logger.error("Stage 2 failed to produce an output CSV. Subsequent stages depending on it may fail.")
+            if not s2_analyzed_particles_csv_path:
+                logger.error("Stage 2 failed to produce an output CSV.")
                 if run_s3_predict: raise ProcessingError("Stage 2 failed, cannot proceed to Stage 3 prediction.")
             else:
-                logger.info(f"<<< Stage 2 COMPLETED in {s2_duration:.2f} seconds. Output CSV: {s2_output_csv_path} >>>")
-                # The input for S3 prediction is the directory of sharp object crops from S2
-                s2_sharp_objects_dir = os.path.join(s2_output_dir, "sharp_object_final_crops")
+                logger.info(f"<<< Stage 2 COMPLETED in {s2_duration:.2f} seconds. Analyzed particles CSV: {s2_analyzed_particles_csv_path} >>>")
+                s2_sharp_objects_dir = os.path.join(s2_output_dir, "sharp_object_final_crops") # Set this for S3
+                if not os.path.isdir(s2_sharp_objects_dir):
+                    logger.warning(f"Sharp objects directory '{s2_sharp_objects_dir}' not created by Stage 2, but might be needed for S3.")
+                    # S3 prediction will fail if this dir is expected and empty/missing.
 
-        elif run_s3_predict: # If running S3_predict but not S2, need S2 output dir for sharp crops
-            s2_output_csv_path = os.path.join(s2_output_dir, f"{args.sample_id}_stage2_analyzed_particles.csv") # General S2 output
+        elif run_s3_predict: # If running S3_predict but not S2
+            # We need both the _stage2_analyzed_particles.csv and the sharp_object_final_crops dir
+            s2_analyzed_particles_csv_path = os.path.join(s2_output_dir, f"{args.sample_id}_stage2_analyzed_particles.csv")
             s2_sharp_objects_dir = os.path.join(s2_output_dir, "sharp_object_final_crops")
+            
+            if not os.path.exists(s2_analyzed_particles_csv_path):
+                raise FileNotFoundError(f"Stage 2 analyzed CSV '{s2_analyzed_particles_csv_path}' not found, required for Stage 3 'combined_sharpness'.")
             if not os.path.isdir(s2_sharp_objects_dir):
-                logger.error(f"Stage 2 output directory for sharp objects '{s2_sharp_objects_dir}' not found, "
-                             "but required for Stage 3 prediction.")
-                raise FileNotFoundError(f"Missing Stage 2 sharp objects directory: {s2_sharp_objects_dir}")
-            logger.info(f"Using existing Stage 2 sharp objects from: {s2_sharp_objects_dir}")
+                raise FileNotFoundError(f"Stage 2 sharp objects directory '{s2_sharp_objects_dir}' not found, required for Stage 3 prediction.")
+            logger.info(f"Using existing Stage 2 outputs: Analyzed CSV='{s2_analyzed_particles_csv_path}', Sharp Crops Dir='{s2_sharp_objects_dir}'")
 
 
         # --- Stage 3: ML Classification ---
-        # Handle training mode
-        if run_s3_train:
-            logger.info(">>> Starting Stage 3: ML Model Training <<<")
-            s3_train_start_time = time.time()
-            # Stage 3 training doesn't depend on S1/S2 outputs for this sample,
-            # it uses the general training_data specified in config.
-            # The `input_dir_or_csv_path` argument is for prediction mode.
-            model_or_features_path = run_stage_03_ml_classification(
-                input_dir_or_csv_path="", # Not used for training-only mode
-                output_dir_stage3=s3_output_dir, # Base for S3, though train saves to global models_dir
-                sample_id=args.sample_id, # For logging context primarily
-                mode="train",
+        # Prepare S3 mode and input path (input_path_for_s3_predict)
+        s3_mode_for_run = "predict" # Default if only run_s3_predict is true
+        input_path_for_s3_predict = s2_sharp_objects_dir # Default input for prediction
+
+        if run_s3_train and run_s3_predict:
+            s3_mode_for_run = "train_and_predict"
+        elif run_s3_train: # Only training
+            s3_mode_for_run = "train"
+            input_path_for_s3_predict = "" # Not used for train-only mode
+        
+        # Execute S3 if any S3 action is requested
+        if run_s3_train or run_s3_predict:
+            # Ensure input for prediction mode is valid if prediction is part of the S3 run
+            if s3_mode_for_run in ["predict", "train_and_predict"]:
+                if not input_path_for_s3_predict: # s2_sharp_objects_dir
+                    logger.error("Stage 2 sharp objects directory path is not available. Cannot run Stage 3 prediction.")
+                    raise ProcessingError("Missing S2 sharp objects dir for S3 prediction.")
+                if not s2_analyzed_particles_csv_path: # This is the new check
+                    logger.error(f"Stage 2 analyzed particles CSV path ('{s2_analyzed_particles_csv_path}') is not available. Required for S3 filters.")
+                    raise ProcessingError("Missing S2 analyzed particles CSV for S3 filters.")
+            
+            logger.info(f">>> Starting Stage 3: ML Classification (Mode: {s3_mode_for_run}) <<<")
+            s3_start_time = time.time()
+            
+            s3_output_final_csv = run_stage_03_ml_classification(
+                input_dir_or_csv_path=input_path_for_s3_predict,
+                output_dir_stage3=s3_output_dir,
+                sample_id=args.sample_id,
+                stage2_analyzed_csv_path=s2_analyzed_particles_csv_path, # Pass the S2 full analysis CSV
+                mode=s3_mode_for_run,
                 force_model_retrain=args.force_retrain_ml
             )
-            s3_train_duration = time.time() - s3_train_start_time
-            if model_or_features_path:
-                 logger.info(f"<<< Stage 3 ML Training COMPLETED in {s3_train_duration:.2f} seconds. Model/artifacts related to: {model_or_features_path} >>>")
+            s3_duration = time.time() - s3_start_time
+            if s3_output_final_csv:
+                logger.info(f"<<< Stage 3 (Mode: {s3_mode_for_run}) COMPLETED in {s3_duration:.2f} seconds. Final relevant path: {s3_output_final_csv} >>>")
             else:
-                 logger.error("Stage 3 ML Training FAILED.")
-                 # If train_and_predict, this failure should halt prediction
-                 if run_s3_predict: raise ProcessingError("ML Training failed, cannot proceed to prediction.")
-        
-        # Handle prediction mode
-        if run_s3_predict:
-            if not s2_sharp_objects_dir: # Should have been set if S2 ran or was skipped
-                logger.error("Stage 2 sharp objects directory path is not available. Cannot run Stage 3 prediction.")
-                raise ProcessingError("Missing S2 sharp objects dir for S3 prediction.")
-
-            logger.info(">>> Starting Stage 3: ML Prediction for Ideal FEMs <<<")
-            s3_predict_start_time = time.time()
-            s3_mode_for_run = "predict"
-            if run_s3_train: # If training was also selected for this run
-                s3_mode_for_run = "train_and_predict" # Model should already be trained or loaded by this point if run_s3_train was True
-            
-            s3_output_features_csv = run_stage_03_ml_classification(
-                input_dir_or_csv_path=s2_sharp_objects_dir,
-                output_dir_stage3=s3_output_dir, # Base for S3 outputs for this sample
-                sample_id=args.sample_id,
-                mode=s3_mode_for_run, # Pass appropriate mode
-                force_model_retrain=args.force_retrain_ml if s3_mode_for_run == "train_and_predict" else False # Retrain only if mode includes train
-            )
-            s3_predict_duration = time.time() - s3_predict_start_time
-            if s3_output_features_csv:
-                logger.info(f"<<< Stage 3 ML Prediction COMPLETED in {s3_predict_duration:.2f} seconds. Accepted FEMs CSV: {s3_output_features_csv} >>>")
-            else:
-                logger.error("Stage 3 ML Prediction FAILED or produced no accepted FEMs CSV.")
+                logger.error(f"Stage 3 (Mode: {s3_mode_for_run}) FAILED or produced no primary output.")
         
         pipeline_duration = time.time() - pipeline_start_time
         logger.info(f"--- Pipeline execution for Sample ID: {args.sample_id} FINISHED in {pipeline_duration:.2f} seconds ---")
@@ -251,11 +231,10 @@ def main():
         logger.error(f"A processing error occurred in one of the stages: {e}")
         logger.error("Pipeline run aborted.")
     except Exception as e:
-        logger.exception(f"An unexpected error occurred during pipeline execution: {e}") # Includes stack trace
+        logger.exception(f"An unexpected error occurred during pipeline execution: {e}")
         logger.error("Pipeline run aborted due to unexpected error.")
     finally:
         logging.shutdown()
-
 
 if __name__ == "__main__":
     main()

@@ -110,3 +110,16 @@ stage_03_ml_classification:
       class_weight: ["balanced", null]
     grid_search_cv_folds: 3
     grid_search_scoring: "f1_weighted" # e.g., 'accuracy', 'f1', 'roc_auc'
+
+  # New filters for post-ML classification
+  post_ml_filters:
+    deduplication:
+      enabled: true
+      # Max distance (pixels) between particle centroids in adjacent frames to be considered the same particle
+      proximity_threshold_pixels: 100 
+      # Max difference in frame numbers to consider particles for deduplication (e.g., 2 means check F, F+1, F+2)
+      max_adjacent_frame_difference: 2 
+    
+    boundary_recheck:
+      enabled: true
+      # (No specific params needed here yet, uses existing core function)

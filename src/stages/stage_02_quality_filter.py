@@ -2,9 +2,9 @@
 import os
 import pandas as pd
 import numpy as np
-import cv2 # Keep for direct use if ParticleCropper uses it, or for other direct CV ops
+import cv2 
 import logging
-import shutil # For cleaning up temp directories
+import shutil 
 from typing import Optional, List, Dict, Any, Tuple
 
 from src.utils import (
@@ -19,7 +19,7 @@ from src.core.sharpness_assessment import calculate_sharpness_metrics, normalize
 
 logger = logging.getLogger(__name__)
 
-# Helper class for managing results of single particle processing
+# SingleParticleAnalysisResult class (as before)
 class SingleParticleAnalysisResult:
     def __init__(self, particle_data_in: pd.Series):
         self.input_particle_data = particle_data_in
@@ -34,10 +34,9 @@ class SingleParticleAnalysisResult:
 
     def to_dict(self) -> Dict[str, Any]:
         base_dict = {
-            'original_X': self.input_particle_data.get('X'), # Keep original for merging
+            'original_X': self.input_particle_data.get('X'),
             'original_Y': self.input_particle_data.get('Y'),
             'input_particle_index': self.input_particle_data.name,
-
             'analyzed_centroid_x': self.centroid_x, 
             'analyzed_centroid_y': self.centroid_y,
             'cropped_filename': self.cropped_image_filename,
@@ -47,7 +46,7 @@ class SingleParticleAnalysisResult:
         }
         return base_dict
 
-
+# _process_single_particle_for_quality (as before)
 def _process_single_particle_for_quality(
     particle_data_series: pd.Series,
     main_full_color_image: np.ndarray,
@@ -56,19 +55,19 @@ def _process_single_particle_for_quality(
     temp_intermediate_crop_dir: str, 
     config_s2: Dict[str, Any]
 ) -> SingleParticleAnalysisResult:
-    """
-    Processes a single particle: crops, analyzes for artifacts and sharpness.
-    """
     result = SingleParticleAnalysisResult(particle_data_series)
-    
     particle_id_info = f"(idx={particle_data_series.name}, X={result.centroid_x}, Y={result.centroid_y})"
     logger.debug(f"Processing particle {particle_id_info} for quality...")
 
     try:
+        # The prefix for intermediate crops can remain as is, or also be simplified.
+        # For consistency, let's simplify it too. The cropper will add _X_Y.
+        intermediate_crop_prefix = f"intermediate_crop_idx{particle_data_series.name}"
+        
         intermediate_crop_gray, saved_intermediate_color_crop_path = cropper.crop_single_particle_from_image(
             main_full_color_image, main_full_gray_image, particle_data_series,
             output_dir_for_crop=temp_intermediate_crop_dir,
-            crop_filename_prefix="intermediate_crop"
+            crop_filename_prefix=intermediate_crop_prefix # Simplified prefix
         )
 
         if intermediate_crop_gray is None or saved_intermediate_color_crop_path is None:
@@ -96,22 +95,13 @@ def _process_single_particle_for_quality(
     except Exception as e:
         logger.exception(f"Unexpected error processing particle {particle_id_info} for quality: {e}")
         result.error_message = f"Unexpected error: {str(e)}"
-    
     return result
 
+# _filter_and_score_analysis_results (as before)
 def _filter_and_score_analysis_results(
     analysis_results_df: pd.DataFrame,
     config_s2: Dict[str, Any]
     ) -> Tuple[pd.DataFrame, pd.DataFrame]:
-    """
-    Filters particles based on artifact flags (no black_mask, not on_crop_boundary).
-    Then calculates normalized and combined sharpness for suitable particles.
-
-    Returns:
-        Tuple[pd.DataFrame, pd.DataFrame]:
-            - suitable_scored_df: DataFrame of suitable particles with sharpness scores.
-            - all_analyzed_df_with_scores: Original analysis_results_df with sharpness scores merged back.
-    """
     logger.info("Filtering and scoring particle analysis results...")
     if analysis_results_df.empty:
         logger.warning("No analysis results to filter or score.")
@@ -146,10 +136,9 @@ def _filter_and_score_analysis_results(
     all_analyzed_df_with_scores = analysis_results_df.copy()
     score_cols_to_add = [m + '_norm' for m in metrics_for_norm] + ['combined_sharpness']
     for sc_col in score_cols_to_add:
-        if sc_col not in all_analyzed_df_with_scores.columns:
+        if sc_col not in all_analyzed_df_with_scores.columns: # Ensure columns exist before update
              all_analyzed_df_with_scores[sc_col] = np.nan
     all_analyzed_df_with_scores.update(suitable_scored_df[score_cols_to_add])
-
     return suitable_scored_df, all_analyzed_df_with_scores
 
 
@@ -160,9 +149,6 @@ def _save_final_sharp_object_crops(
     final_crop_size: int,
     sample_info: Dict[str, str] 
     ):
-    """
-    Loads original images and crops the final sharp objects.
-    """
     logger.info(f"Saving final sharp object crops to: {final_sharp_crops_output_dir}")
     os.makedirs(final_sharp_crops_output_dir, exist_ok=True)
     
@@ -179,7 +165,6 @@ def _save_final_sharp_object_crops(
 
         logger.debug(f"Loaded {image_filename} for final sharp object cropping.")
         
-        # Create dummy gray image once per full image for the cropper interface
         dummy_gray_for_final_crop = convert_to_grayscale(original_color_img)
         if dummy_gray_for_final_crop is None:
             logger.error(f"Could not create dummy gray for final crop from {image_filename}. Skipping its sharp objects.")
@@ -187,7 +172,6 @@ def _save_final_sharp_object_crops(
 
         for _, particle_row in group.iterrows():
             try:
-                # Use 'original_X' and 'original_Y' which were renamed from 'X', 'Y' of stage1 df.
                 coord_x = int(particle_row['original_X'])
                 coord_y = int(particle_row['original_Y'])
             except (KeyError, ValueError, TypeError) as e:
@@ -199,14 +183,18 @@ def _save_final_sharp_object_crops(
             if frame_num is None: frame_num_str = "UnkF"
             else: frame_num_str = f"F{frame_num:05d}"
 
-            output_crop_filename_base = (
+            # --- MODIFICATION HERE ---
+            # The ParticleCropper will now append _X<coord_x>_Y<coord_y>.png
+            # So the prefix should not contain these coordinates.
+            output_crop_filename_prefix = (
                 f"{sample_info['date']}_plate{sample_info['plate']}_well{sample_info['well']}_"
-                f"{frame_num_str}_X{coord_x}_Y{coord_y}_sharp" 
-            ) # save_image in cropper will add .png
+                f"{frame_num_str}_sharp" # Removed _X{coord_x}_Y{coord_y} from prefix
+            )
             
             final_cropper_cfg = {'mode': 'centroid_square', 'square_size': final_crop_size}
             final_cropper = ParticleCropper(final_cropper_cfg)
             
+            # The particle_data passed to cropper MUST have 'X' and 'Y' keys for its internal filename generation
             temp_particle_series_for_final_crop = pd.Series({'X': coord_x, 'Y': coord_y}, name=particle_row.name)
 
             _, saved_final_crop_path = final_cropper.crop_single_particle_from_image(
@@ -214,7 +202,7 @@ def _save_final_sharp_object_crops(
                 dummy_gray_for_final_crop, 
                 temp_particle_series_for_final_crop, 
                 output_dir_for_crop=final_sharp_crops_output_dir,
-                crop_filename_prefix=output_crop_filename_base 
+                crop_filename_prefix=output_crop_filename_prefix # Use the new simplified prefix
             )
             
             if saved_final_crop_path:
@@ -225,15 +213,13 @@ def _save_final_sharp_object_crops(
     logger.info(f"Saved {sharp_crops_saved_count} final sharp object crops.")
 
 
+# run_stage_02_quality_filter (main function for the stage - largely as before, but calls the modified helpers)
 def run_stage_02_quality_filter(
-    input_particles_csv_path: str, # From Stage 1
-    image_dir_path: str, # Path to original full-size images for this sample
+    input_particles_csv_path: str,
+    image_dir_path: str,
     output_dir_stage2: str,
     sample_id: str
-    ) -> Optional[str]: # Path to the final CSV with all analyses
-    """
-    Main function for Stage 2: Quality Filtering and Sharp Object Extraction.
-    """
+    ) -> Optional[str]:
     logger.info(f"--- Stage 2: Quality Filter for Sample ID: {sample_id} ---")
     logger.info(f"Input particle CSV: {input_particles_csv_path}")
     logger.info(f"Original image directory: {image_dir_path}")
@@ -248,19 +234,16 @@ def run_stage_02_quality_filter(
     if original_particles_df is None or original_particles_df.empty:
         logger.warning(f"No particles loaded from {input_particles_csv_path}. Stage 2 cannot proceed.")
         output_filename = f"{sample_id}_stage2_analyzed_particles.csv"
-        # Define schema for the empty DataFrame
-        expected_cols_list = ['X', 'Y', 'source_image_filename', 'SAMPLE_ID', # from stage 1
+        expected_cols_list = ['X', 'Y', 'source_image_filename', 'SAMPLE_ID',
                               'input_particle_index', 'analyzed_centroid_x', 'analyzed_centroid_y', 
                               'cropped_filename', 'is_black_mask', 'is_on_crop_boundary'] + \
                              AVAILABLE_SHARPNESS_METRICS + \
                              [m + '_norm' for m in AVAILABLE_SHARPNESS_METRICS] + \
                              ['combined_sharpness']
-        # Add other typical stage 1 columns if they exist in a non-empty scenario
-        if original_particles_df is not None: # Check if it was loaded but empty
+        if original_particles_df is not None:
             for col in original_particles_df.columns:
                 if col not in expected_cols_list:
                     expected_cols_list.append(col)
-
         empty_df = pd.DataFrame(columns=list(dict.fromkeys(expected_cols_list)))
         return save_dataframe_to_csv(empty_df, output_dir_stage2, output_filename)
 
@@ -279,17 +262,12 @@ def run_stage_02_quality_filter(
 
     required_cols_stage1 = ['source_image_filename', 'X', 'Y']
     if not all(col in original_particles_df.columns for col in required_cols_stage1):
-        # Append missing required columns with default values if they don't exist.
         for col in required_cols_stage1:
             if col not in original_particles_df.columns:
-                logger.warning(f"Required column '{col}' missing from Stage 1 CSV. Adding it with default (NaN or placeholder).")
-                if col == 'source_image_filename':
-                    original_particles_df[col] = "unknown_source_image.png"
-                else: # X, Y
-                    original_particles_df[col] = np.nan 
-        # raise DataValidationError(f"Stage 1 CSV missing required columns: {required_cols_stage1}")
-
-
+                logger.warning(f"Required column '{col}' missing from Stage 1 CSV. Adding it with default value.")
+                if col == 'source_image_filename': original_particles_df[col] = "unknown_source_image.png"
+                else: original_particles_df[col] = np.nan 
+    
     grouped_particles = original_particles_df.groupby('source_image_filename')
     logger.info(f"Found {len(grouped_particles)} unique source images in Stage 1 particle data.")
 
@@ -320,6 +298,7 @@ def run_stage_02_quality_filter(
     if not all_single_particle_results_list:
         logger.warning("No particles were processed for quality analysis. Stage 2 results will be empty.")
         output_filename = f"{sample_id}_stage2_analyzed_particles.csv"
+        # ... (schema for empty DF as before)
         expected_cols_list = ['X', 'Y', 'source_image_filename', 'SAMPLE_ID',
                               'input_particle_index', 'analyzed_centroid_x', 'analyzed_centroid_y', 
                               'cropped_filename', 'is_black_mask', 'is_on_crop_boundary'] + \
@@ -332,6 +311,7 @@ def run_stage_02_quality_filter(
                     expected_cols_list.append(col)
         empty_df = pd.DataFrame(columns=list(dict.fromkeys(expected_cols_list)))
         return save_dataframe_to_csv(empty_df, output_dir_stage2, output_filename)
+
 
     detailed_analysis_df = pd.DataFrame(all_single_particle_results_list)
     logger.info(f"Aggregated quality analysis results for {len(detailed_analysis_df)} particles.")
@@ -346,20 +326,15 @@ def run_stage_02_quality_filter(
     final_merged_df = pd.merge(
         left_df_for_merge,
         all_analyzed_with_scores_df,
-        left_on=['input_particle_index', 'X', 'Y'], # X, Y from original Stage 1 df
-        right_on=['input_particle_index', 'original_X', 'original_Y'], # original_X, Y from SingleParticleAnalysisResult
+        left_on=['input_particle_index', 'X', 'Y'],
+        right_on=['input_particle_index', 'original_X', 'original_Y'],
         how='left',
         suffixes=('', '_s2_analysis') 
     )
      
     cols_to_drop = [col for col in final_merged_df.columns if col.endswith('_s2_analysis')]
-    # Also remove the 'original_X', 'original_Y' columns that came from all_analyzed_with_scores_df,
-    # as they are now redundant with 'X' and 'Y' from the left merge side (original_particles_df).
     cols_to_drop.extend(['original_X', 'original_Y'])
-    # Remove 'analyzed_centroid_x', 'analyzed_centroid_y' if they are just copies of X,Y for this stage.
-    # The original wsutil did not have these separate analyzed_centroid columns in the final merged output.
     cols_to_drop.extend(['analyzed_centroid_x', 'analyzed_centroid_y'])
-
     final_merged_df.drop(columns=cols_to_drop, inplace=True, errors='ignore')
 
     logger.info(f"Final merged DataFrame created with {len(final_merged_df)} rows and columns: {final_merged_df.columns.tolist()}")
@@ -370,7 +345,6 @@ def run_stage_02_quality_filter(
     sharp_filter_criteria = config_s2.get('final_sharp_object_filter', {})
     if sharp_filter_criteria:
         df_for_sharp_thresholding = final_merged_df.copy()
-            
         sharp_mask = pd.Series(True, index=df_for_sharp_thresholding.index)
         missing_metrics_for_filter = False
         for metric_key_config, threshold_value in sharp_filter_criteria.items():
@@ -379,7 +353,6 @@ def run_stage_02_quality_filter(
                 logger.warning(f"Metric '{metric_name}' for sharp filter not found in DataFrame. Skipping this criterion.")
                 missing_metrics_for_filter = True
                 continue 
-                
             numeric_col = pd.to_numeric(df_for_sharp_thresholding[metric_name], errors='coerce').fillna(float('-inf'))
             sharp_mask &= (numeric_col > threshold_value)
             logger.debug(f"Applied sharp filter: {metric_name} > {threshold_value}. "
@@ -402,13 +375,11 @@ def run_stage_02_quality_filter(
                 'well': parsed_well or "UNKW"
             }
             
-            # Rename 'X', 'Y' (which are original stage1 coords) to 'original_X', 'original_Y' for the save function
             temp_df_for_saving_sharp = objects_for_final_crop_df.rename(
-                columns={'X': 'original_X', 'Y': 'original_Y'}
+                columns={'X': 'original_X', 'Y': 'original_Y'} # Rename for _save_final_sharp_object_crops
             )
-            # Ensure 'source_image_filename' is present for grouping in _save_final_sharp_object_crops
             if 'source_image_filename' not in temp_df_for_saving_sharp.columns:
-                 logger.error("'source_image_filename' is missing from the DataFrame intended for sharp crop saving. Cannot proceed with saving crops.")
+                 logger.error("'source_image_filename' is missing from the DataFrame for sharp crop saving. Cannot proceed.")
             else:
                 _save_final_sharp_object_crops(
                     temp_df_for_saving_sharp, 
@@ -436,17 +407,16 @@ def run_stage_02_quality_filter(
     logger.info(f"--- Stage 2: Quality Filter for Sample ID: {sample_id} COMPLETED ---")
     return saved_analyzed_csv_path
 
+
 if __name__ == '__main__':
     from src.utils.logging_setup import setup_logging
     setup_logging()
-
+    # ... (rest of __main__ for testing Stage 2 as before) ...
     try:
         cfg_main = get_config()
         TEST_SAMPLE_ID = "test_sample_s2_filter" 
-        
         base_project_dir = cfg_main.get('project_base_dir')
-        if not base_project_dir:
-            raise ValueError("project_base_dir not set in config for testing.")
+        if not base_project_dir: raise ValueError("project_base_dir not set in config for testing.")
 
         stage1_output_dir = os.path.join(base_project_dir, "data", "output", TEST_SAMPLE_ID, "stage1_output")
         test_s1_csv_path = os.path.join(stage1_output_dir, f"{TEST_SAMPLE_ID}_stage1_particles.csv")
@@ -464,9 +434,9 @@ if __name__ == '__main__':
                 'X': [100, 150, 20, 200], 'Y': [50, 75, 180, 10],
                 'area': [100, 120, 90, 150], 'perimeter': [40,45,35,50], 
                 'source_image_filename': ['20230101_plate1_well1_f00000_dpt0.0_fd0.0mm.png', 
-                                          '20230101_plate1_well1_f00000_dpt0.0_fd0.0mm.png', # two particles in first image
+                                          '20230101_plate1_well1_f00000_dpt0.0_fd0.0mm.png',
                                           '20230101_plate1_well1_f00001_dpt0.1_fd0.0mm.png',
-                                          '20230101_plate1_well1_f00001_dpt0.1_fd0.0mm.png'], # two in second
+                                          '20230101_plate1_well1_f00001_dpt0.1_fd0.0mm.png'],
                 'SAMPLE_ID': [TEST_SAMPLE_ID]*4,
                 'bounding_x': [90,140,10,190], 'bounding_y': [40,65,170,0],
                 'bounding_w': [20,20,20,20], 'bounding_h': [20,20,20,20] 
@@ -479,15 +449,11 @@ if __name__ == '__main__':
             for fname in dummy_s1_data['source_image_filename'].unique():
                 dummy_img_path = os.path.join(test_image_input_dir_s2, fname)
                 if not os.path.exists(dummy_img_path):
-                     # Create images that might produce varying sharpness
                      img_content = np.random.randint(0,100,(200,200,3), dtype=np.uint8)
-                     if 'f00000' in fname : # make one sharper
-                         cv2.putText(img_content, "Sharp", (50,100), cv2.FONT_HERSHEY_SIMPLEX, 2, (255,255,255), 3)
-                     else: # make one blurrier
-                         img_content = cv2.GaussianBlur(img_content, (15,15), 0)
+                     if 'f00000' in fname : cv2.putText(img_content, "Sharp", (50,100), cv2.FONT_HERSHEY_SIMPLEX, 2, (255,255,255), 3)
+                     else: img_content = cv2.GaussianBlur(img_content, (15,15), 0)
                      cv2.imwrite(dummy_img_path, img_content)
             logger.info(f"Created dummy images in {test_image_input_dir_s2}")
-
 
         result_s2_csv_path = run_stage_02_quality_filter(
             input_particles_csv_path=test_s1_csv_path,
@@ -495,17 +461,9 @@ if __name__ == '__main__':
             output_dir_stage2=test_s2_output_dir,
             sample_id=TEST_SAMPLE_ID
         )
-
-        if result_s2_csv_path:
-            logger.info(f"Stage 2 test completed. Final analyzed CSV: {result_s2_csv_path}")
-        else:
-            logger.error("Stage 2 test FAILED or produced no output CSV.")
-
-    except ConfigError as ce:
-        logger.error(f"Configuration error during Stage 2 test: {ce}")
-    except DataValidationError as dve:
-        logger.error(f"Data validation error during Stage 2 test: {dve}")
-    except FileNotFoundError as fnfe:
-        logger.error(f"File not found during Stage 2 test setup: {fnfe}")
-    except Exception as e:
-        logger.exception(f"An unexpected error occurred during the Stage 2 test: {e}")
+        if result_s2_csv_path: logger.info(f"Stage 2 test completed. Final analyzed CSV: {result_s2_csv_path}")
+        else: logger.error("Stage 2 test FAILED or produced no output CSV.")
+    except ConfigError as ce: logger.error(f"Configuration error during Stage 2 test: {ce}")
+    except DataValidationError as dve: logger.error(f"Data validation error during Stage 2 test: {dve}")
+    except FileNotFoundError as fnfe: logger.error(f"File not found during Stage 2 test setup: {fnfe}")
+    except Exception as e: logger.exception(f"An unexpected error occurred during the Stage 2 test: {e}")

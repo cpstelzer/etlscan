@@ -1,7 +1,7 @@
 # src/stages/stage_03_ml_classification.py
 import os
 import shutil
-import cv2
+import cv2 # Make sure it's imported
 import joblib
 import pandas as pd
 import numpy as np
@@ -21,6 +21,10 @@ from src.utils import (
 from src.utils.common_exceptions import ProcessingError, ConfigError, DataValidationError, MLModelError
 from src.core.ml_feature_extractor import extract_ml_features, DEFAULT_FEATURE_NAMES
 from src.visualization.feature_visualization import visualize_ml_features
+from src.utils.path_helpers import parse_sharp_crop_filename, extract_frame_from_filename # Added extract_frame_from_filename
+from src.core.image_io_operations import load_image, convert_to_grayscale
+from src.core.particle_operations import detect_cropped_particle_on_boundary
+
 
 logger = logging.getLogger(__name__)
 
@@ -65,16 +69,12 @@ def _load_and_extract_features_for_training(
         if features_dict:
             if _learned_feature_names_during_training is None:
                 _learned_feature_names_during_training = list(features_dict.keys())
-                # Ensure DEFAULT_FEATURE_NAMES are present and in order, if possible
-                # This can be refined to be more strict about expected features.
                 current_keys = set(_learned_feature_names_during_training)
                 default_set = set(DEFAULT_FEATURE_NAMES)
                 if not default_set.issubset(current_keys):
                     logger.warning(f"Extracted features {current_keys} do not fully cover default expected features {default_set}.")
-                # For now, use the extracted keys as the standard.
                 logger.info(f"Determined feature names from first successful extraction: {_learned_feature_names_during_training}")
 
-            # Order features according to the learned names
             try:
                 ordered_feature_values = [features_dict[name] for name in _learned_feature_names_during_training]
                 features_list.append(ordered_feature_values)
@@ -98,14 +98,6 @@ def train_ml_model(
     """
     Trains a RandomForestClassifier model based on configuration.
     Saves the trained model and scaler.
-
-    Args:
-        config_s3: Configuration dictionary for Stage 3.
-        force_retrain: If True, retrains even if model files exist.
-
-    Returns:
-        Tuple containing (trained_model, fitted_scaler, feature_names_used_for_training).
-        Returns (None, None, None) on failure.
     """
     global _learned_feature_names_during_training
     _learned_feature_names_during_training = None # Reset for each training call
@@ -117,60 +109,57 @@ def train_ml_model(
     image_exts = config_s3.get('image_extensions', ['.png', '.jpg'])
     
     models_output_dir = get_models_dir()
-    model_path = os.path.join(models_output_dir, config_s3.get('model_filename', 'rf_fem_classifier.joblib'))
-    scaler_path = os.path.join(models_output_dir, config_s3.get('scaler_filename', 'rf_fem_scaler.joblib'))
+    model_filename = config_s3.get('model_filename', 'rf_fem_classifier.joblib')
+    scaler_filename = config_s3.get('scaler_filename', 'rf_fem_scaler.joblib')
+    model_path = os.path.join(models_output_dir, model_filename)
+    scaler_path = os.path.join(models_output_dir, scaler_filename)
+    feature_names_path = model_path.replace(".joblib", "_feature_names.txt")
 
-    if not force_retrain and os.path.exists(model_path) and os.path.exists(scaler_path):
-        logger.info(f"Model '{model_path}' and scaler '{scaler_path}' already exist. Loading them.")
+
+    if not force_retrain and os.path.exists(model_path) and os.path.exists(scaler_path) and os.path.exists(feature_names_path):
+        logger.info(f"Model '{model_path}', scaler '{scaler_path}', and feature names file '{feature_names_path}' already exist. Loading them.")
         try:
             model = joblib.load(model_path)
             scaler = joblib.load(scaler_path)
-            # We need to know the feature names used for this loaded model.
-            # This is a common challenge. Store feature names with model or derive if possible.
-            # For now, assume if model loads, we'd need a way to get its expected feature order.
-            # One strategy: save feature names as a separate file or in model metadata if supported.
-            # Here, we'll try to re-determine if not available.
-            # This part needs a robust way to get feature names for PRE-TRAINED models.
-            # If joblib doesn't store them, we might need to save a _features.txt alongside model.
-            # For this refactor, if not retraining, we return None for feature_names, and caller must handle it.
-            logger.warning("Loaded existing model. Feature names used for its training are not explicitly stored with it in this version.")
-            logger.warning("For prediction with a pre-loaded model, ensure feature extraction matches its training.")
-            # For now, we can't reliably return _learned_feature_names_during_training without re-running extraction.
-            # This implies that to know the feature names, training or a part of it must run.
-            # Or, the calling function must pass them if known.
-            return model, scaler, None # Cannot return feature names without training data pass
+            with open(feature_names_path, "r") as f:
+                loaded_feature_names = [line.strip() for line in f if line.strip()]
+            if not loaded_feature_names:
+                raise MLModelError("Loaded feature names file is empty.")
+            _learned_feature_names_during_training = loaded_feature_names # Set global
+            return model, scaler, loaded_feature_names
         except Exception as e:
-            logger.error(f"Error loading existing model/scaler: {e}. Proceeding to retrain.")
-            # Fall through to retrain
+            logger.error(f"Error loading existing model/scaler/feature_names: {e}. Proceeding to retrain.")
 
     base_training_data_dir = get_training_data_dir()
     good_dir = os.path.join(base_training_data_dir, training_params.get('good_data_subdir', 'good'))
     bad_dir = os.path.join(base_training_data_dir, training_params.get('bad_data_subdir', 'bad'))
 
-    features_good, labels_good, f_names_good = _load_and_extract_features_for_training(
+    features_good, labels_good, _ = _load_and_extract_features_for_training(
         good_dir, 1, ml_feature_extraction_params, image_exts
     )
-    # _learned_feature_names_during_training should be set by the first call if successful.
-    features_bad, labels_bad, f_names_bad = _load_and_extract_features_for_training(
+    features_bad, labels_bad, _ = _load_and_extract_features_for_training(
         bad_dir, 0, ml_feature_extraction_params, image_exts
     )
     
-    if _learned_feature_names_during_training is None:
+    if _learned_feature_names_during_training is None: # Should be set by calls above
         logger.error("Feature names could not be determined from training data. Training aborted.")
         return None, None, None
     
     all_features_X = np.array(features_good + features_bad)
     all_labels_y = np.array(labels_good + labels_bad)
 
-    if all_features_X.shape[0] == 0 or all_features_X.shape[1] == 0:
+    if all_features_X.shape[0] == 0 or (_learned_feature_names_during_training and all_features_X.shape[1] == 0):
         logger.error("No training data or features extracted. Training aborted.")
-        return None, None, _learned_feature_names_during_training # Return names for debug
+        return None, None, _learned_feature_names_during_training
 
     logger.info(f"Total training samples: {len(all_labels_y)}. Number of features: {all_features_X.shape[1]}")
     logger.info(f"Feature names: {_learned_feature_names_during_training}")
-    logger.info(f"Class distribution in training data: {np.bincount(all_labels_y)}")
+    class_counts = np.bincount(all_labels_y)
+    if len(class_counts) < 2: # Ensure at least two classes for some operations
+        logger.warning(f"Training data has only one class: {class_counts}. Stratify and some metrics might fail.")
+    logger.info(f"Class distribution in training data: {class_counts}")
 
-    # Train/Test Split
+
     test_size = training_params.get('test_split_size', 0.25)
     random_state = training_params.get('random_state', 42)
     
@@ -178,31 +167,33 @@ def train_ml_model(
         X_train, X_test, y_train, y_test = train_test_split(
             all_features_X, all_labels_y, test_size=test_size, random_state=random_state, stratify=all_labels_y
         )
-    except ValueError as e: # Stratify might fail if a class has < 2 samples
+    except ValueError as e:
         logger.warning(f"Stratified split failed ({e}). Trying non-stratified split.")
         X_train, X_test, y_train, y_test = train_test_split(
             all_features_X, all_labels_y, test_size=test_size, random_state=random_state
         )
     logger.info(f"Data split: Train={len(y_train)}, Test={len(y_test)}")
 
-    # Scaling
     scaler = StandardScaler()
     X_train_scaled = scaler.fit_transform(X_train)
     X_test_scaled = scaler.transform(X_test)
     logger.info("Training data scaled. Scaler fitted.")
 
-    # RandomForest Model Training with GridSearchCV
-    rf_params = training_params.get('rf_param_grid', {})
-    if not rf_params:
+    rf_params_config = training_params.get('rf_param_grid', {})
+    if not rf_params_config:
         logger.warning("RandomForest param_grid not defined in config. Using default.")
-        rf_params = {'n_estimators': [100], 'max_depth': [None], 'class_weight': ['balanced']}
+        rf_params_parsed = {'n_estimators': [100], 'max_depth': [None], 'class_weight': ['balanced']}
+    else: # Need to handle 'null' strings for None
+        rf_params_parsed = {}
+        for key, value_list in rf_params_config.items():
+            rf_params_parsed[key] = [None if v == 'null' else v for v in value_list]
         
     rf_model = RandomForestClassifier(random_state=random_state)
     grid_search = GridSearchCV(
         estimator=rf_model,
-        param_grid=rf_params,
+        param_grid=rf_params_parsed,
         cv=training_params.get('grid_search_cv_folds', 3),
-        n_jobs=-1, # Use all available cores
+        n_jobs=-1, 
         verbose=1,
         scoring=training_params.get('grid_search_scoring', 'f1_weighted')
     )
@@ -212,7 +203,6 @@ def train_ml_model(
     best_model = grid_search.best_estimator_
     logger.info(f"Best RandomForest parameters found: {grid_search.best_params_}")
 
-    # Evaluation on Test Set
     y_pred_test = best_model.predict(X_test_scaled)
     accuracy = accuracy_score(y_test, y_pred_test)
     logger.info(f"Accuracy on test set: {accuracy:.4f}")
@@ -220,7 +210,7 @@ def train_ml_model(
                 classification_report(y_test, y_pred_test, target_names=['Bad(0)', 'Good(1)'], zero_division=0))
     logger.info("Confusion Matrix (Test Set):\n" + str(confusion_matrix(y_test, y_pred_test)))
 
-    if hasattr(best_model, 'feature_importances_'):
+    if hasattr(best_model, 'feature_importances_') and _learned_feature_names_during_training:
         importances = best_model.feature_importances_
         feature_importance_df = pd.DataFrame({
             'feature': _learned_feature_names_during_training,
@@ -228,60 +218,44 @@ def train_ml_model(
         }).sort_values(by='importance', ascending=False)
         logger.info("Feature Importances:\n" + str(feature_importance_df))
 
-    # Save Model and Scaler
     try:
         joblib.dump(best_model, model_path)
         logger.info(f"Trained model saved to: {model_path}")
         joblib.dump(scaler, scaler_path)
         logger.info(f"Scaler saved to: {scaler_path}")
-        # Save feature names used for training
-        feature_names_path = model_path.replace(".joblib", "_feature_names.txt")
         with open(feature_names_path, "w") as f:
             for name in _learned_feature_names_during_training:
                 f.write(f"{name}\n")
         logger.info(f"Feature names used for training saved to: {feature_names_path}")
-
     except Exception as e:
-        logger.exception(f"Error saving model or scaler: {e}")
-        return None, None, _learned_feature_names_during_training # Return them even if save fails
+        logger.exception(f"Error saving model, scaler, or feature names: {e}")
+        return None, None, _learned_feature_names_during_training
 
     logger.info("--- ML Model Training Completed ---")
     return best_model, scaler, _learned_feature_names_during_training
 
 
-def predict_ideal_fems(
-    input_sharp_objects_dir: str, # Directory of images from Stage 2 (e.g., "sharp_object_final_crops")
+def _predict_ml_candidates(
+    input_sharp_objects_dir: str,
     model: RandomForestClassifier,
     scaler: StandardScaler,
-    feature_names_for_prediction: List[str], # Crucial: must match training
+    feature_names_for_prediction: List[str],
     config_s3: Dict[str, Any],
-    output_classified_dir: str, # Base dir for "ideal_fems_ML_classified"
     sample_id: str
-) -> Optional[pd.DataFrame]:
-    """
-    Predicts ideal FEMs from a directory of sharp object images using a trained model.
-    Saves accepted images, visualizations, and a CSV of their features.
-    """
-    logger.info(f"--- Predicting Ideal FEMs for Sample: {sample_id} ---")
+) -> pd.DataFrame:
+    logger.info(f"--- Predicting ML Candidates for Sample: {sample_id} ---")
     logger.info(f"Input directory of sharp objects: {input_sharp_objects_dir}")
 
     if not os.path.isdir(input_sharp_objects_dir):
-        logger.error(f"Input directory for prediction '{input_sharp_objects_dir}' not found. Prediction aborted.")
-        return None
+        logger.error(f"Input directory for prediction '{input_sharp_objects_dir}' not found.")
+        return pd.DataFrame()
 
     ml_feature_params = config_s3.get('feature_extraction_params', {})
     image_exts = config_s3.get('image_extensions', ['.png', '.jpg'])
 
-    # Output subdirectories
-    output_accepted_images_dir = os.path.join(output_classified_dir, "accepted_images")
-    output_visualizations_dir = os.path.join(output_classified_dir, "visualizations")
-    os.makedirs(output_accepted_images_dir, exist_ok=True)
-    os.makedirs(output_visualizations_dir, exist_ok=True)
-
-    accepted_features_list = []
+    candidate_data_list = []
     processed_count = 0
-    accepted_count = 0
-    rejected_count = 0
+    ml_positive_count = 0
     error_count = 0
 
     image_files_to_predict = [
@@ -290,11 +264,11 @@ def predict_ideal_fems(
            f.lower().endswith(tuple(image_exts))
     ]
     total_to_predict = len(image_files_to_predict)
-    logger.info(f"Found {total_to_predict} images in '{input_sharp_objects_dir}' for prediction.")
+    logger.info(f"Found {total_to_predict} images in '{input_sharp_objects_dir}' for ML prediction.")
 
     if not image_files_to_predict:
-        logger.warning("No images found for prediction.")
-        return pd.DataFrame() # Return empty DF
+        logger.warning("No images found for ML prediction.")
+        return pd.DataFrame()
 
     for i, filename in enumerate(image_files_to_predict):
         processed_count += 1
@@ -304,87 +278,298 @@ def predict_ideal_fems(
 
         if features_dict:
             try:
-                # Ensure features are in the same order as during training
                 current_image_features = [features_dict[name] for name in feature_names_for_prediction]
                 features_array = np.array(current_image_features).reshape(1, -1)
                 
-                if not hasattr(scaler, 'mean_') or not hasattr(scaler, 'scale_'):
+                if not hasattr(scaler, 'mean_') or not hasattr(scaler, 'scale_'): # Check if scaler is fitted
                     raise MLModelError("Scaler is not fitted. Cannot transform features for prediction.")
                 
                 features_scaled = scaler.transform(features_array)
                 prediction_label = model.predict(features_scaled)[0]
-                # prediction_proba = model.predict_proba(features_scaled)[0] # Optional: get probabilities
 
-                if prediction_label == 1: # Accepted as "ideal FEM"
-                    accepted_count += 1
-                    # Copy accepted image
-                    shutil.copy2(image_path, os.path.join(output_accepted_images_dir, filename))
-                    
-                    # Create visualization
-                    vis_filename = f"{os.path.splitext(filename)[0]}_vis.png"
-                    vis_output_path = os.path.join(output_visualizations_dir, vis_filename)
-                    visualize_ml_features(image_path, main_props, egg_pair_props, vis_output_path, ml_feature_params=ml_feature_params)
-                    
-                    # Store features for CSV
-                    features_dict['filename'] = filename # Add filename to features
-                    features_dict['predicted_label'] = int(prediction_label)
-                    # features_dict['prediction_proba_good'] = float(prediction_proba[1]) if len(prediction_proba)>1 else np.nan
-                    accepted_features_list.append(features_dict)
-                else: # Rejected
-                    rejected_count += 1
-
+                if prediction_label == 1:
+                    ml_positive_count += 1
+                    candidate_info = {
+                        'filename': filename,
+                        'image_path': image_path,
+                        'main_props': main_props,
+                        'egg_pair_props': egg_pair_props,
+                        'predicted_label': int(prediction_label),
+                        **features_dict
+                    }
+                    candidate_data_list.append(candidate_info)
             except KeyError as ke:
-                logger.error(f"Feature mismatch for {filename} during prediction: {ke}. "
-                             f"Expected: {feature_names_for_prediction}. Got: {list(features_dict.keys())}")
+                logger.error(f"Feature mismatch for {filename} during prediction: {ke}.")
                 error_count += 1
             except NotFittedError as nfe:
                  logger.error(f"Scaler or Model NotFittedError for {filename}: {nfe}")
                  error_count +=1
             except Exception as e_pred:
-                logger.exception(f"Error during prediction processing (copy/viz/append) for {filename}: {e_pred}") # Use logger.exception
+                logger.exception(f"Error during ML prediction for {filename}: {e_pred}")
                 error_count += 1
         else:
             logger.warning(f"Feature extraction failed for {filename}. Skipping prediction.")
             error_count += 1
         
         if (i + 1) % 20 == 0 or (i + 1) == total_to_predict:
-            logger.info(f"  ...predicted {i+1}/{total_to_predict} images "
-                        f"(Accepted: {accepted_count}, Rejected: {rejected_count}, Errors: {error_count})")
+            logger.info(f"  ...ML predicted {i+1}/{total_to_predict} images "
+                        f"(ML Positives: {ml_positive_count}, Errors: {error_count})")
 
-    logger.info("--- Prediction Phase Complete ---")
-    logger.info(f"Total images processed: {processed_count}")
-    logger.info(f"Accepted images: {accepted_count} (saved to: {output_accepted_images_dir})")
-    logger.info(f"Visualizations saved to: {output_visualizations_dir}")
-    logger.info(f"Rejected images: {rejected_count}")
-    logger.info(f"Errors during prediction: {error_count}")
-
-    if accepted_features_list:
-        # Ensure DataFrame columns match the feature_names_for_prediction order + filename + label
-        cols_for_df = ['filename', 'predicted_label'] + feature_names_for_prediction # + ['prediction_proba_good']
-        accepted_df = pd.DataFrame(accepted_features_list, columns=cols_for_df)
-        
-        # Fill any missing feature columns with NaN (should not happen if KeyErrors are caught)
-        for col in feature_names_for_prediction:
-            if col not in accepted_df.columns:
-                accepted_df[col] = np.nan
-        
-        return accepted_df
+    logger.info(f"ML Prediction Phase Complete. Total ML Positives: {ml_positive_count}")
+    
+    if candidate_data_list:
+        return pd.DataFrame(candidate_data_list)
     else:
-        return pd.DataFrame() # Return empty if no accepted
+        return pd.DataFrame()
 
+def _merge_with_stage2_data(
+    ml_candidates_df: pd.DataFrame,
+    stage2_analyzed_csv_path: Optional[str], # Made Optional for robustness
+    sample_id: str
+) -> pd.DataFrame:
+    if ml_candidates_df.empty:
+        return ml_candidates_df
+    if not stage2_analyzed_csv_path or not os.path.exists(stage2_analyzed_csv_path):
+        logger.warning(f"Stage 2 analyzed CSV path not provided or not found: {stage2_analyzed_csv_path}. 'combined_sharpness' will be missing.")
+        ml_candidates_df['combined_sharpness'] = np.nan # Add column as NaN
+        return ml_candidates_df
+
+    logger.info(f"Merging ML candidates with Stage 2 data from: {stage2_analyzed_csv_path}")
+    s2_df = load_dataframe_from_csv(stage2_analyzed_csv_path)
+    if s2_df is None or s2_df.empty:
+        logger.warning(f"Failed to load or empty Stage 2 data from {stage2_analyzed_csv_path}. 'combined_sharpness' will be missing.")
+        ml_candidates_df['combined_sharpness'] = np.nan
+        return ml_candidates_df
+
+    parsed_info = ml_candidates_df['filename'].apply(parse_sharp_crop_filename)
+    ml_candidates_df['parsed_dpw_str'] = parsed_info.apply(lambda x: x[0] if x else None)
+    ml_candidates_df['parsed_frame'] = pd.to_numeric(parsed_info.apply(lambda x: x[1] if x else None), errors='coerce')
+    ml_candidates_df['parsed_X'] = pd.to_numeric(parsed_info.apply(lambda x: x[2] if x else None), errors='coerce')
+    ml_candidates_df['parsed_Y'] = pd.to_numeric(parsed_info.apply(lambda x: x[3] if x else None), errors='coerce')
+    
+    ml_candidates_df.dropna(subset=['parsed_frame', 'parsed_X', 'parsed_Y'], inplace=True) # Drop if key parts are NaN
+    if ml_candidates_df.empty:
+        logger.warning("No ML candidates remaining after parsing filenames for merge keys.")
+        ml_candidates_df['combined_sharpness'] = np.nan
+        return ml_candidates_df
+
+    s2_df['s2_parsed_frame'] = s2_df['source_image_filename'].apply(extract_frame_from_filename).astype('Int64') # Handle potential NaNs
+    s2_df.dropna(subset=['s2_parsed_frame', 'X', 'Y'], inplace=True)
+    
+    s2_merge_cols = ['X', 'Y', 's2_parsed_frame', 'combined_sharpness']
+    missing_s2_cols = [col for col in s2_merge_cols if col not in s2_df.columns]
+    if missing_s2_cols:
+        logger.warning(f"Missing columns in Stage 2 CSV for merge: {missing_s2_cols}. 'combined_sharpness' will be missing.")
+        ml_candidates_df['combined_sharpness'] = np.nan
+        return ml_candidates_df
+
+    merged_df = pd.merge(
+        ml_candidates_df,
+        s2_df[s2_merge_cols],
+        left_on=['parsed_X', 'parsed_Y', 'parsed_frame'],
+        right_on=['X', 'Y', 's2_parsed_frame'],
+        how='left',
+        suffixes=('', '_s2')
+    )
+
+    if 'combined_sharpness' not in merged_df.columns: # Should not happen if s2_merge_cols logic is fine
+         logger.error("'combined_sharpness' column not found after merge. This indicates a merge logic issue.")
+         merged_df['combined_sharpness'] = np.nan
+    
+    nan_sharpness_count = merged_df['combined_sharpness'].isnull().sum()
+    if nan_sharpness_count > 0:
+        logger.warning(f"{nan_sharpness_count}/{len(merged_df)} ML candidates could not be matched with 'combined_sharpness' from Stage 2 data.")
+    
+    logger.info(f"Merge complete. ML candidates DataFrame now has {len(merged_df)} rows.")
+    return merged_df
+
+def _apply_temporal_spatial_deduplication(
+    candidates_df: pd.DataFrame,
+    dedup_config: Dict[str, Any]
+) -> pd.DataFrame:
+    if not dedup_config.get('enabled', False) or candidates_df.empty:
+        logger.info("Deduplication filter is disabled or no candidates to filter.")
+        return candidates_df
+    
+    logger.info("Applying temporal-spatial deduplication filter...")
+    required_cols = ['parsed_frame', 'parsed_X', 'parsed_Y', 'combined_sharpness']
+    if not all(k in candidates_df.columns for k in required_cols):
+        missing = [k for k in required_cols if k not in candidates_df.columns]
+        logger.error(f"Missing required columns for deduplication: {missing}. Skipping filter.")
+        return candidates_df
+
+    prox_thresh_sq = dedup_config.get('proximity_threshold_pixels', 100)**2
+    max_frame_diff = dedup_config.get('max_adjacent_frame_difference', 2)
+
+    df = candidates_df.sort_values(by=['parsed_frame', 'parsed_Y', 'parsed_X']).copy()
+    # Use original DataFrame index as unique_id if 'unique_id' column doesn't exist or re-create it
+    df['unique_id'] = range(len(df))
+
+
+    visited_ids = set()
+    final_indices_to_keep = []
+
+    for i in range(len(df)):
+        current_original_index = df.index[i] # Get original index from candidates_df
+        if df.loc[current_original_index, 'unique_id'] in visited_ids:
+            continue
+
+        current_group_indices = [current_original_index]
+        visited_ids.add(df.loc[current_original_index, 'unique_id'])
+        
+        queue = [current_original_index]
+        head = 0
+        while head < len(queue):
+            current_q_idx = queue[head] # This is an original index
+            head += 1
+            
+            p_current_frame = df.loc[current_q_idx, 'parsed_frame']
+            p_current_X = df.loc[current_q_idx, 'parsed_X']
+            p_current_Y = df.loc[current_q_idx, 'parsed_Y']
+
+            min_search_frame = p_current_frame - max_frame_diff
+            max_search_frame = p_current_frame + max_frame_diff
+            
+            # Search in the original sorted df but exclude already visited
+            # Iterating over df.iterrows() is slow, better to use boolean indexing on df
+            potential_matches_mask = (
+                (df['parsed_frame'] >= min_search_frame) &
+                (df['parsed_frame'] <= max_search_frame) &
+                (~df['unique_id'].isin(visited_ids))
+            )
+            
+            for k_original_idx in df.index[potential_matches_mask]:
+                p_k_frame = df.loc[k_original_idx, 'parsed_frame']
+                p_k_X = df.loc[k_original_idx, 'parsed_X']
+                p_k_Y = df.loc[k_original_idx, 'parsed_Y']
+                
+                frame_diff_abs = abs(p_k_frame - p_current_frame)
+                
+                if frame_diff_abs <= max_frame_diff:
+                    dist_sq = (p_k_X - p_current_X)**2 + (p_k_Y - p_current_Y)**2
+                    if dist_sq < prox_thresh_sq:
+                        current_group_indices.append(k_original_idx)
+                        visited_ids.add(df.loc[k_original_idx, 'unique_id'])
+                        queue.append(k_original_idx)
+        
+        if current_group_indices:
+            group_sub_df = df.loc[current_group_indices]
+            best_in_group_original_idx = group_sub_df['combined_sharpness'].fillna(float('-inf')).idxmax()
+            final_indices_to_keep.append(best_in_group_original_idx)
+
+    num_before = len(candidates_df)
+    deduplicated_df = candidates_df.loc[final_indices_to_keep].reset_index(drop=True)
+    num_after = len(deduplicated_df)
+    logger.info(f"Deduplication complete. Kept {num_after} from {num_before} candidates.")
+    return deduplicated_df
+
+def _apply_boundary_recheck(
+    candidates_df: pd.DataFrame,
+    boundary_config: Dict[str, Any]
+) -> pd.DataFrame:
+    if not boundary_config.get('enabled', False) or candidates_df.empty:
+        logger.info("Boundary re-check filter is disabled or no candidates to filter.")
+        return candidates_df
+
+    logger.info("Applying boundary re-check filter...")
+    if 'image_path' not in candidates_df.columns:
+        logger.error("Missing 'image_path' column for boundary re-check. Skipping.")
+        return candidates_df
+
+    indices_to_keep = []
+    for index, row in candidates_df.iterrows():
+        image_path = row['image_path']
+        img_color = load_image(image_path, mode='color')
+        if img_color is None:
+            logger.warning(f"Could not load image {image_path} for boundary check. Excluding it.")
+            continue
+        
+        img_gray = convert_to_grayscale(img_color)
+        if img_gray is None:
+            logger.warning(f"Could not convert image {image_path} to grayscale for boundary check. Excluding it.")
+            continue
+
+        is_on_boundary = detect_cropped_particle_on_boundary(img_gray, image_path)
+        if not is_on_boundary:
+            indices_to_keep.append(index)
+        else:
+            logger.debug(f"Particle in {os.path.basename(image_path)} detected on boundary during re-check. Removing.")
+            
+    num_before = len(candidates_df)
+    boundary_filtered_df = candidates_df.loc[indices_to_keep].reset_index(drop=True)
+    num_after = len(boundary_filtered_df)
+    logger.info(f"Boundary re-check complete. Kept {num_after} from {num_before} candidates.")
+    return boundary_filtered_df
+
+def _save_final_s3_outputs(
+    final_df: pd.DataFrame,
+    output_classified_dir: str,
+    sample_id: str,
+    ml_feature_params: Dict[str, Any],
+    feature_names_for_csv: List[str]
+) -> Optional[str]:
+    if final_df.empty:
+        logger.info("No ideal FEMs were accepted after all filters. No final outputs saved.")
+        output_csv_filename = f"{sample_id}_stage3_accepted_fem_features.csv"
+        cols_for_empty_df = ['filename', 'predicted_label'] + feature_names_for_csv
+        if 'combined_sharpness' in final_df.columns: # Check if it might have been there
+             cols_for_empty_df.append('combined_sharpness')
+        else: # Add it if it wasn't but is expected
+             if 'combined_sharpness' not in cols_for_empty_df:
+                 cols_for_empty_df.append('combined_sharpness')
+        
+        empty_df = pd.DataFrame(columns=list(dict.fromkeys(cols_for_empty_df)))
+        return save_dataframe_to_csv(empty_df, output_classified_dir, output_csv_filename)
+
+    logger.info(f"Saving final {len(final_df)} accepted FEMs and their outputs...")
+
+    output_accepted_images_dir = os.path.join(output_classified_dir, "accepted_images")
+    output_visualizations_dir = os.path.join(output_classified_dir, "visualizations")
+    os.makedirs(output_accepted_images_dir, exist_ok=True)
+    os.makedirs(output_visualizations_dir, exist_ok=True)
+
+    for _, row in final_df.iterrows():
+        original_image_path = row['image_path']
+        filename = row['filename']
+        
+        try:
+            shutil.copy2(original_image_path, os.path.join(output_accepted_images_dir, filename))
+        except Exception as e:
+            logger.error(f"Failed to copy accepted image {filename}: {e}")
+
+        main_props = row.get('main_props')
+        egg_pair_props = row.get('egg_pair_props')
+        if main_props:
+            vis_filename = f"{os.path.splitext(filename)[0]}_vis.png"
+            vis_output_path = os.path.join(output_visualizations_dir, vis_filename)
+            try:
+                visualize_ml_features(original_image_path, main_props, egg_pair_props, vis_output_path, ml_feature_params=ml_feature_params)
+            except Exception as e:
+                logger.error(f"Failed to create visualization for {filename}: {e}")
+        else:
+            logger.warning(f"Skipping visualization for {filename} due to missing main_props.")
+
+    cols_for_csv = ['filename', 'predicted_label'] + feature_names_for_csv
+    if 'combined_sharpness' in final_df.columns:
+        cols_for_csv.append('combined_sharpness')
+    
+    cols_for_csv_existing = [col for col in cols_for_csv if col in final_df.columns]
+    
+    final_output_df = final_df[cols_for_csv_existing]
+
+    output_csv_filename = f"{sample_id}_stage3_accepted_fem_features.csv"
+    saved_csv_path = save_dataframe_to_csv(final_output_df, output_classified_dir, output_csv_filename)
+    logger.info(f"Final outputs saved. Accepted FEMs CSV: {saved_csv_path}")
+    return saved_csv_path
 
 def run_stage_03_ml_classification(
-    input_dir_or_csv_path: str, # Path to Stage 2 output dir (sharp_object_final_crops)
-                                # OR path to a CSV with list of images (not implemented yet)
+    input_dir_or_csv_path: str,
     output_dir_stage3: str,
     sample_id: str,
-    mode: str = "predict", # "train", "predict", "train_and_predict"
+    stage2_analyzed_csv_path: Optional[str] = None,
+    mode: str = "predict",
     force_model_retrain: bool = False
-    ) -> Optional[str]: # Path to the CSV of accepted FEM features
-    """
-    Main function for Stage 3: ML Classification.
-    Can train a model, predict ideal FEMs, or do both.
-    """
+    ) -> Optional[str]:
     logger.info(f"--- Stage 3: ML Classification for Sample ID: {sample_id} (Mode: {mode}) ---")
     
     config = get_config()
@@ -394,181 +579,98 @@ def run_stage_03_ml_classification(
 
     trained_model: Optional[RandomForestClassifier] = None
     fitted_scaler: Optional[StandardScaler] = None
-    feature_names: Optional[List[str]] = None # Store feature names learned/used
+    feature_names_for_model: Optional[List[str]] = None
 
-    # --- Training Phase ---
     if mode in ["train", "train_and_predict"]:
         logger.info(f"Starting model training (force_retrain={force_model_retrain})...")
-        trained_model, fitted_scaler, feature_names = train_ml_model(config_s3, force_model_retrain)
-        if not trained_model or not fitted_scaler or not feature_names:
-            logger.error("ML model training failed or did not complete successfully.")
-            if mode == "train": return None # If only training, signal failure
-            # If "train_and_predict", we might try to load an existing model as fallback if config allows.
-            # For now, if training fails in train_and_predict, prediction is also aborted.
-            raise MLModelError("Training failed, cannot proceed to prediction in 'train_and_predict' mode.")
+        trained_model, fitted_scaler, feature_names_for_model = train_ml_model(config_s3, force_model_retrain)
+        if not trained_model or not fitted_scaler or not feature_names_for_model:
+            logger.error("ML model training failed.")
+            if mode == "train": return None
+            raise MLModelError("Training failed, cannot proceed in 'train_and_predict' mode.")
         logger.info("Model training completed successfully.")
-        _learned_feature_names_during_training = feature_names # Update global for consistency if needed elsewhere
+        global _learned_feature_names_during_training
+        _learned_feature_names_during_training = feature_names_for_model
 
-    # --- Prediction Phase ---
     if mode in ["predict", "train_and_predict"]:
-        if not trained_model or not fitted_scaler: # Need to load if only predicting
-            logger.info("Loading existing model and scaler for prediction...")
+        if not trained_model or not fitted_scaler or not feature_names_for_model:
+            logger.info("Loading existing model, scaler, and feature names for prediction...")
             models_output_dir = get_models_dir()
-            model_path = os.path.join(models_output_dir, config_s3.get('model_filename', 'rf_fem_classifier.joblib'))
-            scaler_path = os.path.join(models_output_dir, config_s3.get('scaler_filename', 'rf_fem_scaler.joblib'))
+            model_filename = config_s3.get('model_filename', 'rf_fem_classifier.joblib')
+            scaler_filename = config_s3.get('scaler_filename', 'rf_fem_scaler.joblib')
+            model_path = os.path.join(models_output_dir, model_filename)
+            scaler_path = os.path.join(models_output_dir, scaler_filename)
             feature_names_path = model_path.replace(".joblib", "_feature_names.txt")
 
-            if not os.path.exists(model_path) or not os.path.exists(scaler_path) or not os.path.exists(feature_names_path):
-                logger.error(f"Model ('{model_path}'), scaler ('{scaler_path}'), or feature names ('{feature_names_path}') "
-                             "not found for prediction. Train the model first or ensure files exist.")
-                raise MLModelError("Required model/scaler/feature_names files not found for prediction.")
+            if not all(os.path.exists(p) for p in [model_path, scaler_path, feature_names_path]):
+                msg = f"Model ('{model_path}'), scaler ('{scaler_path}'), or feature names ('{feature_names_path}') not found. Train model first."
+                logger.error(msg)
+                raise MLModelError(msg)
             try:
                 trained_model = joblib.load(model_path)
                 fitted_scaler = joblib.load(scaler_path)
                 with open(feature_names_path, "r") as f:
-                    feature_names = [line.strip() for line in f if line.strip()]
-                logger.info("Existing model, scaler, and feature names loaded successfully.")
-                if not feature_names:
-                     raise MLModelError("Loaded feature names file is empty.")
+                    feature_names_for_model = [line.strip() for line in f if line.strip()]
+                if not feature_names_for_model: raise MLModelError("Loaded feature names file is empty.")
+                logger.info("Existing model, scaler, and feature names loaded.")
             except Exception as e:
-                logger.exception(f"Error loading model/scaler/feature_names for prediction: {e}")
+                logger.exception(f"Error loading model/scaler/feature_names: {e}")
                 raise MLModelError(f"Failed to load model/scaler/feature_names: {e}")
 
-        if not feature_names:
-            logger.error("Feature names for prediction are not available. Cannot proceed.")
-            raise MLModelError("Feature names required for prediction are missing.")
+        if not feature_names_for_model:
+            raise MLModelError("Feature names for model prediction are unavailable.")
 
-        # input_dir_or_csv_path for prediction should be the directory containing sharp object images
-        # e.g., .../output/{sample_id}/stage2_output/sharp_object_final_crops/
-        sharp_objects_image_dir = input_dir_or_csv_path 
+        sharp_objects_image_dir = input_dir_or_csv_path
         
-        # Output for Stage 3 classification results
-        stage3_sample_output_dir = os.path.join(output_dir_stage3, "ideal_fems_ML_classified")
-        if os.path.exists(stage3_sample_output_dir): # Clean previous results for this sample's S3 output
-            logger.warning(f"Removing existing Stage 3 output directory: {stage3_sample_output_dir}")
-            shutil.rmtree(stage3_sample_output_dir)
-        os.makedirs(stage3_sample_output_dir, exist_ok=True)
-
-        accepted_fems_df = predict_ideal_fems(
+        ml_candidates_df = _predict_ml_candidates(
             input_sharp_objects_dir=sharp_objects_image_dir,
             model=trained_model,
             scaler=fitted_scaler,
-            feature_names_for_prediction=feature_names,
+            feature_names_for_prediction=feature_names_for_model,
             config_s3=config_s3,
-            output_classified_dir=stage3_sample_output_dir, # Base for "accepted_images" and "visualizations"
             sample_id=sample_id
         )
+        
+        stage3_final_output_dir = os.path.join(output_dir_stage3, "ideal_fems_ML_classified")
+        os.makedirs(stage3_final_output_dir, exist_ok=True) # Ensure dir exists before saving empty CSV if needed
 
-        if accepted_fems_df is not None and not accepted_fems_df.empty:
-            output_csv_filename = f"{sample_id}_stage3_accepted_fem_features.csv"
-            saved_csv_path = save_dataframe_to_csv(accepted_fems_df, stage3_sample_output_dir, output_csv_filename)
-            logger.info(f"--- Stage 3: ML Classification for Sample ID: {sample_id} COMPLETED ---")
-            return saved_csv_path
-        elif accepted_fems_df is not None and accepted_fems_df.empty:
-            logger.info("No ideal FEMs were accepted during prediction. No features CSV saved.")
-            logger.info(f"--- Stage 3: ML Classification for Sample ID: {sample_id} COMPLETED (no accepted FEMs) ---")
-            return os.path.join(stage3_sample_output_dir, f"{sample_id}_stage3_accepted_fem_features.csv") # Path to (empty) csv
-        else: # accepted_fems_df is None
-            logger.error("Prediction of ideal FEMs failed.")
-            logger.info(f"--- Stage 3: ML Classification for Sample ID: {sample_id} FAILED ---")
-            return None
-            
-    elif mode == "train": # Only training was requested and completed
-        logger.info(f"--- Stage 3: ML Model Training for Sample ID: {sample_id} COMPLETED (no prediction run) ---")
-        return os.path.join(get_models_dir(), config_s3.get('model_filename', 'rf_fem_classifier.joblib')) # Return path to model
+        if ml_candidates_df.empty:
+            logger.info("No ML positive candidates found or prediction failed. No further filtering or output.")
+            ml_feature_extraction_params = config_s3.get('feature_extraction_params', {})
+            return _save_final_s3_outputs(pd.DataFrame(), stage3_final_output_dir, sample_id, ml_feature_extraction_params, feature_names_for_model or [])
+
+
+        post_ml_filter_configs = config_s3.get('post_ml_filters', {})
+        
+        df_with_sharpness = _merge_with_stage2_data(ml_candidates_df, stage2_analyzed_csv_path, sample_id)
+        # If merge failed and df_with_sharpness['combined_sharpness'] is all NaN, deduplication won't work correctly based on sharpness
+        if df_with_sharpness['combined_sharpness'].isnull().all() and post_ml_filter_configs.get('deduplication',{}).get('enabled',False):
+            logger.warning("Deduplication relies on 'combined_sharpness', which is missing or all NaN. Deduplication may not be effective or may error.")
+
+
+        dedup_config = post_ml_filter_configs.get('deduplication', {'enabled': False})
+        df_after_dedup = _apply_temporal_spatial_deduplication(df_with_sharpness, dedup_config)
+
+        boundary_config = post_ml_filter_configs.get('boundary_recheck', {'enabled': False})
+        final_filtered_df = _apply_boundary_recheck(df_after_dedup, boundary_config)
+        
+        if os.path.exists(stage3_final_output_dir) and os.listdir(stage3_final_output_dir):
+            logger.warning(f"Clearing existing content from Stage 3 output directory: {stage3_final_output_dir}")
+            for item in os.listdir(stage3_final_output_dir):
+                item_path = os.path.join(stage3_final_output_dir, item)
+                if os.path.isdir(item_path): shutil.rmtree(item_path)
+                else: os.remove(item_path)
+        
+        ml_feature_extraction_params = config_s3.get('feature_extraction_params', {})
+        saved_csv_path = _save_final_s3_outputs(final_filtered_df, stage3_final_output_dir, sample_id, ml_feature_extraction_params, feature_names_for_model)
+        
+        logger.info(f"--- Stage 3: ML Classification for Sample ID: {sample_id} COMPLETED ---")
+        return saved_csv_path
+
+    elif mode == "train":
+        logger.info(f"--- Stage 3: ML Model Training for Sample ID: {sample_id} COMPLETED (no prediction) ---")
+        model_filename = config_s3.get('model_filename', 'rf_fem_classifier.joblib')
+        return os.path.join(get_models_dir(), model_filename)
     
-    return None # Should not be reached if mode is valid
-
-
-if __name__ == '__main__':
-    from src.utils.logging_setup import setup_logging
-    setup_logging()
-
-    try:
-        cfg_main = get_config()
-        TEST_SAMPLE_ID_S3 = "test_sample_s3_classify" # Assumes this sample exists for input/output
-        
-        base_project_dir = cfg_main.get('project_base_dir')
-        if not base_project_dir:
-            raise ValueError("project_base_dir not set in config for testing.")
-
-        # --- Test Parameters ---
-        # MODE: "train", "predict", "train_and_predict"
-        # For a full test:
-        # 1. Run with mode="train" (ensure training_data/good, training_data/bad exist with dummy images)
-        # 2. Run with mode="predict" (ensure Stage 2 output exists with sharp crops for TEST_SAMPLE_ID_S3)
-        # 3. Run with mode="train_and_predict"
-        
-        TEST_MODE = "train_and_predict" # Change as needed
-        FORCE_RETRAIN_TEST = True # Set to True to always retrain during test
-
-        # Path to Stage 2 output (sharp crops) - input for prediction
-        # This must point to the output of Stage 2 for the sample being processed.
-        stage2_output_dir_for_s3_input = os.path.join(base_project_dir, "data", "output", TEST_SAMPLE_ID_S3, "stage2_output", "sharp_object_final_crops")
-        
-        # Output directory for Stage 3 results
-        stage3_output_dir_for_sample = os.path.join(base_project_dir, "data", "output", TEST_SAMPLE_ID_S3, "stage3_output")
-        # os.makedirs(stage3_output_dir_for_sample, exist_ok=True) # run_stage_03 will create subdirs
-
-        logger.info(f"Test Mode: {TEST_MODE}")
-        logger.info(f"Test S2 Input Dir for S3 predict: {stage2_output_dir_for_s3_input}")
-        logger.info(f"Test S3 Output Base Dir: {stage3_output_dir_for_sample}")
-
-        # Ensure dummy training data for "train" or "train_and_predict" modes
-        if TEST_MODE in ["train", "train_and_predict"]:
-            s3_cfg = cfg_main.get('stage_03_ml_classification', {})
-            train_params_cfg = s3_cfg.get('training_params', {})
-            good_subdir = os.path.join(get_training_data_dir(), train_params_cfg.get('good_data_subdir', 'good'))
-            bad_subdir = os.path.join(get_training_data_dir(), train_params_cfg.get('bad_data_subdir', 'bad'))
-            os.makedirs(good_subdir, exist_ok=True)
-            os.makedirs(bad_subdir, exist_ok=True)
-            if not os.listdir(good_subdir) or not os.listdir(bad_subdir):
-                logger.warning(f"Dummy training data dirs '{good_subdir}' or '{bad_subdir}' are empty. "
-                               "Please add a few dummy .png images for training test.")
-                # Create 2-3 dummy images in each if empty
-                for i in range(3):
-                    if not os.path.exists(os.path.join(good_subdir,f"good_img_{i}.png")):
-                        cv2.imwrite(os.path.join(good_subdir,f"good_img_{i}.png"), np.random.randint(100,250,(50,50), dtype=np.uint8))
-                    if not os.path.exists(os.path.join(bad_subdir,f"bad_img_{i}.png")):
-                         cv2.imwrite(os.path.join(bad_subdir,f"bad_img_{i}.png"), np.random.randint(0,100,(50,50), dtype=np.uint8))
-
-
-        # Ensure dummy "sharp_objects" for "predict" or "train_and_predict" modes
-        if TEST_MODE in ["predict", "train_and_predict"]:
-            os.makedirs(stage2_output_dir_for_s3_input, exist_ok=True)
-            if not os.listdir(stage2_output_dir_for_s3_input):
-                logger.warning(f"Sharp objects input dir '{stage2_output_dir_for_s3_input}' is empty. "
-                               "Prediction test might not find images.")
-                # Create a few dummy sharp object images
-                for i in range(5):
-                    fname = f"dummy_sharp_obj_{i}.png"
-                    fpath = os.path.join(stage2_output_dir_for_s3_input, fname)
-                    if not os.path.exists(fpath):
-                        cv2.imwrite(fpath, np.random.randint(0,255, (150,150,3), dtype=np.uint8))
-
-
-        # Run Stage 3
-        result_s3_path = run_stage_03_ml_classification(
-            input_dir_or_csv_path=stage2_output_dir_for_s3_input, # Used for 'predict' mode
-            output_dir_stage3=stage3_output_dir_for_sample, # Base for S3 specific outputs
-            sample_id=TEST_SAMPLE_ID_S3,
-            mode=TEST_MODE,
-            force_model_retrain=FORCE_RETRAIN_TEST
-        )
-
-        if result_s3_path:
-            logger.info(f"Stage 3 test (mode: {TEST_MODE}) completed. Result/Indicator path: {result_s3_path}")
-            if TEST_MODE != "train" and os.path.exists(result_s3_path): # If predict mode, check CSV
-                df_res_s3 = pd.read_csv(result_s3_path)
-                logger.info(f"Accepted FEMs features (head):\n{df_res_s3.head()}")
-        else:
-            logger.error(f"Stage 3 test (mode: {TEST_MODE}) FAILED or produced no output.")
-
-    except ConfigError as ce:
-        logger.error(f"Configuration error during Stage 3 test: {ce}")
-    except MLModelError as mle:
-        logger.error(f"ML Model error during Stage 3 test: {mle}")
-    except FileNotFoundError as fnfe:
-        logger.error(f"File not found during Stage 3 test setup: {fnfe}")
-    except Exception as e:
-        logger.exception(f"An unexpected error occurred during the Stage 3 test: {e}")
+    logger.error(f"Invalid mode '{mode}' for Stage 3.")
+    return None
