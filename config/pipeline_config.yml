@@ -85,20 +85,22 @@ stage_03_ml_classification:
   # Feature extraction parameters
   feature_extraction_params:
     gaussian_sigma: 1.0
-    otsu_threshold_multiplier: 0.5
+    otsu_threshold_multiplier: 0.4
     closing_selem_size: 3
     min_noise_size: 50
     min_significant_area: 300
-    egg_threshold_quantile: 0.92
-    egg_opening_selem_size: 0 # Set to >0 like 2 or 3 to enable opening
-    egg_pair_min_area: 200
-    egg_pair_max_area: 10000
-    egg_pair_min_solidity: 0.70
-    egg_pair_max_solidity: 0.98
-    egg_pair_min_eccentricity: 0.3
-    max_egg_distance_factor: 0.90
-    posterior_projection_threshold: -0.1 # For egg pair relative to main body axis
-    orientation_diff_tolerance_deg: 50 # For egg pair relative to main body axis
+    # Egg area detection parameters
+    # egg_posterior_pixel_fraction: Fraction of the main body's *pixels* (ordered along its major axis)
+    # considered "posterior" for the purpose of constraining the egg search area.
+    # E.g., 0.45 means the 45% most posterior pixels of the main body.
+    egg_posterior_pixel_fraction: 0.45 
+    egg_threshold_quantile: 0.92 # For segmenting egg area from blurred image
+    egg_min_area: 50             # Min area for the detected total egg region
+    egg_max_area: 5000           # Max area for the detected total egg region
+    egg_min_solidity: 0.60       # Min solidity for the detected total egg region
+    egg_max_solidity: 0.99       # Max solidity for the detected total egg region
+    egg_min_eccentricity: 0.2    # Min eccentricity for the detected total egg region
+    orientation_diff_tolerance_deg: 85 # For egg area orientation relative to main body axis (e.g., 75 degrees means 90-75=15 degrees tolerance)
   # Training parameters for RandomForest
   training_params:
     good_data_subdir: "good" # Relative to data/training_data/

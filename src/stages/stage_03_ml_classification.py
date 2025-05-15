@@ -59,18 +59,26 @@ def _load_and_extract_features_for_training(
     for i, filename in enumerate(filenames):
         count_processed += 1
         image_path = os.path.join(image_directory, filename)
+        # The third returned item from extract_ml_features is now egg_area_props_obj (was egg_pair_props)
         features_dict, _, _ = extract_ml_features(image_path, ml_params_config)
 
         if features_dict:
             if _learned_feature_names_during_training is None:
+                # Use the keys from the first successful feature extraction as the definitive list
                 _learned_feature_names_during_training = list(features_dict.keys())
-                current_keys = set(_learned_feature_names_during_training)
-                default_set = set(DEFAULT_FEATURE_NAMES)
-                if not default_set.issubset(current_keys):
-                    logger.warning(f"Extracted features {current_keys} do not fully cover default expected features {default_set}.")
-                logger.info(f"Determined feature names from first successful extraction: {_learned_feature_names_during_training}")
+                # Log comparison with DEFAULT_FEATURE_NAMES for sanity check
+                current_keys_set = set(_learned_feature_names_during_training)
+                default_set = set(DEFAULT_FEATURE_NAMES) # DEFAULT_FEATURE_NAMES should be updated
+                if current_keys_set != default_set: # Check for exact match now that DEFAULT is updated
+                    logger.warning(f"Dynamically learned feature names {current_keys_set} "
+                                   f"differ from new DEFAULT_FEATURE_NAMES {default_set}. "
+                                   f"Using dynamically learned names: {_learned_feature_names_during_training}")
+                else:
+                    logger.info(f"Determined feature names from first successful extraction: {_learned_feature_names_during_training}")
+
 
             try:
+                # Ensure all features expected (from the first extraction) are present
                 ordered_feature_values = [features_dict[name] for name in _learned_feature_names_during_training]
                 features_list.append(ordered_feature_values)
                 labels_list.append(label)
@@ -125,16 +133,20 @@ def train_ml_model(
     good_dir = os.path.join(base_training_data_dir, training_params.get('good_data_subdir', 'good'))
     bad_dir = os.path.join(base_training_data_dir, training_params.get('bad_data_subdir', 'bad'))
 
-    features_good, labels_good, _ = _load_and_extract_features_for_training(
+    features_good, labels_good, learned_names_good = _load_and_extract_features_for_training(
         good_dir, 1, ml_feature_extraction_params, image_exts
     )
-    features_bad, labels_bad, _ = _load_and_extract_features_for_training(
+    # _learned_feature_names_during_training should be set by the first call if successful
+    features_bad, labels_bad, learned_names_bad = _load_and_extract_features_for_training(
         bad_dir, 0, ml_feature_extraction_params, image_exts
     )
     
     if _learned_feature_names_during_training is None: 
-        logger.error("Feature names could not be determined from training data. Training aborted.")
-        return None, None, None
+        if learned_names_good: _learned_feature_names_during_training = learned_names_good
+        elif learned_names_bad: _learned_feature_names_during_training = learned_names_bad
+        else:
+            logger.error("Feature names could not be determined from training data. Training aborted.")
+            return None, None, None # Return None for feature names as well
     
     all_features_X = np.array(features_good + features_bad)
     all_labels_y = np.array(labels_good + labels_bad)
@@ -144,7 +156,7 @@ def train_ml_model(
         return None, None, _learned_feature_names_during_training
 
     logger.info(f"Total training samples: {len(all_labels_y)}. Number of features: {all_features_X.shape[1]}")
-    logger.info(f"Feature names: {_learned_feature_names_during_training}")
+    logger.info(f"Feature names used for training: {_learned_feature_names_during_training}")
     class_counts = np.bincount(all_labels_y)
     if len(class_counts) < 2: 
         logger.warning(f"Training data has only one class: {class_counts}. Stratify and some metrics might fail.")
@@ -232,7 +244,7 @@ def _predict_ml_candidates(
     scaler: StandardScaler,
     feature_names_for_prediction: List[str],
     config_s3: Dict[str, Any],
-    current_sample_id: str # Added to include in output DF
+    current_sample_id: str 
 ) -> pd.DataFrame:
     logger.info(f"--- Predicting ML Candidates for Sample: {current_sample_id} ---")
     logger.info(f"Input directory of sharp objects: {input_sharp_objects_dir}")
@@ -265,10 +277,17 @@ def _predict_ml_candidates(
         processed_count += 1
         image_path = os.path.join(input_sharp_objects_dir, filename)
         
-        features_dict, main_props, egg_pair_props = extract_ml_features(image_path, ml_feature_params)
+        features_dict, main_props, egg_area_props = extract_ml_features(image_path, ml_feature_params) # egg_area_props now
 
         if features_dict:
             try:
+                # Ensure all features expected by the model are present in features_dict
+                missing_model_features = [name for name in feature_names_for_prediction if name not in features_dict]
+                if missing_model_features:
+                    logger.error(f"Missing features {missing_model_features} for {filename} during prediction. Expected by model: {feature_names_for_prediction}. Got: {list(features_dict.keys())}")
+                    error_count +=1
+                    continue
+
                 current_image_features = [features_dict[name] for name in feature_names_for_prediction]
                 features_array = np.array(current_image_features).reshape(1, -1)
                 
@@ -281,16 +300,16 @@ def _predict_ml_candidates(
                 if prediction_label == 1:
                     ml_positive_count += 1
                     candidate_info = {
-                        'sample_id': current_sample_id, # Add sample_id here
+                        'sample_id': current_sample_id, 
                         'filename': filename,
                         'image_path': image_path,
                         'main_props': main_props,
-                        'egg_pair_props': egg_pair_props,
+                        'egg_area_props': egg_area_props, # Store egg_area_props
                         'predicted_label': int(prediction_label),
-                        **features_dict
+                        **features_dict 
                     }
                     candidate_data_list.append(candidate_info)
-            except KeyError as ke:
+            except KeyError as ke: # Should be caught by missing_model_features check, but as safeguard
                 logger.error(f"Feature mismatch for {filename} during prediction: {ke}.")
                 error_count += 1
             except NotFittedError as nfe:
@@ -317,7 +336,7 @@ def _predict_ml_candidates(
 def _merge_with_stage2_data(
     ml_candidates_df: pd.DataFrame,
     stage2_analyzed_csv_path: Optional[str],
-    sample_id: str # current_sample_id, used for logging
+    sample_id: str 
 ) -> pd.DataFrame:
     if ml_candidates_df.empty:
         return ml_candidates_df
@@ -339,16 +358,15 @@ def _merge_with_stage2_data(
     ml_candidates_df['parsed_X'] = pd.to_numeric(parsed_info.apply(lambda x: x[2] if x else None), errors='coerce').astype('Int64')
     ml_candidates_df['parsed_Y'] = pd.to_numeric(parsed_info.apply(lambda x: x[3] if x else None), errors='coerce').astype('Int64')
     
-    # Drop rows where key parsing failed, as they cannot be merged
     ml_candidates_df.dropna(subset=['parsed_frame', 'parsed_X', 'parsed_Y'], inplace=True)
     if ml_candidates_df.empty:
         logger.warning(f"No ML candidates remaining for sample {sample_id} after parsing filenames for merge keys.")
-        ml_candidates_df['combined_sharpness'] = np.nan # Ensure column exists even if empty
+        ml_candidates_df['combined_sharpness'] = np.nan 
         return ml_candidates_df
 
     s2_df['s2_parsed_frame'] = s2_df['source_image_filename'].apply(extract_frame_from_filename).astype('Int64')
     s2_df.dropna(subset=['s2_parsed_frame', 'X', 'Y'], inplace=True)
-    s2_df['X'] = s2_df['X'].astype('Int64') # Ensure types match for merge
+    s2_df['X'] = s2_df['X'].astype('Int64') 
     s2_df['Y'] = s2_df['Y'].astype('Int64')
     
     s2_merge_cols = ['X', 'Y', 's2_parsed_frame', 'combined_sharpness']
@@ -393,9 +411,7 @@ def _apply_temporal_spatial_deduplication(
         logger.error(f"Missing required columns for deduplication: {missing}. Skipping filter.")
         return candidates_df
 
-    # Ensure combined_sharpness is numeric, fillna for sorting/max
     candidates_df['combined_sharpness_filled'] = pd.to_numeric(candidates_df['combined_sharpness'], errors='coerce').fillna(float('-inf'))
-
 
     prox_thresh_sq = dedup_config.get('proximity_threshold_pixels', 100)**2
     max_frame_diff = dedup_config.get('max_adjacent_frame_difference', 2)
@@ -403,9 +419,8 @@ def _apply_temporal_spatial_deduplication(
     df = candidates_df.sort_values(by=['parsed_frame', 'parsed_Y', 'parsed_X']).copy()
     df['unique_id'] = range(len(df))
 
-
     visited_ids = set()
-    final_indices_to_keep = [] # Store original indices from candidates_df
+    final_indices_to_keep = [] 
 
     for i in range(len(df)):
         current_row_unique_id = df.iloc[i]['unique_id']
@@ -451,14 +466,12 @@ def _apply_temporal_spatial_deduplication(
                         queue.append(k_original_idx)
         
         if current_group_original_indices:
-            # Use combined_sharpness_filled for finding max
             group_sub_df = df.loc[current_group_original_indices]
             best_in_group_original_idx = group_sub_df['combined_sharpness_filled'].idxmax()
             final_indices_to_keep.append(best_in_group_original_idx)
 
     num_before = len(candidates_df)
     deduplicated_df = candidates_df.loc[final_indices_to_keep].reset_index(drop=True)
-    # Drop the temporary filled column
     if 'combined_sharpness_filled' in deduplicated_df.columns:
         deduplicated_df = deduplicated_df.drop(columns=['combined_sharpness_filled'])
     num_after = len(deduplicated_df)
@@ -506,27 +519,35 @@ def _apply_boundary_recheck(
 def _save_final_s3_outputs(
     final_df: pd.DataFrame,
     output_classified_dir: str,
-    current_sample_id: str, # Changed from sample_id to current_sample_id for clarity
+    current_sample_id: str, 
     ml_feature_params: Dict[str, Any],
-    feature_names_for_csv: List[str]
-) -> Tuple[Optional[str], pd.DataFrame]: # Return DataFrame as well
+    feature_names_for_csv: List[str] # These are the names learned by the model
+) -> Tuple[Optional[str], pd.DataFrame]: 
     
     output_csv_filename = f"{current_sample_id}_stage3_accepted_fem_features.csv"
-    # Define schema for empty DataFrame first
-    cols_for_empty_df = ['sample_id', 'filename', 'predicted_label'] + feature_names_for_csv
-    # Add combined_sharpness if it's expected (check a typical non-empty final_df or config)
-    if 'combined_sharpness' not in cols_for_empty_df:
-        cols_for_empty_df.append('combined_sharpness')
     
-    # Ensure columns from parsed_info are not in the empty schema unless explicitly added
-    parsed_cols_to_exclude = ['parsed_dpw_str', 'parsed_frame', 'parsed_X', 'parsed_Y', 'main_props', 'egg_pair_props', 'image_path']
-    cols_for_empty_df = [c for c in cols_for_empty_df if c not in parsed_cols_to_exclude]
+    # Define schema for DataFrame, ensuring all expected feature names are present
+    # Start with base columns and add all feature names used by the model
+    cols_for_df_schema = ['sample_id', 'filename', 'predicted_label'] + feature_names_for_csv
+    if 'combined_sharpness' not in cols_for_df_schema: # Add if not already in feature names
+        cols_for_df_schema.append('combined_sharpness')
     
-    empty_df_with_schema = pd.DataFrame(columns=list(dict.fromkeys(cols_for_empty_df)))
+    # Remove duplicates while preserving order, just in case
+    cols_for_df_schema = list(dict.fromkeys(cols_for_df_schema))
+
+    # Columns that might be in final_df but are not primary features for the CSV
+    # (like props objects, image_path, parsed fields)
+    aux_cols_to_exclude_from_csv = ['main_props', 'egg_area_props', 'image_path', 
+                                    'parsed_dpw_str', 'parsed_frame', 'parsed_X', 'parsed_Y']
+
+    # Actual columns to select for CSV: only those present in final_df from cols_for_df_schema
+    final_csv_columns = [col for col in cols_for_df_schema if col in final_df.columns]
 
 
     if final_df.empty:
         logger.info(f"No ideal FEMs were accepted for sample {current_sample_id} after all filters. No final outputs saved.")
+        # Create an empty DataFrame with the correct schema for saving
+        empty_df_with_schema = pd.DataFrame(columns=final_csv_columns)
         saved_path = save_dataframe_to_csv(empty_df_with_schema, output_classified_dir, output_csv_filename)
         return saved_path, empty_df_with_schema
 
@@ -547,42 +568,32 @@ def _save_final_s3_outputs(
             logger.error(f"Failed to copy accepted image {filename}: {e}")
 
         main_props = row.get('main_props')
-        egg_pair_props = row.get('egg_pair_props')
+        egg_area_props = row.get('egg_area_props') # Updated from egg_pair_props
         if main_props:
             vis_filename = f"{os.path.splitext(filename)[0]}_vis.png"
             vis_output_path = os.path.join(output_visualizations_dir, vis_filename)
             try:
-                visualize_ml_features(original_image_path, main_props, egg_pair_props, vis_output_path, ml_feature_params=ml_feature_params)
+                visualize_ml_features(original_image_path, main_props, egg_area_props, vis_output_path, ml_feature_params=ml_feature_params)
             except Exception as e:
                 logger.error(f"Failed to create visualization for {filename}: {e}")
         else:
             logger.warning(f"Skipping visualization for {filename} due to missing main_props.")
-
-    # Select columns for the final CSV output
-    cols_for_csv = ['sample_id', 'filename', 'predicted_label'] + feature_names_for_csv
-    if 'combined_sharpness' in final_df.columns: # Add if it exists from merge
-        if 'combined_sharpness' not in cols_for_csv:
-             cols_for_csv.append('combined_sharpness')
     
-    # Ensure only existing columns are selected to avoid KeyErrors
-    cols_for_csv_existing = [col for col in cols_for_csv if col in final_df.columns]
-    if not all(c in cols_for_csv_existing for c in ['sample_id', 'filename', 'predicted_label']):
-        logger.error(f"Critical columns missing for final S3 CSV output: Needs at least 'sample_id', 'filename', 'predicted_label'. Got {cols_for_csv_existing}")
-
-    final_output_df_for_csv = final_df[cols_for_csv_existing]
+    # Ensure all columns in final_csv_columns actually exist in final_df before selection
+    final_output_df_for_csv = final_df[final_csv_columns].copy()
 
     saved_csv_path = save_dataframe_to_csv(final_output_df_for_csv, output_classified_dir, output_csv_filename)
     logger.info(f"Final outputs for sample {current_sample_id} saved. Accepted FEMs CSV: {saved_csv_path}")
-    return saved_csv_path, final_output_df_for_csv # Return the saved DataFrame
+    return saved_csv_path, final_output_df_for_csv
 
 def run_stage_03_ml_classification(
-    input_dir_or_csv_path: str, # For prediction, this is sharp objects image dir
+    input_dir_or_csv_path: str, 
     output_dir_stage3: str,
-    sample_id: str, # This is the current_sample_id from the batch
+    sample_id: str, 
     stage2_analyzed_csv_path: Optional[str] = None,
-    mode: str = "predict", # "train", "predict", "train_and_predict"
+    mode: str = "predict", 
     force_model_retrain: bool = False
-    ) -> Tuple[Optional[str], Optional[pd.DataFrame]]: # Return (path_to_sample_csv, sample_df_results)
+    ) -> Tuple[Optional[str], Optional[pd.DataFrame]]: 
     
     logger.info(f"--- Stage 3: ML Classification for Sample ID: {sample_id} (Mode: {mode}) ---")
     
@@ -595,14 +606,12 @@ def run_stage_03_ml_classification(
     fitted_scaler: Optional[StandardScaler] = None
     feature_names_for_model: Optional[List[str]] = None
     
-    # Define default empty DataFrame to return in case of early exit or failure
-    # Schema based on what _save_final_s3_outputs would produce for an empty case
-    default_feature_names = config_s3.get('feature_extraction_params', {}).get('default_feature_names', DEFAULT_FEATURE_NAMES)
-    cols_for_empty_df = ['sample_id', 'filename', 'predicted_label'] + default_feature_names + ['combined_sharpness']
-    parsed_cols_to_exclude = ['parsed_dpw_str', 'parsed_frame', 'parsed_X', 'parsed_Y', 'main_props', 'egg_pair_props', 'image_path']
-    cols_for_empty_df = [c for c in cols_for_empty_df if c not in parsed_cols_to_exclude]
-
-    empty_return_df = pd.DataFrame(columns=list(dict.fromkeys(cols_for_empty_df)))
+    # Use the globally updated DEFAULT_FEATURE_NAMES for empty DF schema
+    # This list reflects the new feature set ('total_egg_area', 'egg_ecc', no 'num_eggs', 'avg_egg_area')
+    empty_df_cols = ['sample_id', 'filename', 'predicted_label'] + DEFAULT_FEATURE_NAMES + ['combined_sharpness']
+    # Remove duplicates and ensure 'combined_sharpness' is there once
+    empty_df_cols = list(dict.fromkeys(empty_df_cols)) 
+    empty_return_df = pd.DataFrame(columns=empty_df_cols)
 
 
     if mode in ["train", "train_and_predict"]:
@@ -613,11 +622,11 @@ def run_stage_03_ml_classification(
             if mode == "train": return None, empty_return_df
             raise MLModelError("Training failed, cannot proceed in 'train_and_predict' mode.")
         logger.info("Model training completed successfully.")
-        global _learned_feature_names_during_training
+        global _learned_feature_names_during_training # ensure this is updated
         _learned_feature_names_during_training = feature_names_for_model
 
     if mode in ["predict", "train_and_predict"]:
-        if not trained_model or not fitted_scaler or not feature_names_for_model: # Load if not just trained
+        if not trained_model or not fitted_scaler or not feature_names_for_model: 
             logger.info("Loading existing model, scaler, and feature names for prediction...")
             models_output_dir = get_models_dir()
             model_filename = config_s3.get('model_filename', 'rf_fem_classifier.joblib')
@@ -641,10 +650,18 @@ def run_stage_03_ml_classification(
                 logger.exception(f"Error loading model/scaler/feature_names: {e}")
                 raise MLModelError(f"Failed to load model/scaler/feature_names: {e}")
 
-        if not feature_names_for_model: # Should be set by now
-            raise MLModelError("Feature names for model prediction are unavailable.")
+        if not feature_names_for_model: 
+            # This should be set if training just occurred or loaded successfully
+            # If it's still None here, it means _learned_feature_names_during_training wasn't propagated
+            # or loading failed silently (though exceptions should have caught it).
+            # Fallback to DEFAULT_FEATURE_NAMES if absolutely necessary, but log a strong warning.
+            logger.warning("feature_names_for_model is still None. Attempting to use DEFAULT_FEATURE_NAMES. This might lead to errors if model was trained with different features.")
+            feature_names_for_model = DEFAULT_FEATURE_NAMES # DEFAULT_FEATURE_NAMES must be up-to-date.
+            if not feature_names_for_model: # Should not happen if DEFAULT_FEATURE_NAMES is defined
+                 raise MLModelError("Feature names for model prediction are critically unavailable.")
 
-        sharp_objects_image_dir = input_dir_or_csv_path # This is S2's sharp_object_final_crops dir
+
+        sharp_objects_image_dir = input_dir_or_csv_path 
         
         ml_candidates_df = _predict_ml_candidates(
             input_sharp_objects_dir=sharp_objects_image_dir,
@@ -652,7 +669,7 @@ def run_stage_03_ml_classification(
             scaler=fitted_scaler,
             feature_names_for_prediction=feature_names_for_model,
             config_s3=config_s3,
-            current_sample_id=sample_id # Pass current_sample_id
+            current_sample_id=sample_id 
         )
         
         stage3_final_output_dir = os.path.join(output_dir_stage3, "ideal_fems_ML_classified")
@@ -661,17 +678,17 @@ def run_stage_03_ml_classification(
         if ml_candidates_df.empty:
             logger.info(f"No ML positive candidates found or prediction failed for sample {sample_id}.")
             ml_feature_extraction_params = config_s3.get('feature_extraction_params', {})
-            # Ensure feature_names_for_model is not None for schema definition
-            fnames = feature_names_for_model if feature_names_for_model is not None else default_feature_names
-            saved_csv_path, df_to_return = _save_final_s3_outputs(pd.DataFrame(), stage3_final_output_dir, sample_id, ml_feature_extraction_params, fnames)
+            fnames_for_empty_save = feature_names_for_model if feature_names_for_model else DEFAULT_FEATURE_NAMES
+            saved_csv_path, df_to_return = _save_final_s3_outputs(pd.DataFrame(), stage3_final_output_dir, sample_id, ml_feature_extraction_params, fnames_for_empty_save)
             return saved_csv_path, df_to_return
 
 
         post_ml_filter_configs = config_s3.get('post_ml_filters', {})
         
         df_with_sharpness = _merge_with_stage2_data(ml_candidates_df, stage2_analyzed_csv_path, sample_id)
-        if df_with_sharpness['combined_sharpness'].isnull().all() and post_ml_filter_configs.get('deduplication',{}).get('enabled',False):
-            logger.warning(f"Deduplication relies on 'combined_sharpness', which is missing or all NaN for sample {sample_id}. Deduplication may not be effective.")
+        if 'combined_sharpness' not in df_with_sharpness.columns or df_with_sharpness['combined_sharpness'].isnull().all():
+            if post_ml_filter_configs.get('deduplication',{}).get('enabled',False):
+                 logger.warning(f"Deduplication relies on 'combined_sharpness', which is missing or all NaN for sample {sample_id}. Deduplication may not be effective.")
 
 
         dedup_config = post_ml_filter_configs.get('deduplication', {'enabled': False})
@@ -680,25 +697,18 @@ def run_stage_03_ml_classification(
         boundary_config = post_ml_filter_configs.get('boundary_recheck', {'enabled': False})
         final_filtered_df = _apply_boundary_recheck(df_after_dedup, boundary_config)
         
-        # Clear previous sample-specific outputs in this directory if any
-        # This is important for batch runs if the same output_dir_stage3 is reused conceptually
-        # (though run_pipeline.py should give unique output_dir_stage3 per sample within a batch output)
-        # For safety, if an individual sample is re-run, its specific classification outputs are cleared.
         if os.path.exists(stage3_final_output_dir):
             target_subdir_for_sample_output = os.path.join(output_dir_stage3, "ideal_fems_ML_classified")
-            if os.path.exists(target_subdir_for_sample_output) and os.listdir(target_subdir_for_sample_output): # Check if dir exists and is not empty
+            if os.path.exists(target_subdir_for_sample_output) and os.listdir(target_subdir_for_sample_output): 
                 logger.info(f"Clearing existing content from Stage 3 output subdir: {target_subdir_for_sample_output} for sample {sample_id}")
                 for item in os.listdir(target_subdir_for_sample_output):
                     item_path = os.path.join(target_subdir_for_sample_output, item)
-                    # Be careful here: only remove files/dirs related to *this* sample if common dir is used.
-                    # But run_pipeline will create distinct output_dir_stage3 for each sample.
-                    # So, safe to clear the contents of stage3_final_output_dir.
                     if os.path.isdir(item_path): shutil.rmtree(item_path)
                     else: os.remove(item_path)
         
         ml_feature_extraction_params = config_s3.get('feature_extraction_params', {})
-        fnames = feature_names_for_model if feature_names_for_model is not None else default_feature_names
-        saved_csv_path, df_to_return = _save_final_s3_outputs(final_filtered_df, stage3_final_output_dir, sample_id, ml_feature_extraction_params, fnames)
+        fnames_for_final_save = feature_names_for_model if feature_names_for_model else DEFAULT_FEATURE_NAMES
+        saved_csv_path, df_to_return = _save_final_s3_outputs(final_filtered_df, stage3_final_output_dir, sample_id, ml_feature_extraction_params, fnames_for_final_save)
         
         logger.info(f"--- Stage 3: ML Classification for Sample ID: {sample_id} COMPLETED ---")
         return saved_csv_path, df_to_return
@@ -706,6 +716,7 @@ def run_stage_03_ml_classification(
     elif mode == "train":
         logger.info(f"--- Stage 3: ML Model Training for Sample ID (context): {sample_id} COMPLETED (no prediction) ---")
         model_filename = config_s3.get('model_filename', 'rf_fem_classifier.joblib')
+        # Return path to model and the schema-correct empty DataFrame
         return os.path.join(get_models_dir(), model_filename), empty_return_df 
     
     logger.error(f"Invalid mode '{mode}' for Stage 3.")

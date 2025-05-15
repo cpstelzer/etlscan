@@ -2,27 +2,28 @@
 import skimage.io
 import skimage.color
 import skimage.util
+import skimage.measure # For find_contours
 import numpy as np
 import os
 import matplotlib.pyplot as plt
-from typing import Optional, Dict, Any # Any for skimage.measure._regionprops.RegionProperties
+import matplotlib.patches as patches 
+from typing import Optional, Dict, Any 
 import logging
 
 logger = logging.getLogger(__name__)
 
 def visualize_ml_features(
-    image_path_or_array: Any, # Can be path (str) or loaded image array (np.ndarray)
-    main_props: Optional[Any], # skimage.measure._regionprops.RegionProperties object
-    egg_pair_props: Optional[Any], # skimage.measure._regionprops.RegionProperties object
+    image_path_or_array: Any, 
+    main_props: Optional[Any], 
+    egg_area_props: Optional[Any], 
     output_visualization_path: str,
-    ml_feature_params: Optional[Dict[str, Any]] = None # For posterior_area_ratio re-calc if needed
+    ml_feature_params: Optional[Dict[str, Any]] = None # Used for egg_posterior_pixel_fraction
 ):
     """
-    Visualizes an image with overlays for the main detected body and potential egg pair.
+    Visualizes an image with overlays for the main detected body and potential egg area.
     Highlights the main body contour, its major axis, and the posterior end.
-    Overlays the contour for the detected egg pair region if present.
-    This version aligns axis drawing and posterior logic with skimage.measure.orientation
-    (angle from y-axis/row-axis, CCW).
+    Overlays the contour for the detected egg area if present.
+    Draws the contour of the posterior pixel area of the main body based on configuration.
     """
     try:
         if isinstance(image_path_or_array, str):
@@ -33,6 +34,8 @@ def visualize_ml_features(
             logger.error("Invalid image_path_or_array type for visualization. Must be str or np.ndarray.")
             return
 
+        img_shape_for_draw = image_orig.shape[:2] 
+
         image_float = skimage.util.img_as_float(image_orig)
         if image_float.ndim == 2: 
             image_rgb = skimage.color.gray2rgb(image_float)
@@ -40,12 +43,12 @@ def visualize_ml_features(
             image_rgb = skimage.color.rgba2rgb(image_float)
         elif image_float.ndim == 3 and image_float.shape[2] == 3: 
             image_rgb = image_float
-        else:
-            logger.warning(f"Unexpected image format for visualization. Shape: {image_float.shape}")
-            if image_float.ndim == 3 and image_float.shape[2] > 1:
+        else: 
+            logger.warning(f"Unexpected image format for visualization. Shape: {image_float.shape}. Trying first channel.")
+            if image_float.ndim == 3 and image_float.shape[2] > 0:
                  image_rgb = skimage.color.gray2rgb(image_float[:,:,0])
             else: 
-                 logger.error("Cannot convert image to RGB for visualization.")
+                 logger.error(f"Cannot convert image of shape {image_float.shape} to RGB for visualization.")
                  return
         
         fig, ax = plt.subplots(figsize=(6, 6))
@@ -56,9 +59,9 @@ def visualize_ml_features(
             ax.plot(main_props.coords[:, 1], main_props.coords[:, 0], 
                     linestyle='none', marker='.', markersize=1, color='cyan', alpha=0.5, label="Main Body")
 
-        if egg_pair_props and hasattr(egg_pair_props, 'coords'):
-            ax.plot(egg_pair_props.coords[:, 1], egg_pair_props.coords[:, 0], 
-                    linestyle='none', marker='.', markersize=1.2, color='magenta', alpha=0.6, label="Egg Pair")
+        if egg_area_props and hasattr(egg_area_props, 'coords'): 
+            ax.plot(egg_area_props.coords[:, 1], egg_area_props.coords[:, 0], 
+                    linestyle='none', marker='.', markersize=1.2, color='magenta', alpha=0.6, label="Egg Area")
 
         if main_props and \
            hasattr(main_props, 'centroid') and \
@@ -67,61 +70,89 @@ def visualize_ml_features(
            hasattr(main_props, 'coords') and \
            main_props.major_axis_length > 0:
             
-            y0_row, x0_col = main_props.centroid # (row, col)
-            # orientation_rad is angle from y-axis (row-axis), CCW, from skimage
+            y0_row, x0_col = main_props.centroid 
             orientation_rad = main_props.orientation 
-            major_axis_half = main_props.major_axis_length / 2.0
+            major_axis_len_val = main_props.major_axis_length
+            major_axis_half = major_axis_len_val / 2.0
 
-            # Consistent with original ws_identify_ideal_fems and skimage orientation:
-            # delta_row = L * cos(orientation_rad)
-            # delta_col = L * sin(orientation_rad)
-            d_row = major_axis_half * np.cos(orientation_rad)
-            d_col = major_axis_half * np.sin(orientation_rad)
+            axis_vector_rc_unit = np.array([np.cos(orientation_rad), np.sin(orientation_rad)]) 
+
+            p1_major_axis_r = y0_row + major_axis_half * axis_vector_rc_unit[0]
+            p1_major_axis_c = x0_col + major_axis_half * axis_vector_rc_unit[1]
+            p2_major_axis_r = y0_row - major_axis_half * axis_vector_rc_unit[0]
+            p2_major_axis_c = x0_col - major_axis_half * axis_vector_rc_unit[1]
             
-            # Endpoints in (row, col) image coordinates
-            y1_row, x1_col = y0_row + d_row, x0_col + d_col
-            y2_row, x2_col = y0_row - d_row, x0_col - d_col
-            
-            # ax.plot expects (x_coordinates, y_coordinates)
-            ax.plot((x1_col, x2_col), (y1_row, y2_row), '--y', linewidth=1.2, label="Major Axis")
+            ax.plot((p1_major_axis_c, p2_major_axis_c), (p1_major_axis_r, p2_major_axis_r), 
+                    '--y', linewidth=1.2, label="Major Axis")
 
-            # Determine posterior end for marker
-            # The axis_vector_rc should be a unit vector (d_row_unit, d_col_unit)
-            # consistent with the (d_row, d_col) calculated above.
-            axis_vector_rc = np.array([np.cos(orientation_rad), np.sin(orientation_rad)]) # (d_row_unit, d_col_unit)
-
-            posterior_area_ratio_for_viz = 0.5 # Default assumption
-            # Re-calculate posterior_area_ratio for visualization for consistency with feature extraction
+            posterior_area_ratio_for_viz = 0.5 
             if ml_feature_params and main_props.area > 0: 
-                coords = main_props.coords # Nx2 array (row, col)
-                centroid_arr = np.array(main_props.centroid) # (row, col)
-                relative_coords = coords - centroid_arr # Each row is (rel_row, rel_col)
-                
-                # Project relative_coords onto axis_vector_rc
-                projections = np.dot(relative_coords, axis_vector_rc) 
-                
-                posterior_pixels_count = np.sum(projections > 0) # Pixels on the "positive projection" side
+                coords = main_props.coords 
+                centroid_arr = np.array(main_props.centroid) 
+                relative_coords = coords - centroid_arr 
+                projections = np.dot(relative_coords, axis_vector_rc_unit) 
+                posterior_pixels_count = np.sum(projections > 0) 
                 if main_props.area > 0:
                     posterior_area_ratio_for_viz = posterior_pixels_count / main_props.area
             
             positive_projection_side_is_posterior = (posterior_area_ratio_for_viz >= 0.5)
             
-            # Determine which end of the drawn axis (y1_row,x1_col) or (y2_row,y2_col) is posterior
-            # (y1_row, x1_col) corresponds to +d_row, +d_col along axis_vector_rc
-            # (y2_row, x2_col) corresponds to -d_row, -d_col along axis_vector_rc
-            
-            if positive_projection_side_is_posterior:
-                post_x_marker, post_y_marker = x1_col, y1_row
-            else:
-                post_x_marker, post_y_marker = x2_col, y2_row
-            
-            ax.plot(post_x_marker, post_y_marker, 'oy', markersize=5, label="Posterior End")
+            post_end_r, post_end_c = (p1_major_axis_r, p1_major_axis_c) if positive_projection_side_is_posterior else (p2_major_axis_r, p2_major_axis_c)
+            ax.plot(post_end_c, post_end_r, 'oy', markersize=5, label="Posterior End")
 
+            _axis_vector_pointing_posterior_viz = axis_vector_rc_unit.copy()
+            if not positive_projection_side_is_posterior:
+                _axis_vector_pointing_posterior_viz = -_axis_vector_pointing_posterior_viz
+
+            if main_props.area > 0:
+                # Get posterior fraction from ml_feature_params (config)
+                # Default to 0.45 if not specified in params for visualization
+                egg_posterior_fraction_viz = 0.45 
+                if ml_feature_params and 'egg_posterior_pixel_fraction' in ml_feature_params:
+                    egg_posterior_fraction_viz = ml_feature_params.get('egg_posterior_pixel_fraction', 0.45)
+                
+                percentile_to_cut_viz = (1.0 - egg_posterior_fraction_viz) * 100.0
+
+                # Check if _posterior_coords_for_egg_search was attached (using the config fraction)
+                # For visualization, it's safer to recalculate using the viz-specific fraction if needed,
+                # or ensure ml_feature_params given to visualize_ml_features is the exact one used for extraction.
+                # Here, we recalculate to ensure visualization uses egg_posterior_fraction_viz.
+                
+                coords_main_body_viz = main_props.coords
+                centroid_main_body_viz = np.array(main_props.centroid)
+                relative_coords_for_slice_viz = coords_main_body_viz - centroid_main_body_viz
+                projections_for_slice_viz = np.dot(relative_coords_for_slice_viz, _axis_vector_pointing_posterior_viz)
+                
+                posterior_coords_viz = np.array([]) # Initialize
+                if len(projections_for_slice_viz) > 0:
+                    projection_threshold_val_viz = np.percentile(projections_for_slice_viz, percentile_to_cut_viz)
+                    posterior_indices_viz = projections_for_slice_viz > projection_threshold_val_viz
+                    posterior_coords_viz = coords_main_body_viz[posterior_indices_viz]
+                
+                if posterior_coords_viz.shape[0] > 0:
+                    temp_posterior_pixel_mask = np.zeros(img_shape_for_draw, dtype=np.uint8)
+                    valid_rows = np.clip(posterior_coords_viz[:, 0].astype(int), 0, img_shape_for_draw[0] - 1)
+                    valid_cols = np.clip(posterior_coords_viz[:, 1].astype(int), 0, img_shape_for_draw[1] - 1)
+                    temp_posterior_pixel_mask[valid_rows, valid_cols] = 255
+                        
+                    contours_posterior_area = skimage.measure.find_contours(temp_posterior_pixel_mask, 0.5) 
+                        
+                    for n, contour in enumerate(contours_posterior_area):
+                        label = f"Posterior {egg_posterior_fraction_viz*100:.0f}% Area" if n == 0 else None 
+                        ax.plot(contour[:, 1], contour[:, 0], color='lime', linestyle=':', linewidth=1.5, label=label)
+            
         title_str = os.path.basename(image_path_or_array) if isinstance(image_path_or_array, str) else "Processed Image"
         ax.set_title(title_str, fontsize=9)
         
-        if ax.get_legend_handles_labels()[0]: 
-            ax.legend(fontsize='x-small', loc='upper right')
+        handles, labels = ax.get_legend_handles_labels()
+        if handles: 
+            unique_labels = {}
+            unique_handles = []
+            for handle, label_text in zip(handles, labels):
+                if label_text not in unique_labels:
+                    unique_labels[label_text] = handle
+                    unique_handles.append(handle)
+            ax.legend(unique_handles, unique_labels.keys(), fontsize='x-small', loc='upper right')
 
         plt.tight_layout(pad=0.5)
         
@@ -148,62 +179,93 @@ if __name__ == '__main__':
 
     try:
         cfg = get_config() 
-        ml_params = cfg.get('stage_03_ml_classification', {}).get('feature_extraction_params', {})
-        if not ml_params: 
-            ml_params = {
+        # ml_feature_params will now be read by visualize_ml_features for egg_posterior_pixel_fraction
+        ml_params_for_extraction_and_viz = cfg.get('stage_03_ml_classification', {}).get('feature_extraction_params', {})
+        if not ml_params_for_extraction_and_viz or 'egg_posterior_pixel_fraction' not in ml_params_for_extraction_and_viz: 
+            logger.warning("ML feature extraction parameters (or egg_posterior_pixel_fraction) "
+                           "not found in config for test. Using hardcoded test params.")
+            ml_params_for_extraction_and_viz = {
                 'gaussian_sigma': 1.0, 'otsu_threshold_multiplier': 0.5, 'closing_selem_size': 3,
                 'min_noise_size': 50, 'min_significant_area': 100, 
-                'egg_threshold_quantile': 0.90, 'egg_opening_selem_size': 1,
-                'egg_pair_min_area': 50, 'egg_pair_max_area': 5000,
-                'egg_pair_min_solidity': 0.60, 'egg_pair_max_solidity': 0.99,
-                'egg_pair_min_eccentricity': 0.2, 'max_egg_distance_factor': 1.2,
-                'posterior_projection_threshold': -0.2, 'orientation_diff_tolerance_deg': 60
+                'egg_posterior_pixel_fraction': 0.45, # Example for testing
+                'egg_threshold_quantile': 0.90, 
+                'egg_min_area': 50, 'egg_max_area': 5000,
+                'egg_min_solidity': 0.60, 'egg_max_solidity': 0.99,
+                'egg_min_eccentricity': 0.2, 
+                'orientation_diff_tolerance_deg': 60
             }
     except Exception as e:
         print(f"Could not load config for test: {e}. Using hardcoded params.")
-        ml_params = {
-                'gaussian_sigma': 1.0, 'otsu_threshold_multiplier': 0.5, 'closing_selem_size': 3,
-                'min_noise_size': 50, 'min_significant_area': 100, 
-                'egg_threshold_quantile': 0.90, 'egg_opening_selem_size': 1,
-                'egg_pair_min_area': 50, 'egg_pair_max_area': 5000,
-                'egg_pair_min_solidity': 0.60, 'egg_pair_max_solidity': 0.99,
-                'egg_pair_min_eccentricity': 0.2, 'max_egg_distance_factor': 1.2,
-                'posterior_projection_threshold': -0.2, 'orientation_diff_tolerance_deg': 60
-            }
+        ml_params_for_extraction_and_viz = { 
+            'gaussian_sigma': 1.0, 'otsu_threshold_multiplier': 0.5, 'closing_selem_size': 3,
+            'min_noise_size': 50, 'min_significant_area': 100, 
+            'egg_posterior_pixel_fraction': 0.45, # Example for testing
+            'egg_threshold_quantile': 0.90,
+            'egg_min_area': 50, 'egg_max_area': 5000,
+            'egg_min_solidity': 0.60, 'egg_max_solidity': 0.99,
+            'egg_min_eccentricity': 0.2,
+            'orientation_diff_tolerance_deg': 60
+        }
 
-    test_vis_image = np.zeros((200, 200), dtype=np.uint8)
-    # Body rotated 0 degrees from Y-axis (vertical body)
-    rr_body_vert, cc_body_vert = skimage.draw.ellipse(100, 100, 40, 20, rotation=np.deg2rad(0)) 
-    test_vis_image_vert = test_vis_image.copy()
-    test_vis_image_vert[rr_body_vert, cc_body_vert] = 150
+    test_image_v = np.zeros((200, 200), dtype=np.uint8)
+    rr_body_v, cc_body_v = skimage.draw.ellipse(100, 100, 70, 25, rotation=np.deg2rad(10)) 
+    test_image_v[rr_body_v, cc_body_v] = 150
+    rr_heavy, cc_heavy = skimage.draw.ellipse(100 + int(70*0.6*np.cos(np.deg2rad(10))), 
+                                              100 + int(70*0.6*np.sin(np.deg2rad(10))), 
+                                              15,10, rotation=np.deg2rad(10))
+    test_image_v[rr_heavy, cc_heavy] = 160
     
-    # Body rotated 90 degrees from Y-axis (horizontal body)
-    rr_body_horiz, cc_body_horiz = skimage.draw.ellipse(100, 100, 40, 20, rotation=np.deg2rad(90))
-    test_vis_image_horiz = test_vis_image.copy()
-    test_vis_image_horiz[rr_body_horiz, cc_body_horiz] = 150
+    rr_egg_v, cc_egg_v = skimage.draw.ellipse(100 + int(70*0.5*np.cos(np.deg2rad(10))) , 
+                                              100 + int(70*0.5*np.sin(np.deg2rad(10))), 
+                                              15, 20, rotation=np.deg2rad(10+90))
+    test_image_v[rr_egg_v, cc_egg_v] = 220 
 
-    temp_image_file_vert = "temp_vis_test_image_vert.png"
-    skimage.io.imsave(temp_image_file_vert, skimage.util.img_as_ubyte(test_vis_image_vert))
-    temp_image_file_horiz = "temp_vis_test_image_horiz.png"
-    skimage.io.imsave(temp_image_file_horiz, skimage.util.img_as_ubyte(test_vis_image_horiz))
-
-    # Test vertical body (orientation should be ~0)
-    features_v, main_p_v, egg_p_v = extract_ml_features(
-        temp_image_file_vert, ml_params, image_array_gray=skimage.util.img_as_float(test_vis_image_vert)
+    temp_image_file_v = "temp_vis_test_image_pixel_slice_contour_config.png"
+    skimage.io.imsave(temp_image_file_v, skimage.util.img_as_ubyte(test_image_v))
+    
+    # Pass the same ml_params to extraction and visualization
+    features_v, main_p_v, egg_area_p_v = extract_ml_features(
+        temp_image_file_v, ml_params_for_extraction_and_viz, 
+        image_array_gray=skimage.util.img_as_float(test_image_v)
     )
-    if main_p_v: logger.info(f"Vertical body orientation: {np.rad2deg(main_p_v.orientation):.2f} degrees")
-    output_vis_file_v = "temp_output_visualization_vert.png"
-    visualize_ml_features(temp_image_file_vert, main_p_v, egg_p_v, output_vis_file_v, ml_feature_params=ml_params)
-    if os.path.exists(output_vis_file_v): logger.info(f"Vertical test visualization saved to {output_vis_file_v}")
+    if main_p_v: logger.info(f"Test body orientation: {np.rad2deg(main_p_v.orientation):.2f} degrees")
+    output_vis_file_v = "temp_output_visualization_pixel_slice_contour_config.png"
+    visualize_ml_features(temp_image_file_v, main_p_v, egg_area_p_v, output_vis_file_v, 
+                          ml_feature_params=ml_params_for_extraction_and_viz) # Pass params here
+    if os.path.exists(output_vis_file_v): 
+        logger.info(f"Test visualization with pixel slice (config fraction) contour saved to {output_vis_file_v}")
 
-    # Test horizontal body (orientation should be ~pi/2 or ~-pi/2)
-    features_h, main_p_h, egg_p_h = extract_ml_features(
-        temp_image_file_horiz, ml_params, image_array_gray=skimage.util.img_as_float(test_vis_image_horiz)
-    )
-    if main_p_h: logger.info(f"Horizontal body orientation: {np.rad2deg(main_p_h.orientation):.2f} degrees")
-    output_vis_file_h = "temp_output_visualization_horiz.png"
-    visualize_ml_features(temp_image_file_horiz, main_p_h, egg_p_h, output_vis_file_h, ml_feature_params=ml_params)
-    if os.path.exists(output_vis_file_h): logger.info(f"Horizontal test visualization saved to {output_vis_file_h}")
+    problem_image_filename = "problem_image_for_viz_test.png" 
+    logger.info(f"If '{problem_image_filename}' (your example image) exists in the current dir, it will be processed.")
+    if os.path.exists(problem_image_filename):
+        problem_img_array = skimage.io.imread(problem_image_filename, as_gray=True)
+        problem_img_array_float = skimage.util.img_as_float(problem_img_array)
 
-    if os.path.exists(temp_image_file_vert): os.remove(temp_image_file_vert)
-    if os.path.exists(temp_image_file_horiz): os.remove(temp_image_file_horiz)
+        logger.info(f"Processing your provided image: {problem_image_filename}")
+        features_prob, main_p_prob, egg_area_p_prob = extract_ml_features(
+            problem_image_filename, ml_params_for_extraction_and_viz, 
+            image_array_gray=problem_img_array_float
+        )
+        if features_prob and main_p_prob:
+            logger.info(f"Problem image - Main Orientation (deg): {np.rad2deg(main_p_prob.orientation)}")
+            logger.info(f"Problem image - Posterior Area Ratio: {features_prob['posterior_area_ratio']}")
+            logger.info(f"Problem image - Total Egg Area: {features_prob['total_egg_area']}")
+            if hasattr(main_p_prob, '_posterior_coords_for_egg_search'): 
+                 num_posterior_pixels = main_p_prob._posterior_coords_for_egg_search.shape[0]
+                 expected_frac_prob = ml_params_for_extraction_and_viz.get('egg_posterior_pixel_fraction',0.45)
+                 logger.info(f"Problem image - Num posterior {expected_frac_prob*100:.0f}% pixels: {num_posterior_pixels}")
+
+            output_vis_file_prob = "output_visualization_problem_image_pixel_slice_config.png"
+            visualize_ml_features(
+                problem_image_filename, 
+                main_p_prob, 
+                egg_area_p_prob, 
+                output_vis_file_prob, 
+                ml_feature_params=ml_params_for_extraction_and_viz # Pass params here
+            )
+            if os.path.exists(output_vis_file_prob): 
+                logger.info(f"Visualization for problem image (pixel slice config frac) saved to {output_vis_file_prob}")
+        else:
+            logger.error(f"Could not extract features from {problem_image_filename} for visualization test.")
+
+    if os.path.exists(temp_image_file_v): os.remove(temp_image_file_v)
