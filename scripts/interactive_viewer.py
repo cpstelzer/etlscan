@@ -84,39 +84,25 @@ class FeatureViewerApp:
         if self.update_job_id:
             self.master.after_cancel(self.update_job_id)
         
-        # 1. Destroy Matplotlib canvas Tk widgets
         if hasattr(self, 'canvas_raw') and self.canvas_raw:
             try:
                 self.canvas_raw.get_tk_widget().destroy()
-            except tk.TclError: # Widget might already be destroyed
-                pass
+            except tk.TclError: pass
         if hasattr(self, 'canvas_features') and self.canvas_features:
             try:
                 self.canvas_features.get_tk_widget().destroy()
-            except tk.TclError:
-                pass
+            except tk.TclError: pass
         
-        # 2. Close all Matplotlib figures
-        # This ensures figures created by visualize_ml_features are also handled if they somehow linger
         plt.close('all') 
             
-        # 3. Clean up other application-specific resources
         try:
             self.temp_dir.cleanup()
             logger.info("Temporary directory cleaned up.")
         except Exception as e:
             logger.error(f"Error cleaning up temporary directory: {e}")
 
-        # 4. Quit the Tkinter main loop and destroy the main window
-        # self.master.quit() # Stops the Tcl event loop
-        self.master.destroy() # Destroys the window and its children
+        self.master.destroy()
         logger.info("Application closed.")
-        # If the application still hangs after this, sys.exit() is a final resort.
-        # However, it's better if Tkinter and Matplotlib can clean up gracefully.
-        # Forcing exit can hide resource leak issues.
-        # If problems persist, uncomment the line below:
-        # sys.exit(0)
-
 
     def setup_gui(self):
         main_frame = ttk.Frame(self.master, padding="10")
@@ -203,73 +189,89 @@ class FeatureViewerApp:
         self.update_job_id = self.master.after(UPDATE_DEBOUNCE_MS, self.process_and_display_safe)
 
     def create_param_controls(self, parent_frame):
+        # Updated to match new config and ml_feature_extractor.py
         param_specs = {
             'gaussian_sigma': {'min': 0.1, 'max': 5.0, 'type': 'float'},
             'otsu_threshold_multiplier': {'min': 0.1, 'max': 2.0, 'type': 'float'},
             'closing_selem_size': {'min': 0, 'max': 10, 'type': 'int'},
             'min_noise_size': {'min': 1, 'max': 1000, 'type': 'int'},
             'min_significant_area': {'min': 10, 'max': 2000, 'type': 'int'},
-            'egg_threshold_quantile': {'min': 0.5, 'max': 1.0, 'type': 'float'},
-            'egg_opening_selem_size': {'min': 0, 'max': 10, 'type': 'int'},
-            'egg_pair_min_area': {'min': 10, 'max': 2000, 'type': 'int'},
-            'egg_pair_max_area': {'min': 500, 'max': 20000, 'type': 'int'},
-            'egg_pair_min_solidity': {'min': 0.0, 'max': 1.0, 'type': 'float'},
-            'egg_pair_max_solidity': {'min': 0.0, 'max': 1.0, 'type': 'float'},
-            'egg_pair_min_eccentricity': {'min': 0.0, 'max': 1.0, 'type': 'float'},
-            'max_egg_distance_factor': {'min': 0.1, 'max': 3.0, 'type': 'float'},
-            'posterior_projection_threshold': {'min': -1.0, 'max': 1.0, 'type': 'float'},
+            
+            # New parameter for egg search constraint
+            'egg_posterior_pixel_fraction': {'min': 0.05, 'max': 0.95, 'type': 'float', 'res': 0.01}, 
+            
+            'egg_threshold_quantile': {'min': 0.5, 'max': 1.0, 'type': 'float', 'res': 0.01},
+            
+            # Renamed egg parameters (formerly egg_pair_...)
+            'egg_min_area': {'min': 10, 'max': 5000, 'type': 'int'}, # Adjusted max based on config
+            'egg_max_area': {'min': 50, 'max': 20000, 'type': 'int'}, # Adjusted min based on config
+            'egg_min_solidity': {'min': 0.0, 'max': 1.0, 'type': 'float', 'res': 0.01},
+            'egg_max_solidity': {'min': 0.0, 'max': 1.0, 'type': 'float', 'res': 0.01},
+            'egg_min_eccentricity': {'min': 0.0, 'max': 1.0, 'type': 'float', 'res': 0.01},
+            
             'orientation_diff_tolerance_deg': {'min': 0, 'max': 90, 'type': 'int'}
+            # egg_opening_selem_size removed as it's not in the new config/feature_extractor
         }
 
-        sorted_params = sorted(self.default_params.items())
+        # Iterate over params from loaded config to ensure we only show sliders for what's in the config
+        # and has a spec here.
+        sorted_params_from_config = sorted(self.default_params.items())
 
-        for name, default_val_cfg in sorted_params:
+        for name, default_val_cfg in sorted_params_from_config:
             if name not in param_specs:
-                logger.warning(f"Parameter '{name}' from config has no spec for GUI. Skipping.")
+                logger.info(f"Parameter '{name}' from config has no defined spec for GUI control. Skipping.")
                 continue
 
             spec = param_specs[name]
             min_val, max_val, param_type = spec['min'], spec['max'], spec['type']
+            resolution = spec.get('res', 0.1 if param_type == 'float' else 1) # Default resolution
+
             container = ttk.Frame(parent_frame)
             container.pack(fill=tk.X, pady=2, padx=5)
+
             label_text = name.replace('_', ' ').title() + ":"
-            label = ttk.Label(container, text=label_text, width=28, anchor="w")
+            label = ttk.Label(container, text=label_text, width=30, anchor="w") # Increased width
             label.pack(side=tk.LEFT, padx=(0,5))
+
             current_val_for_var = self.current_params.get(name, default_val_cfg)
 
             if param_type == 'float':
                 var = tk.DoubleVar(value=float(current_val_for_var))
+                # For ttk.Scale, resolution is more about display than strict steps.
+                # The command for Int Scale helps enforce steps. For float, it's generally continuous.
                 slider = ttk.Scale(container, from_=min_val, to=max_val, variable=var, orient=tk.HORIZONTAL)
-                val_label_var = tk.StringVar(value=f"{var.get():.2f}")
-                var.trace_add("write", lambda n,i,m, sv=var, sl_var=val_label_var: (
-                    sl_var.set(f"{sv.get():.2f}"), self.schedule_update() ))
+                val_label_var = tk.StringVar(value=f"{var.get():.{max(2, str(resolution).split('.')[-1].__len__())}f}") # Dynamic precision
+                var.trace_add("write", lambda n,i,m, sv=var, sl_var=val_label_var, res=resolution: (
+                    sl_var.set(f"{sv.get():.{max(2, str(res).split('.')[-1].__len__())}f}"),
+                    self.schedule_update()
+                ))
             elif param_type == 'int':
                 var = tk.IntVar(value=int(current_val_for_var))
                 slider = ttk.Scale(container, from_=min_val, to=max_val, variable=var, orient=tk.HORIZONTAL,
-                                   command=lambda val, v=var: v.set(int(float(val))))
+                                   command=lambda val, v=var: v.set(int(float(val)))) # Ensure int values
                 val_label_var = tk.StringVar(value=f"{var.get():d}")
                 var.trace_add("write", lambda n,i,m, sv=var, sl_var=val_label_var: (
-                    sl_var.set(f"{sv.get():d}"), self.schedule_update() ))
+                    sl_var.set(f"{sv.get():d}"),
+                    self.schedule_update()
+                ))
 
             slider.pack(side=tk.LEFT, expand=True, fill=tk.X)
-            val_label = ttk.Label(container, textvariable=val_label_var, width=6, anchor="e")
+            val_label = ttk.Label(container, textvariable=val_label_var, width=7, anchor="e") # Increased width
             val_label.pack(side=tk.RIGHT, padx=(5,0))
             self.param_vars[name] = var
 
     def reset_parameters(self):
         logger.info("Resetting parameters to default values from config.")
-        # Temporarily disable scheduled updates during batch .set()
         if self.update_job_id:
             self.master.after_cancel(self.update_job_id)
             self.update_job_id = None
 
         for name, default_val in self.default_params.items():
             if name in self.param_vars:
-                # Directly set value without triggering individual trace; we'll schedule one update after all are set.
                 self.param_vars[name].set(default_val)
         
         self.status_label.config(text="Parameters reset to defaults. Updating...")
-        self.schedule_update() # Schedule a single update after all params are reset.
+        self.schedule_update()
 
     def load_image(self):
         path = filedialog.askopenfilename(
@@ -313,7 +315,7 @@ class FeatureViewerApp:
     def process_and_display_safe(self):
         if self.image_array_gray_float is None:
             self.status_label.config(text="Please load an image first.")
-            self.update_job_id = None # Clear job id if no image
+            self.update_job_id = None 
             return
 
         self.status_label.config(text=f"Processing {os.path.basename(self.image_path)}...")
@@ -331,20 +333,27 @@ class FeatureViewerApp:
     def process_and_display(self):
         params = self.collect_current_params()
         logger.debug(f"Processing with params: {params}")
-        features_dict, main_props, egg_pair_props = extract_ml_features(
+        
+        # Updated return variable name for egg properties
+        features_dict, main_props, egg_area_props_result = extract_ml_features(
             image_path=self.image_path, params=params, image_array_gray=self.image_array_gray_float )
 
         self.ax_features.clear()
-        if features_dict is None and main_props is None and egg_pair_props is None:
+        if features_dict is None and main_props is None and egg_area_props_result is None:
             logger.warning("Feature extraction returned no data.")
             self.ax_features.imshow(self.image_array_gray_float, cmap='gray')
             self.ax_features.set_title("Feature Extraction Failed or No Features Found")
         else:
             temp_vis_file_path = os.path.join(self.temp_dir.name, "temp_visualization.png")
+            
+            # Updated argument name for egg properties
             visualize_ml_features(
-                image_path_or_array=self.image_array_gray_float, main_props=main_props,
-                egg_pair_props=egg_pair_props, output_visualization_path=temp_vis_file_path,
-                ml_feature_params=params )
+                image_path_or_array=self.image_array_gray_float, 
+                main_props=main_props,
+                egg_area_props=egg_area_props_result, # Changed from egg_pair_props
+                output_visualization_path=temp_vis_file_path,
+                ml_feature_params=params 
+            )
 
             if os.path.exists(temp_vis_file_path):
                 try:
@@ -381,7 +390,7 @@ def main():
     root = tk.Tk()
     app = FeatureViewerApp(root)
     root.mainloop()
-    logger.info("Tkinter mainloop exited.") # Add this to see if mainloop actually finishes
+    logger.info("Tkinter mainloop exited.")
 
 if __name__ == '__main__':
     main()
