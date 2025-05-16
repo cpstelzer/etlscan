@@ -22,6 +22,7 @@ from src.utils.common_exceptions import ConfigError, ProcessingError, DataValida
 from src.stages.stage_01_initial_detection import run_stage_01_initial_detection
 from src.stages.stage_02_quality_filter import run_stage_02_quality_filter
 from src.stages.stage_03_ml_classification import run_stage_03_ml_classification
+from src.stages.stage_04_morphological_characterization import run_stage_04_morphological_characterization # Added Stage 4
 
 logger = logging.getLogger(__name__) 
 
@@ -44,7 +45,7 @@ def main():
         "--stages",
         type=str,
         default="all", 
-        help="Comma-separated list of stages to run (e.g., '1,2,3' or 'all'). "
+        help="Comma-separated list of stages to run (e.g., '1,2,3,4' or 'all'). " # Added 4
              "Use 'train_ml' to only train the ML model from Stage 3."
     )
     parser.add_argument(
@@ -63,7 +64,7 @@ def main():
         logger.info(f"Configuration loaded from: {args.config}")
         logger.info(f"Pipeline run initiated for Input Batch Directory: {args.input_batch_dir}")
         logger.info(f"Stages to run: {args.stages}")
-        if args.stages in ["all", "3"] or "3" in args.stages.split(',') or args.stages == "train_ml":
+        if args.stages in ["all", "3", "4"] or any(s in args.stages.split(',') for s in ["3", "4"]) or args.stages == "train_ml": # Check for 3 or 4
              logger.info(f"Force ML model retraining: {args.force_retrain_ml}")
 
     except FileNotFoundError as e:
@@ -83,9 +84,10 @@ def main():
     run_s2 = False
     run_s3_predict = False
     run_s3_train = False
+    run_s4 = False # Added Stage 4 flag
 
     if stages_to_run_str == "all":
-        run_s1, run_s2, run_s3_predict = True, True, True
+        run_s1, run_s2, run_s3_predict, run_s4 = True, True, True, True # Added S4
         if args.force_retrain_ml:
             run_s3_train = True
     elif stages_to_run_str == "train_ml":
@@ -98,9 +100,10 @@ def main():
             run_s3_predict = True
             if args.force_retrain_ml:
                  run_s3_train = True
+        if "4" in selected_stages: run_s4 = True # Added S4
     
     # Handle ML training mode first if specified
-    if run_s3_train and not run_s1 and not run_s2 and not run_s3_predict: # Only 'train_ml'
+    if run_s3_train and not run_s1 and not run_s2 and not run_s3_predict and not run_s4: # Only 'train_ml'
         logger.info(">>> Running in ML Training ONLY mode <<<")
         try:
             context_id_for_training = os.path.basename(os.path.normpath(args.input_batch_dir))
@@ -121,7 +124,7 @@ def main():
             logging.shutdown()
             sys.exit(0) 
 
-    # --- Batch Processing for Stages 1, 2, 3 Prediction ---
+    # --- Batch Processing for Stages 1, 2, 3 Prediction, 4 ---
     valid_sample_ids = get_valid_sample_subdirectories(args.input_batch_dir)
     if not valid_sample_ids:
         logger.error(f"No valid sample subdirectories found in '{args.input_batch_dir}'. Aborting batch processing.")
@@ -160,14 +163,18 @@ def main():
         s1_output_dir = os.path.join(sample_output_base_dir, "stage1_initial_detection")
         s2_output_dir = os.path.join(sample_output_base_dir, "stage2_quality_filter")
         s3_output_dir = os.path.join(sample_output_base_dir, "stage3_ml_classification")
+        s4_output_dir = os.path.join(sample_output_base_dir, "stage4_morphological_characterization") # Added S4 output dir
         
         os.makedirs(s1_output_dir, exist_ok=True)
         os.makedirs(s2_output_dir, exist_ok=True)
         os.makedirs(s3_output_dir, exist_ok=True)
+        os.makedirs(s4_output_dir, exist_ok=True) # Create S4 output dir
 
         s1_output_csv_path: Optional[str] = None
         s2_analyzed_particles_csv_path: Optional[str] = None
         s2_sharp_objects_dir: Optional[str] = None
+        s3_output_final_csv_path_sample: Optional[str] = None # For S3 output CSV
+        s3_accepted_images_dir_for_s4: Optional[str] = None # For S3 accepted images dir
 
         try:
             # --- Stage 1: Initial Detection ---
@@ -182,10 +189,10 @@ def main():
                 s1_duration = time.time() - s1_start_time
                 if not s1_output_csv_path:
                     logger.error(f"Stage 1 failed for {current_sample_id}.")
-                    if run_s2: raise ProcessingError(f"S1 failed for {current_sample_id}, cannot proceed to S2.")
+                    if run_s2 or run_s3_predict or run_s4: raise ProcessingError(f"S1 failed for {current_sample_id}, cannot proceed.") # Check S4 too
                 else:
                     logger.info(f"<<< Stage 1 for {current_sample_id} COMPLETED in {s1_duration:.2f}s. Output: {s1_output_csv_path} >>>")
-            elif run_s2 or run_s3_predict: 
+            elif run_s2 or run_s3_predict or run_s4: # If S2, S3, or S4 are to be run, S1 output is needed
                 s1_output_csv_path = os.path.join(s1_output_dir, f"{current_sample_id}_stage1_particles.csv")
                 if not os.path.exists(s1_output_csv_path):
                     raise FileNotFoundError(f"S1 output CSV '{s1_output_csv_path}' for {current_sample_id} not found.")
@@ -207,11 +214,11 @@ def main():
                 s2_duration = time.time() - s2_start_time
                 if not s2_analyzed_particles_csv_path:
                     logger.error(f"Stage 2 failed for {current_sample_id}.")
-                    if run_s3_predict: raise ProcessingError(f"S2 failed for {current_sample_id}, cannot proceed to S3.")
+                    if run_s3_predict or run_s4: raise ProcessingError(f"S2 failed for {current_sample_id}, cannot proceed.") # Check S4 too
                 else:
                     logger.info(f"<<< Stage 2 for {current_sample_id} COMPLETED in {s2_duration:.2f}s. Analyzed CSV: {s2_analyzed_particles_csv_path} >>>")
                     s2_sharp_objects_dir = os.path.join(s2_output_dir, "sharp_object_final_crops")
-            elif run_s3_predict: 
+            elif run_s3_predict or run_s4: # If S3 or S4 are to be run, S2 output is needed
                 s2_analyzed_particles_csv_path = os.path.join(s2_output_dir, f"{current_sample_id}_stage2_analyzed_particles.csv")
                 s2_sharp_objects_dir = os.path.join(s2_output_dir, "sharp_object_final_crops")
                 if not os.path.exists(s2_analyzed_particles_csv_path) or not os.path.isdir(s2_sharp_objects_dir):
@@ -242,10 +249,12 @@ def main():
                     force_model_retrain=args.force_retrain_ml 
                 )
                 s3_duration = time.time() - s3_start_time
+                # This is the directory S4 will read images from
+                s3_accepted_images_dir_for_s4 = os.path.join(s3_output_dir, "ideal_fems_ML_classified", "accepted_images")
+
                 if s3_output_final_csv_path_sample:
                     logger.info(f"<<< Stage 3 for {current_sample_id} (Mode: {s3_mode_for_run}) COMPLETED in {s3_duration:.2f}s. Sample CSV: {s3_output_final_csv_path_sample} >>>")
                     
-                    # Append to batch summary CSV immediately
                     if run_s3_predict and s3_final_df_for_sample is not None and not s3_final_df_for_sample.empty:
                         try:
                             file_exists = os.path.exists(batch_s3_summary_csv_path)
@@ -254,17 +263,45 @@ def main():
                                 mode='a', 
                                 header=not file_exists, 
                                 index=False,
-                                float_format='%.4f' # Consistent float formatting
+                                float_format='%.4f' 
                             )
                             logger.info(f"Appended {len(s3_final_df_for_sample)} rows for sample {current_sample_id} to batch summary: {batch_s3_summary_csv_path}")
                         except Exception as e_append:
                             logger.exception(f"Error appending sample {current_sample_id} results to batch CSV: {e_append}")
                     elif run_s3_predict and s3_final_df_for_sample is not None and s3_final_df_for_sample.empty:
                          logger.info(f"Sample {current_sample_id} had no Stage 3 results to append to batch summary.")
-
-
-                else:
+                else: # s3_output_final_csv_path_sample is None
                     logger.error(f"Stage 3 for {current_sample_id} (Mode: {s3_mode_for_run}) FAILED or produced no sample CSV.")
+                    if run_s4: raise ProcessingError(f"S3 failed for {current_sample_id}, cannot proceed to S4.")
+            
+            elif run_s4: # If S3 was not run but S4 is, try to load S3 outputs
+                s3_output_final_csv_path_sample = os.path.join(s3_output_dir, "ideal_fems_ML_classified", f"{current_sample_id}_stage3_accepted_fem_features.csv")
+                s3_accepted_images_dir_for_s4 = os.path.join(s3_output_dir, "ideal_fems_ML_classified", "accepted_images")
+                if not os.path.exists(s3_output_final_csv_path_sample) or not os.path.isdir(s3_accepted_images_dir_for_s4):
+                    raise FileNotFoundError(f"S3 outputs (CSV or accepted images dir) for {current_sample_id} not found. Required for S4.")
+                logger.info(f"Using existing S3 outputs for {current_sample_id} for Stage 4: CSV='{s3_output_final_csv_path_sample}', Accepted Images='{s3_accepted_images_dir_for_s4}'")
+
+
+            # --- Stage 4: Detailed Morphological Characterization ---
+            if run_s4:
+                if not s3_output_final_csv_path_sample: # Should be set if S3 ran or loaded
+                    raise ProcessingError(f"S3 output CSV for {current_sample_id} not available for S4.")
+                if not s3_accepted_images_dir_for_s4 or not os.path.isdir(s3_accepted_images_dir_for_s4):
+                    raise ProcessingError(f"S3 accepted images directory for {current_sample_id} not available or not a dir for S4.")
+
+                logger.info(f">>> Starting Stage 4 for {current_sample_id} <<<")
+                s4_start_time = time.time()
+                s4_output_csv_path = run_stage_04_morphological_characterization(
+                    input_s3_csv_path=s3_output_final_csv_path_sample,
+                    s3_accepted_images_dir=s3_accepted_images_dir_for_s4,
+                    output_dir_stage4=s4_output_dir,
+                    sample_id=current_sample_id
+                )
+                s4_duration = time.time() - s4_start_time
+                if s4_output_csv_path:
+                    logger.info(f"<<< Stage 4 for {current_sample_id} COMPLETED in {s4_duration:.2f}s. Output CSV: {s4_output_csv_path} >>>")
+                else:
+                    logger.error(f"Stage 4 for {current_sample_id} FAILED or produced no output CSV.")
             
             sample_specific_duration = time.time() - sample_specific_start_time
             logger.info(f"^^^ Sample {current_sample_id} processing FINISHED in {sample_specific_duration:.2f}s ^^^")
@@ -289,7 +326,7 @@ def main():
     total_pipeline_duration = time.time() - total_pipeline_start_time
     logger.info(f"--- Batch pipeline execution for '{args.input_batch_dir}' FINISHED in {total_pipeline_duration:.2f} seconds ---")
     
-    if run_s3_predict:
+    if run_s3_predict: # Check if S3 prediction was part of the run
         if os.path.exists(batch_s3_summary_csv_path):
              logger.info(f"Final batch Stage 3 summary CSV is available at: {batch_s3_summary_csv_path}")
         else:

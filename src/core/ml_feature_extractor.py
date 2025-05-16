@@ -13,26 +13,18 @@ from typing import Optional, Dict, Any, Tuple, List
 
 logger = logging.getLogger(__name__)
 
-# Default feature names, can be overridden or extended by config.
-# Ensure these match what the training process expects and what extract_features produces.
 DEFAULT_FEATURE_NAMES = [
     'main_area', 'aspect_ratio', 'solidity', 'extent',
-    'posterior_area_ratio', # For main body
-    'total_egg_area', 'egg_ecc', # For detected egg region
+    'posterior_area_ratio', 
+    'total_egg_area', 'egg_ecc', 
     'mean_intensity', 'num_components'
 ]
 
 def extract_ml_features(
     image_path: str,
-    params: Dict[str, Any], # This is feature_extraction_params from config
+    params: Dict[str, Any], 
     image_array_gray: Optional[np.ndarray] = None
 ) -> Tuple[Optional[Dict[str, Any]], Optional[Any], Optional[Any]]:
-    """
-    Extracts morphological and intensity-based features from an image for ML classification.
-    The "egg" related features are now `total_egg_area` and `egg_ecc`.
-    Egg search is constrained to a configurable posterior fraction of the main body's 
-    actual pixel area, determined by projection onto its major axis.
-    """
     features: Dict[str, Any] = {key: 0.0 for key in DEFAULT_FEATURE_NAMES} 
     features['posterior_area_ratio'] = 0.5 
     features['egg_ecc'] = 0.0 
@@ -57,7 +49,6 @@ def extract_ml_features(
             logger.debug(f"Image {os.path.basename(image_path)} is empty or near-empty. No features extracted.")
             return None, None, None
 
-        # --- Segmentation for MAIN BODY ---
         blurred_image = skimage.filters.gaussian(image_gray, sigma=params.get('gaussian_sigma', 1.0))
         
         if blurred_image.min() == blurred_image.max(): 
@@ -86,7 +77,6 @@ def extract_ml_features(
             
         main_filled_mask = ndi.binary_fill_holes(main_closed_mask)
 
-        # --- Calculate Main Body Properties ---
         labeled_main_mask, num_labels = skimage.measure.label(main_filled_mask, return_num=True, connectivity=2)
         features['num_components'] = int(num_labels)
 
@@ -112,7 +102,10 @@ def extract_ml_features(
         features['mean_intensity'] = getattr(main_props_obj, 'mean_intensity', 0.0)
         main_orientation = getattr(main_props_obj, 'orientation', 0.0) 
 
-        _axis_vector_pointing_posterior = np.array([np.cos(main_orientation), np.sin(main_orientation)])
+        # Initialize _axis_vector_pointing_posterior on main_props_obj
+        # This will be used by visualization AND by posterior egg search logic
+        main_props_obj._axis_vector_pointing_posterior = np.array([np.cos(main_orientation), np.sin(main_orientation)]) # Default direction
+
         if main_props_obj.area > 0 and hasattr(main_props_obj, 'coords') and hasattr(main_props_obj, 'centroid'):
             coords_main_body = main_props_obj.coords 
             centroid_main_body = np.array(main_props_obj.centroid) 
@@ -127,20 +120,18 @@ def extract_ml_features(
             if main_props_obj.area > 0:
                  features['posterior_area_ratio'] = positive_projection_pixels / main_props_obj.area
 
+            # Update _axis_vector_pointing_posterior based on posterior_area_ratio
             if not (features['posterior_area_ratio'] >= 0.5): 
-                _axis_vector_pointing_posterior = -axis_vector_rc_unit
+                main_props_obj._axis_vector_pointing_posterior = -axis_vector_rc_unit
             else:
-                _axis_vector_pointing_posterior = axis_vector_rc_unit
-        else: 
-             _axis_vector_pointing_posterior = np.array([np.cos(main_orientation), np.sin(main_orientation)])
-
+                main_props_obj._axis_vector_pointing_posterior = axis_vector_rc_unit
+        # else: main_props_obj._axis_vector_pointing_posterior remains default if area is 0 or coords/centroid missing
 
         if features['main_area'] < params.get('min_significant_area', 300):
             logger.debug(f"Main object area {features['main_area']} is less than min_significant_area. "
                          f"Skipping egg detection for {os.path.basename(image_path)}.")
             return features, main_props_obj, None
 
-        # --- Separate Segmentation for EGG AREA ---
         high_thresh_quantile = params.get('egg_threshold_quantile', 0.92)
         non_zero_pixels = blurred_image[blurred_image > 1e-6] 
         
@@ -149,22 +140,21 @@ def extract_ml_features(
             
         egg_binary_mask_initial = blurred_image > high_thresh_val
         
-        # --- Define Posterior Pixel Area of Main Body for Egg Search ---
         posterior_pixel_mask = np.zeros(img_gray_input_shape, dtype=bool)
-        # Get the desired fraction from config, default to 0.45 if not specified
         egg_posterior_fraction = params.get('egg_posterior_pixel_fraction', 0.45)
         if not (0 < egg_posterior_fraction < 1):
             logger.warning(f"egg_posterior_pixel_fraction ({egg_posterior_fraction}) is out of (0,1) range. Defaulting to 0.45.")
             egg_posterior_fraction = 0.45
             
-        percentile_to_cut = (1.0 - egg_posterior_fraction) * 100.0 # e.g., for 0.45 posterior, cut at 55th percentile
+        percentile_to_cut = (1.0 - egg_posterior_fraction) * 100.0 
 
         if main_props_obj and main_props_obj.area > 0 and hasattr(main_props_obj, 'coords'):
             coords_main_body = main_props_obj.coords
             centroid_main_body = np.array(main_props_obj.centroid)
             
+            # Use the determined _axis_vector_pointing_posterior from main_props_obj
             relative_coords_for_slice = coords_main_body - centroid_main_body
-            projections_for_slice = np.dot(relative_coords_for_slice, _axis_vector_pointing_posterior)
+            projections_for_slice = np.dot(relative_coords_for_slice, main_props_obj._axis_vector_pointing_posterior)
             
             if len(projections_for_slice) > 0:
                 projection_threshold_val = np.percentile(projections_for_slice, percentile_to_cut) 
@@ -173,10 +163,12 @@ def extract_ml_features(
                 posterior_coords = coords_main_body[posterior_indices]
                 
                 if posterior_coords.shape[0] > 0:
-                    posterior_pixel_mask[posterior_coords[:, 0], posterior_coords[:, 1]] = True
+                    # Ensure coordinates are within image bounds before assignment
+                    valid_rows = np.clip(posterior_coords[:, 0], 0, img_gray_input_shape[0] - 1)
+                    valid_cols = np.clip(posterior_coords[:, 1], 0, img_gray_input_shape[1] - 1)
+                    posterior_pixel_mask[valid_rows, valid_cols] = True
                 
                 main_props_obj._posterior_coords_for_egg_search = posterior_coords 
-
             else:
                 logger.debug(f"No projections calculated for posterior slice for {os.path.basename(image_path)}.")
         else:
@@ -185,7 +177,6 @@ def extract_ml_features(
 
         egg_binary_mask_constrained = egg_binary_mask_initial & posterior_pixel_mask
         
-        # --- Label and Filter EGG AREA Candidates ---
         egg_labeled_mask, egg_num_labels_cand = skimage.measure.label(egg_binary_mask_constrained, return_num=True, connectivity=2)
 
         if egg_num_labels_cand > 0 and main_props_obj is not None:
@@ -206,9 +197,13 @@ def extract_ml_features(
                 
                 egg_orientation = getattr(p_egg_candidate, 'orientation', 0.0) 
                 delta_angle_abs = abs(main_orientation - egg_orientation)
-                acute_delta_angle = min(delta_angle_abs, np.pi - delta_angle_abs)
-                orientation_diff_rad = abs(acute_delta_angle - (np.pi / 2.0))
+                acute_delta_angle = min(delta_angle_abs, np.pi - delta_angle_abs) # Ensures angle is between 0 and pi/2
+                
+                # Check if egg orientation is roughly perpendicular to main body orientation
+                # Tolerance for perpendicularity
+                orientation_diff_rad = abs(acute_delta_angle - (np.pi / 2.0)) 
                 orientation_tolerance_rad = np.deg2rad(params.get('orientation_diff_tolerance_deg', 60.0))
+                
                 is_orientation_ok = orientation_diff_rad < orientation_tolerance_rad
                 if not is_orientation_ok: continue
                 
@@ -250,7 +245,7 @@ if __name__ == '__main__':
             ml_params = { 
                 'gaussian_sigma': 1.0, 'otsu_threshold_multiplier': 0.5, 'closing_selem_size': 3,
                 'min_noise_size': 50, 'min_significant_area': 100, 
-                'egg_posterior_pixel_fraction': 0.45, # Default for testing if not in config
+                'egg_posterior_pixel_fraction': 0.45, 
                 'egg_threshold_quantile': 0.90, 
                 'egg_min_area': 50, 'egg_max_area': 5000,
                 'egg_min_solidity': 0.60, 'egg_max_solidity': 0.99,
@@ -301,6 +296,9 @@ if __name__ == '__main__':
                 expected_frac = ml_params.get('egg_posterior_pixel_fraction', 0.45)
                 print(f"  Number of pixels in posterior {expected_frac*100:.0f}% mask: {num_posterior_pixels}")
                 print(f"  Approx expected posterior {expected_frac*100:.0f}% pixels: {main_props_v.area * expected_frac:.0f}")
+            if hasattr(main_props_v, '_axis_vector_pointing_posterior'):
+                print(f"  Axis vector pointing posterior (attached): {main_props_v._axis_vector_pointing_posterior}")
+
         if features_v['total_egg_area'] > 0: 
             logger.info(f"Pixel Slice (Config Frac): Egg area detected.")
         else: 

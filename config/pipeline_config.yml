@@ -1,3 +1,4 @@
+# config/pipeline_config.yml
 # Global Settings
 project_base_dir: "D:/sandbox/" # CHANGE THIS to your project's root
 sample_subdir_name: "20250409_plate4_well1" # Example, will be overridden by run_pipeline.py
@@ -85,47 +86,48 @@ stage_03_ml_classification:
   # Feature extraction parameters
   feature_extraction_params:
     gaussian_sigma: 1.0
-    otsu_threshold_multiplier: 0.4
+    otsu_threshold_multiplier: 0.4 # Adjusted from 0.5 to 0.4 previously
     closing_selem_size: 3
     min_noise_size: 50
     min_significant_area: 300
     # Egg area detection parameters
-    # egg_posterior_pixel_fraction: Fraction of the main body's *pixels* (ordered along its major axis)
-    # considered "posterior" for the purpose of constraining the egg search area.
-    # E.g., 0.45 means the 45% most posterior pixels of the main body.
     egg_posterior_pixel_fraction: 0.45 
-    egg_threshold_quantile: 0.92 # For segmenting egg area from blurred image
-    egg_min_area: 50             # Min area for the detected total egg region
-    egg_max_area: 5000           # Max area for the detected total egg region
-    egg_min_solidity: 0.60       # Min solidity for the detected total egg region
-    egg_max_solidity: 0.99       # Max solidity for the detected total egg region
-    egg_min_eccentricity: 0.2    # Min eccentricity for the detected total egg region
-    orientation_diff_tolerance_deg: 85 # For egg area orientation relative to main body axis (e.g., 75 degrees means 90-75=15 degrees tolerance)
+    egg_threshold_quantile: 0.92 
+    egg_min_area: 50             
+    egg_max_area: 5000           
+    egg_min_solidity: 0.60       
+    egg_max_solidity: 0.99       
+    egg_min_eccentricity: 0.2    
+    orientation_diff_tolerance_deg: 85 
   # Training parameters for RandomForest
   training_params:
-    good_data_subdir: "good" # Relative to data/training_data/
-    bad_data_subdir: "bad"   # Relative to data/training_data/
+    good_data_subdir: "good" 
+    bad_data_subdir: "bad"   
     test_split_size: 0.25
     random_state: 42
-    # RandomForest GridSearchCV parameters
     rf_param_grid:
       n_estimators: [50, 100, 200]
-      max_depth: [null, 10, 20] # null corresponds to None in Python
+      max_depth: [null, 10, 20] 
       min_samples_split: [2, 5]
       min_samples_leaf: [1, 3]
       class_weight: ["balanced", null]
     grid_search_cv_folds: 3
-    grid_search_scoring: "f1_weighted" # e.g., 'accuracy', 'f1', 'roc_auc'
+    grid_search_scoring: "f1_weighted" 
 
-  # New filters for post-ML classification
   post_ml_filters:
     deduplication:
       enabled: true
-      # Max distance (pixels) between particle centroids in adjacent frames to be considered the same particle
       proximity_threshold_pixels: 100 
-      # Max difference in frame numbers to consider particles for deduplication (e.g., 2 means check F, F+1, F+2)
       max_adjacent_frame_difference: 2 
     
     boundary_recheck:
       enabled: true
-      # (No specific params needed here yet, uses existing core function)
+
+# Stage 4: Detailed Morphological Characterization
+stage_04_morphological_characterization:
+  enabled: true # General enable/disable for the stage (can be controlled by --stages too)
+  # No specific parameters needed for this stage currently,
+  # as egg fitting and body morphology rely on S3 parameters for reconstruction
+  # and default behaviors for fitting.
+  # Parameters could be added here if more control is needed, e.g.:
+  # ideal_body_egg_mask_dilation_iterations: 1 # For dilating egg mask before body contour point removal
