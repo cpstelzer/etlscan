@@ -91,8 +91,8 @@ stage_03_ml_classification:
     min_noise_size: 50
     min_significant_area: 300
     # Egg area detection parameters
-    egg_posterior_pixel_fraction: 0.45 
-    egg_threshold_quantile: 0.92 
+    egg_posterior_pixel_fraction: 0.4 
+    egg_threshold_quantile: 0.8 
     egg_min_area: 50             
     egg_max_area: 5000           
     egg_min_solidity: 0.60       
@@ -125,9 +125,4 @@ stage_03_ml_classification:
 
 # Stage 4: Detailed Morphological Characterization
 stage_04_morphological_characterization:
-  enabled: true # General enable/disable for the stage (can be controlled by --stages too)
-  # No specific parameters needed for this stage currently,
-  # as egg fitting and body morphology rely on S3 parameters for reconstruction
-  # and default behaviors for fitting.
-  # Parameters could be added here if more control is needed, e.g.:
-  # ideal_body_egg_mask_dilation_iterations: 1 # For dilating egg mask before body contour point removal
+  enabled: true
