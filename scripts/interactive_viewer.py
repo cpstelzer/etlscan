@@ -25,6 +25,9 @@ try:
     from src.utils.config_loader import get_config
     from src.core.ml_feature_extractor import extract_ml_features
     from src.visualization.feature_visualization import visualize_ml_features
+    from src.core.detailed_morphology_calculator import reconstruct_main_body_masks 
+    from src.visualization.stage_04_visualization import visualize_detailed_morphology 
+    from src.utils.common_exceptions import ConfigError 
 except ImportError as e:
     print(f"Error importing modules: {e}", file=sys.stderr)
     print("Please ensure 'interactive_viewer.py' is in the 'scripts' directory", file=sys.stderr)
@@ -39,20 +42,24 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-UPDATE_DEBOUNCE_MS = 300 # Milliseconds to wait after a param change before updating
+UPDATE_DEBOUNCE_MS = 300 
 
 class FeatureViewerApp:
     def __init__(self, master):
         self.master = master
-        master.title("Interactive ML Feature Viewer")
-        master.geometry("1300x850")
+        master.title("Interactive Viewer (S3/S4 Toggle)") 
+        master.geometry("1300x850") # Back to original width for two plots
 
         self.image_path = None
-        self.image_array_gray_float = None
+        self.image_array_gray_float = None 
         self.default_params = {}
         self.current_params = {}
-        self.param_vars = {}
-        self.update_job_id = None # For debouncing updates
+        self.param_vars = {} 
+        self.param_widgets = {} 
+        self.update_job_id = None 
+
+        # Variable to control which visualization (S3 or S4) is shown in the second panel
+        self.active_visualization_mode = tk.StringVar(value="S3") # Default to S3
 
         try:
             cfg = get_config()
@@ -61,7 +68,7 @@ class FeatureViewerApp:
                 messagebox.showerror("Config Error", "Feature extraction parameters not found in config.")
                 master.destroy()
                 return
-            self.default_params = feature_params_cfg.copy() # Store a copy for reset
+            self.default_params = feature_params_cfg.copy() 
             self.current_params = feature_params_cfg.copy()
         except FileNotFoundError as e:
             logger.error(f"Configuration file not found: {e}")
@@ -78,6 +85,7 @@ class FeatureViewerApp:
         master.protocol("WM_DELETE_WINDOW", self.on_closing)
 
         self.setup_gui()
+        self.update_threshold_param_visibility() 
 
     def on_closing(self):
         logger.info("Closing application and cleaning up resources...")
@@ -85,12 +93,11 @@ class FeatureViewerApp:
             self.master.after_cancel(self.update_job_id)
         
         if hasattr(self, 'canvas_raw') and self.canvas_raw:
-            try:
-                self.canvas_raw.get_tk_widget().destroy()
+            try: self.canvas_raw.get_tk_widget().destroy()
             except tk.TclError: pass
-        if hasattr(self, 'canvas_features') and self.canvas_features:
-            try:
-                self.canvas_features.get_tk_widget().destroy()
+        # Only one active canvas for S3/S4 now
+        if hasattr(self, 'canvas_dynamic_vis') and self.canvas_dynamic_vis: 
+            try: self.canvas_dynamic_vis.get_tk_widget().destroy()
             except tk.TclError: pass
         
         plt.close('all') 
@@ -108,6 +115,7 @@ class FeatureViewerApp:
         main_frame = ttk.Frame(self.master, padding="10")
         main_frame.pack(fill=tk.BOTH, expand=True)
 
+        # --- Top Controls (Load image, Status, Visualization Toggle) ---
         top_controls_frame = ttk.Frame(main_frame)
         top_controls_frame.pack(fill=tk.X, pady=5)
 
@@ -116,12 +124,23 @@ class FeatureViewerApp:
 
         self.status_label = ttk.Label(top_controls_frame, text="Load an image to start.")
         self.status_label.pack(side=tk.LEFT, padx=10, expand=True, fill=tk.X)
+        
+        # Visualization Toggle Radio Buttons
+        toggle_frame = ttk.Frame(top_controls_frame)
+        toggle_frame.pack(side=tk.RIGHT, padx=5)
+        ttk.Label(toggle_frame, text="Show:").pack(side=tk.LEFT)
+        s3_radio = ttk.Radiobutton(toggle_frame, text="S3 Features", variable=self.active_visualization_mode, value="S3", command=self.schedule_update)
+        s3_radio.pack(side=tk.LEFT)
+        s4_radio = ttk.Radiobutton(toggle_frame, text="S4 Morphology", variable=self.active_visualization_mode, value="S4", command=self.schedule_update)
+        s4_radio.pack(side=tk.LEFT)
+
 
         paned_window = ttk.PanedWindow(main_frame, orient=tk.HORIZONTAL)
         paned_window.pack(fill=tk.BOTH, expand=True, pady=5)
 
-        controls_frame_outer = ttk.Labelframe(paned_window, text="Feature Extraction Parameters", padding="10")
-        paned_window.add(controls_frame_outer, weight=1)
+        # --- Parameters Panel (left) ---
+        controls_frame_outer = ttk.Labelframe(paned_window, text="S3/S4 Preprocessing Parameters", padding="10")
+        paned_window.add(controls_frame_outer, weight=1) 
 
         canvas_params = tk.Canvas(controls_frame_outer)
         scrollbar_params = ttk.Scrollbar(controls_frame_outer, orient="vertical", command=canvas_params.yview)
@@ -136,40 +155,39 @@ class FeatureViewerApp:
 
         controls_frame_outer.grid_rowconfigure(0, weight=1)
         controls_frame_outer.grid_columnconfigure(0, weight=1)
-
         canvas_params.grid(row=0, column=0, sticky="nsew")
         scrollbar_params.grid(row=0, column=1, sticky="ns")
-
         self.controls_frame_inner.bind('<Enter>', lambda e: self._bind_mousewheel(e, canvas_params))
         self.controls_frame_inner.bind('<Leave>', lambda e: self._unbind_mousewheel(e, canvas_params))
-
         self.create_param_controls(self.controls_frame_inner)
 
         param_buttons_frame = ttk.Frame(self.controls_frame_inner)
         param_buttons_frame.pack(side=tk.BOTTOM, pady=10, fill=tk.X, padx=5)
-
         reset_button = ttk.Button(param_buttons_frame, text="Reset Parameters", command=self.reset_parameters)
         reset_button.pack(side=tk.LEFT, expand=True, fill=tk.X, padx=(0,2))
-        
         update_button = ttk.Button(param_buttons_frame, text="Update Manually", command=self.process_and_display_safe)
         update_button.pack(side=tk.LEFT, expand=True, fill=tk.X, padx=(2,0))
 
-        plots_frame = ttk.Frame(paned_window, padding="5")
-        paned_window.add(plots_frame, weight=3)
+        # --- Plots Panel (right) ---
+        plots_container_frame = ttk.Frame(paned_window) 
+        paned_window.add(plots_container_frame, weight=3) # Adjusted weight for two plots
 
+        # Raw Image Plot
         self.fig_raw, self.ax_raw = plt.subplots()
         self.ax_raw.set_title("Raw Image")
         self.ax_raw.set_axis_off()
-        self.canvas_raw = FigureCanvasTkAgg(self.fig_raw, master=plots_frame)
-        self.canvas_raw.get_tk_widget().pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=5)
+        self.canvas_raw = FigureCanvasTkAgg(self.fig_raw, master=plots_container_frame)
+        self.canvas_raw.get_tk_widget().pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=2)
         self.canvas_raw.draw()
 
-        self.fig_features, self.ax_features = plt.subplots()
-        self.ax_features.set_title("Feature Visualization")
-        self.ax_features.set_axis_off()
-        self.canvas_features = FigureCanvasTkAgg(self.fig_features, master=plots_frame)
-        self.canvas_features.get_tk_widget().pack(side=tk.RIGHT, fill=tk.BOTH, expand=True, padx=5)
-        self.canvas_features.draw()
+        # Dynamic Visualization Plot (S3 or S4)
+        self.fig_dynamic_vis, self.ax_dynamic_vis = plt.subplots() # One figure/axis for dynamic content
+        self.ax_dynamic_vis.set_title("S3: ML Feature Visualization") # Initial title
+        self.ax_dynamic_vis.set_axis_off()
+        self.canvas_dynamic_vis = FigureCanvasTkAgg(self.fig_dynamic_vis, master=plots_container_frame)
+        self.canvas_dynamic_vis.get_tk_widget().pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=2)
+        self.canvas_dynamic_vis.draw()
+
 
     def _bind_mousewheel(self, event, canvas):
         canvas.bind_all("<MouseWheel>", lambda e: self._on_mousewheel(e, canvas))
@@ -188,77 +206,112 @@ class FeatureViewerApp:
             self.master.after_cancel(self.update_job_id)
         self.update_job_id = self.master.after(UPDATE_DEBOUNCE_MS, self.process_and_display_safe)
 
+    def update_threshold_param_visibility(self, *args):
+        mode = self.param_vars.get('thresholding_mode', tk.StringVar(value='otsu')).get()
+        
+        if 'otsu_threshold_multiplier' in self.param_widgets:
+            container_otsu = self.param_widgets['otsu_threshold_multiplier']
+            if mode == 'otsu': container_otsu.pack(fill=tk.X, pady=2, padx=5)
+            else: container_otsu.pack_forget()
+        
+        if 'fixed_threshold_value' in self.param_widgets:
+            container_fixed = self.param_widgets['fixed_threshold_value']
+            if mode == 'fixed': container_fixed.pack(fill=tk.X, pady=2, padx=5)
+            else: container_fixed.pack_forget()
+        
+        self.schedule_update()
+
+
     def create_param_controls(self, parent_frame):
-        # Updated to match new config and ml_feature_extractor.py
         param_specs = {
             'gaussian_sigma': {'min': 0.1, 'max': 5.0, 'type': 'float'},
+            'thresholding_mode': {'options': ['otsu', 'fixed'], 'type': 'choice'},
             'otsu_threshold_multiplier': {'min': 0.1, 'max': 2.0, 'type': 'float'},
+            'fixed_threshold_value': {'min': 0, 'max': 255, 'type': 'int'}, 
             'closing_selem_size': {'min': 0, 'max': 10, 'type': 'int'},
             'min_noise_size': {'min': 1, 'max': 1000, 'type': 'int'},
             'min_significant_area': {'min': 10, 'max': 2000, 'type': 'int'},
-            
-            # New parameter for egg search constraint
             'egg_posterior_pixel_fraction': {'min': 0.05, 'max': 0.95, 'type': 'float', 'res': 0.01}, 
-            
             'egg_threshold_quantile': {'min': 0.5, 'max': 1.0, 'type': 'float', 'res': 0.01},
-            
-            # Renamed egg parameters (formerly egg_pair_...)
-            'egg_min_area': {'min': 10, 'max': 5000, 'type': 'int'}, # Adjusted max based on config
-            'egg_max_area': {'min': 50, 'max': 20000, 'type': 'int'}, # Adjusted min based on config
+            'egg_min_area': {'min': 10, 'max': 5000, 'type': 'int'},
+            'egg_max_area': {'min': 50, 'max': 20000, 'type': 'int'},
             'egg_min_solidity': {'min': 0.0, 'max': 1.0, 'type': 'float', 'res': 0.01},
             'egg_max_solidity': {'min': 0.0, 'max': 1.0, 'type': 'float', 'res': 0.01},
             'egg_min_eccentricity': {'min': 0.0, 'max': 1.0, 'type': 'float', 'res': 0.01},
-            
             'orientation_diff_tolerance_deg': {'min': 0, 'max': 90, 'type': 'int'}
-            # egg_opening_selem_size removed as it's not in the new config/feature_extractor
         }
+        
+        ordered_param_names = ['thresholding_mode'] + \
+                              [p for p in self.default_params.keys() if p != 'thresholding_mode']
 
-        # Iterate over params from loaded config to ensure we only show sliders for what's in the config
-        # and has a spec here.
-        sorted_params_from_config = sorted(self.default_params.items())
 
-        for name, default_val_cfg in sorted_params_from_config:
-            if name not in param_specs:
+        for name in ordered_param_names:
+            default_val_cfg = self.default_params.get(name) 
+            
+            if default_val_cfg is None and name in param_specs:
+                if param_specs[name]['type'] == 'choice':
+                    default_val_cfg = param_specs[name]['options'][0]
+                elif param_specs[name]['type'] == 'int':
+                    default_val_cfg = param_specs[name].get('min', 0) 
+                elif param_specs[name]['type'] == 'float':
+                    default_val_cfg = param_specs[name].get('min', 0.0)
+                if name not in self.current_params: 
+                    self.current_params[name] = default_val_cfg
+            elif name not in param_specs:
                 logger.info(f"Parameter '{name}' from config has no defined spec for GUI control. Skipping.")
                 continue
-
+            
             spec = param_specs[name]
-            min_val, max_val, param_type = spec['min'], spec['max'], spec['type']
-            resolution = spec.get('res', 0.1 if param_type == 'float' else 1) # Default resolution
-
+            param_type = spec['type']
+            
             container = ttk.Frame(parent_frame)
-            container.pack(fill=tk.X, pady=2, padx=5)
+            if name not in ['otsu_threshold_multiplier', 'fixed_threshold_value']:
+                 container.pack(fill=tk.X, pady=2, padx=5)
+
+            self.param_widgets[name] = container 
 
             label_text = name.replace('_', ' ').title() + ":"
-            label = ttk.Label(container, text=label_text, width=30, anchor="w") # Increased width
+            label = ttk.Label(container, text=label_text, width=30, anchor="w")
             label.pack(side=tk.LEFT, padx=(0,5))
 
             current_val_for_var = self.current_params.get(name, default_val_cfg)
 
-            if param_type == 'float':
+            if param_type == 'choice':
+                var = tk.StringVar(value=str(current_val_for_var))
+                dropdown = ttk.OptionMenu(container, var, current_val_for_var, *spec['options'],
+                                          command=self.update_threshold_param_visibility if name == 'thresholding_mode' else self.schedule_update)
+                dropdown.pack(side=tk.LEFT, expand=True, fill=tk.X)
+                self.param_vars[name] = var
+            
+            elif param_type == 'float':
+                min_val, max_val = spec['min'], spec['max']
+                resolution = spec.get('res', 0.1)
                 var = tk.DoubleVar(value=float(current_val_for_var))
-                # For ttk.Scale, resolution is more about display than strict steps.
-                # The command for Int Scale helps enforce steps. For float, it's generally continuous.
                 slider = ttk.Scale(container, from_=min_val, to=max_val, variable=var, orient=tk.HORIZONTAL)
-                val_label_var = tk.StringVar(value=f"{var.get():.{max(2, str(resolution).split('.')[-1].__len__())}f}") # Dynamic precision
-                var.trace_add("write", lambda n,i,m, sv=var, sl_var=val_label_var, res=resolution: (
-                    sl_var.set(f"{sv.get():.{max(2, str(res).split('.')[-1].__len__())}f}"),
-                    self.schedule_update()
+                val_label_var = tk.StringVar(value=f"{var.get():.{max(1, str(resolution).split('.')[-1].__len__())}f}")
+                var.trace_add("write", lambda n,i,m, sv=var, sl_var=val_label_var, res=resolution, pname=name: (
+                    sl_var.set(f"{sv.get():.{max(1, str(res).split('.')[-1].__len__())}f}"),
+                    self.schedule_update() 
                 ))
-            elif param_type == 'int':
+                slider.pack(side=tk.LEFT, expand=True, fill=tk.X)
+                val_label = ttk.Label(container, textvariable=val_label_var, width=7, anchor="e")
+                val_label.pack(side=tk.RIGHT, padx=(5,0))
+                self.param_vars[name] = var
+
+            elif param_type == 'int': 
+                min_val, max_val = spec['min'], spec['max']
                 var = tk.IntVar(value=int(current_val_for_var))
                 slider = ttk.Scale(container, from_=min_val, to=max_val, variable=var, orient=tk.HORIZONTAL,
-                                   command=lambda val, v=var: v.set(int(float(val)))) # Ensure int values
+                                   command=lambda val, v=var: v.set(int(float(val))))
                 val_label_var = tk.StringVar(value=f"{var.get():d}")
-                var.trace_add("write", lambda n,i,m, sv=var, sl_var=val_label_var: (
+                var.trace_add("write", lambda n,i,m, sv=var, sl_var=val_label_var, pname=name: (
                     sl_var.set(f"{sv.get():d}"),
                     self.schedule_update()
                 ))
-
-            slider.pack(side=tk.LEFT, expand=True, fill=tk.X)
-            val_label = ttk.Label(container, textvariable=val_label_var, width=7, anchor="e") # Increased width
-            val_label.pack(side=tk.RIGHT, padx=(5,0))
-            self.param_vars[name] = var
+                slider.pack(side=tk.LEFT, expand=True, fill=tk.X)
+                val_label = ttk.Label(container, textvariable=val_label_var, width=7, anchor="e")
+                val_label.pack(side=tk.RIGHT, padx=(5,0))
+                self.param_vars[name] = var
 
     def reset_parameters(self):
         logger.info("Resetting parameters to default values from config.")
@@ -270,8 +323,16 @@ class FeatureViewerApp:
             if name in self.param_vars:
                 self.param_vars[name].set(default_val)
         
+        if 'thresholding_mode' in self.param_vars:
+            if 'thresholding_mode' not in self.default_params:
+                 self.param_vars['thresholding_mode'].set(param_specs['thresholding_mode']['options'][0]) 
+        if 'fixed_threshold_value' in self.param_vars:
+            if 'fixed_threshold_value' not in self.default_params:
+                 self.param_vars['fixed_threshold_value'].set(param_specs['fixed_threshold_value']['min'])
+
+
         self.status_label.config(text="Parameters reset to defaults. Updating...")
-        self.schedule_update()
+        self.update_threshold_param_visibility()
 
     def load_image(self):
         path = filedialog.askopenfilename(
@@ -287,11 +348,11 @@ class FeatureViewerApp:
             img = skimage.io.imread(self.image_path, as_gray=True)
             if img.ndim == 3 and img.shape[2] in [3, 4]:
                 img = skimage.color.rgb2gray(img[:,:,:3])
-            self.image_array_gray_float = skimage.util.img_as_float(img)
+            self.image_array_gray_float = skimage.util.img_as_float(img) 
             logger.info(f"Image loaded: {self.image_path}")
             self.status_label.config(text=f"Loaded: {os.path.basename(path)}. Processing...")
             self.update_raw_image_display()
-            self.schedule_update()
+            self.update_threshold_param_visibility() 
         except Exception as e:
             logger.exception(f"Failed to load image {self.image_path}")
             messagebox.showerror("Image Load Error", f"Failed to load or process image: {e}")
@@ -309,7 +370,11 @@ class FeatureViewerApp:
 
     def collect_current_params(self):
         for name, var in self.param_vars.items():
-            self.current_params[name] = var.get()
+            if name == 'fixed_threshold_value':
+                try: self.current_params[name] = int(var.get())
+                except ValueError: self.current_params[name] = self.default_params.get(name, 0) 
+            else:
+                self.current_params[name] = var.get()
         return self.current_params.copy()
 
     def process_and_display_safe(self):
@@ -322,7 +387,11 @@ class FeatureViewerApp:
         self.master.update_idletasks()
         try:
             self.process_and_display()
-            self.status_label.config(text=f"Ready. Displaying features for {os.path.basename(self.image_path)}")
+            self.status_label.config(text=f"Ready. Displaying for {os.path.basename(self.image_path)}")
+        except ConfigError as ce: 
+            logger.error(f"Configuration error during processing: {ce}")
+            messagebox.showerror("Configuration Error", f"Error in parameters: {ce}")
+            self.status_label.config(text=f"Config error: {ce}")
         except Exception as e:
             logger.exception("Error during feature processing or display update.")
             messagebox.showerror("Processing Error", f"An error occurred: {e}")
@@ -331,48 +400,78 @@ class FeatureViewerApp:
             self.update_job_id = None
 
     def process_and_display(self):
-        params = self.collect_current_params()
-        logger.debug(f"Processing with params: {params}")
+        params_for_processing = self.collect_current_params() 
+        logger.debug(f"Processing with params: {params_for_processing}")
         
-        # Updated return variable name for egg properties
-        features_dict, main_props, egg_area_props_result = extract_ml_features(
-            image_path=self.image_path, params=params, image_array_gray=self.image_array_gray_float )
+        # Always extract S3 features, as S4 might need main_props from it
+        s3_features_dict, s3_main_props, s3_egg_area_props = extract_ml_features(
+            image_path=self.image_path, 
+            params=params_for_processing, 
+            image_array_gray=self.image_array_gray_float 
+        )
 
-        self.ax_features.clear()
-        if features_dict is None and main_props is None and egg_area_props_result is None:
-            logger.warning("Feature extraction returned no data.")
-            self.ax_features.imshow(self.image_array_gray_float, cmap='gray')
-            self.ax_features.set_title("Feature Extraction Failed or No Features Found")
-        else:
-            temp_vis_file_path = os.path.join(self.temp_dir.name, "temp_visualization.png")
-            
-            # Updated argument name for egg properties
-            visualize_ml_features(
-                image_path_or_array=self.image_array_gray_float, 
-                main_props=main_props,
-                egg_area_props=egg_area_props_result, # Changed from egg_pair_props
-                output_visualization_path=temp_vis_file_path,
-                ml_feature_params=params 
-            )
+        self.ax_dynamic_vis.clear() # Clear the dynamic axis before drawing
 
-            if os.path.exists(temp_vis_file_path):
-                try:
-                    vis_img = skimage.io.imread(temp_vis_file_path)
-                    self.ax_features.imshow(vis_img)
-                    if not self.ax_features.get_title() or self.ax_features.get_title() == "Processed Image":
-                         self.ax_features.set_title(f"Features ({os.path.basename(self.image_path if self.image_path else '')})")
-                except Exception as read_err:
-                    logger.error(f"Failed to read visualization image {temp_vis_file_path}: {read_err}")
-                    self.ax_features.imshow(self.image_array_gray_float, cmap='gray')
-                    self.ax_features.set_title("Error loading visualization")
+        if self.active_visualization_mode.get() == "S3":
+            self.ax_dynamic_vis.set_title(f"S3 Features ({os.path.basename(self.image_path if self.image_path else '')})")
+            if s3_features_dict is None and s3_main_props is None and s3_egg_area_props is None:
+                logger.warning("S3: Feature extraction returned no data.")
+                self.ax_dynamic_vis.imshow(self.image_array_gray_float, cmap='gray')
+                self.ax_dynamic_vis.set_title("S3: Feature Extraction Failed")
             else:
-                logger.error("Visualization output file was not created.")
-                self.ax_features.imshow(self.image_array_gray_float, cmap='gray')
-                self.ax_features.set_title("Visualization Generation Failed")
+                temp_s3_vis_path = os.path.join(self.temp_dir.name, "temp_s3_visualization.png")
+                visualize_ml_features(
+                    image_path_or_array=self.image_array_gray_float, 
+                    main_props=s3_main_props,
+                    egg_area_props=s3_egg_area_props, 
+                    output_visualization_path=temp_s3_vis_path,
+                    ml_feature_params=params_for_processing 
+                )
+                if os.path.exists(temp_s3_vis_path):
+                    try:
+                        vis_s3_img = skimage.io.imread(temp_s3_vis_path)
+                        self.ax_dynamic_vis.imshow(vis_s3_img)
+                    except Exception as read_err:
+                        logger.error(f"S3: Failed to read visualization image {temp_s3_vis_path}: {read_err}")
+                        self.ax_dynamic_vis.imshow(self.image_array_gray_float, cmap='gray')
+                else:
+                    logger.error("S3: Visualization output file was not created.")
+                    self.ax_dynamic_vis.imshow(self.image_array_gray_float, cmap='gray')
 
-        self.ax_features.set_axis_off()
-        self.canvas_features.draw()
-        logger.info("Visualization updated.")
+        elif self.active_visualization_mode.get() == "S4":
+            self.ax_dynamic_vis.set_title(f"S4 Morphology ({os.path.basename(self.image_path if self.image_path else '')})")
+            s4_raw_mask, s4_filled_mask, _ = reconstruct_main_body_masks(
+                image_gray_original=self.image_array_gray_float, 
+                s3_feature_extraction_params=params_for_processing 
+            )
+            if s4_raw_mask is None and s4_filled_mask is None:
+                logger.warning("S4: Mask reconstruction returned no data.")
+                self.ax_dynamic_vis.imshow(self.image_array_gray_float, cmap='gray')
+                self.ax_dynamic_vis.set_title("S4: Mask Reconstruction Failed")
+            else:
+                temp_s4_vis_path = os.path.join(self.temp_dir.name, "temp_s4_visualization.png")
+                visualize_detailed_morphology(
+                    image_path_or_array=self.image_array_gray_float, 
+                    main_props_s3=s3_main_props, # Pass S3 main_props for orientation
+                    raw_body_mask_s4=s4_raw_mask,
+                    filled_body_mask_s4=s4_filled_mask,
+                    output_visualization_path=temp_s4_vis_path
+                )
+                if os.path.exists(temp_s4_vis_path):
+                    try:
+                        vis_s4_img = skimage.io.imread(temp_s4_vis_path)
+                        self.ax_dynamic_vis.imshow(vis_s4_img)
+                    except Exception as read_err:
+                        logger.error(f"S4: Failed to read visualization image {temp_s4_vis_path}: {read_err}")
+                        self.ax_dynamic_vis.imshow(self.image_array_gray_float, cmap='gray')
+                else:
+                    logger.error("S4: Visualization output file was not created.")
+                    self.ax_dynamic_vis.imshow(self.image_array_gray_float, cmap='gray')
+        
+        self.ax_dynamic_vis.set_axis_off()
+        self.canvas_dynamic_vis.draw()
+        logger.info(f"Dynamic visualization updated to: {self.active_visualization_mode.get()}.")
+
 
 def main():
     try:

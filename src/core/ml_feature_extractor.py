@@ -11,6 +11,8 @@ import logging
 from scipy import ndimage as ndi
 from typing import Optional, Dict, Any, Tuple, List
 
+from src.utils.common_exceptions import ConfigError # Added for raising config error
+
 logger = logging.getLogger(__name__)
 
 DEFAULT_FEATURE_NAMES = [
@@ -43,7 +45,7 @@ def extract_ml_features(
         img_gray_input_shape = image_gray.shape 
 
         if not np.issubdtype(image_gray.dtype, np.floating):
-            image_gray = skimage.util.img_as_float(image_gray)
+            image_gray = skimage.util.img_as_float(image_gray) # Converts to 0-1 float
         
         if image_gray.max() < 1e-9: 
             logger.debug(f"Image {os.path.basename(image_path)} is empty or near-empty. No features extracted.")
@@ -55,14 +57,50 @@ def extract_ml_features(
             logger.debug(f"Image {os.path.basename(image_path)} became blank after blurring. No features.")
             return None, None, None
         
-        try:
-            otsu_thresh = skimage.filters.threshold_otsu(blurred_image)
-        except ValueError: 
-            logger.warning(f"Otsu threshold failed for {os.path.basename(image_path)}. No features.")
-            return None, None, None
+        thresholding_mode = params.get('thresholding_mode', 'otsu') 
+        final_threshold_value_float: Optional[float] = None # This will be the 0-1 float threshold
+
+        if thresholding_mode == 'otsu':
+            if blurred_image.min() == blurred_image.max(): 
+                logger.warning(f"Image {os.path.basename(image_path)} is uniform after blurring. Otsu thresholding cannot be applied robustly. Skipping feature extraction.")
+                return None, None, None
+            try:
+                otsu_thresh_val_raw = skimage.filters.threshold_otsu(blurred_image)
+            except ValueError: 
+                logger.warning(f"Otsu threshold failed for {os.path.basename(image_path)}. Skipping feature extraction.")
+                return None, None, None
             
-        adjusted_thresh = otsu_thresh * params.get('otsu_threshold_multiplier', 0.9)
-        main_binary_mask = blurred_image > adjusted_thresh
+            otsu_multiplier = params.get('otsu_threshold_multiplier', 0.9)
+            final_threshold_value_float = otsu_thresh_val_raw * otsu_multiplier
+            logger.debug(f"Using Otsu thresholding for {os.path.basename(image_path)}. Raw Otsu: {otsu_thresh_val_raw:.4f}, Multiplier: {otsu_multiplier}, Final threshold (0-1): {final_threshold_value_float:.4f}")
+
+        elif thresholding_mode == 'fixed':
+            fixed_thresh_val_config_int = params.get('fixed_threshold_value')
+            if fixed_thresh_val_config_int is None:
+                logger.error(f"Thresholding mode is 'fixed' but 'fixed_threshold_value' not provided in params for {os.path.basename(image_path)}. Cannot proceed.")
+                raise ConfigError("thresholding_mode is 'fixed' but 'fixed_threshold_value' is missing from feature_extraction_params.")
+            
+            try:
+                fixed_thresh_int = int(fixed_thresh_val_config_int)
+            except ValueError:
+                logger.error(f"'fixed_threshold_value' ({fixed_thresh_val_config_int}) must be an integer (0-255).")
+                raise ConfigError(f"'fixed_threshold_value' ({fixed_thresh_val_config_int}) is not a valid integer.")
+
+            if not (0 <= fixed_thresh_int <= 255):
+                logger.warning(f"Fixed threshold value (config) {fixed_thresh_int} for {os.path.basename(image_path)} is outside the 0-255 range. Ensure this is intended.")
+            
+            final_threshold_value_float = fixed_thresh_int / 255.0 # Convert to 0-1 float
+            logger.debug(f"Using fixed thresholding for {os.path.basename(image_path)}. Config value (0-255): {fixed_thresh_int}, Converted threshold (0-1): {final_threshold_value_float:.4f}")
+        
+        else:
+            logger.error(f"Invalid thresholding_mode: '{thresholding_mode}' for {os.path.basename(image_path)}. Supported modes: 'otsu', 'fixed'.")
+            raise ConfigError(f"Invalid thresholding_mode: '{thresholding_mode}' in feature_extraction_params.")
+
+        if final_threshold_value_float is None: 
+             logger.error(f"Final threshold value (float) not set for {os.path.basename(image_path)}. Aborting feature extraction for this image.")
+             return None, None, None
+        
+        main_binary_mask = blurred_image > final_threshold_value_float
         
         main_cleaned_mask = skimage.morphology.remove_small_objects(
             main_binary_mask, min_size=params.get('min_noise_size', 50)
@@ -102,9 +140,7 @@ def extract_ml_features(
         features['mean_intensity'] = getattr(main_props_obj, 'mean_intensity', 0.0)
         main_orientation = getattr(main_props_obj, 'orientation', 0.0) 
 
-        # Initialize _axis_vector_pointing_posterior on main_props_obj
-        # This will be used by visualization AND by posterior egg search logic
-        main_props_obj._axis_vector_pointing_posterior = np.array([np.cos(main_orientation), np.sin(main_orientation)]) # Default direction
+        main_props_obj._axis_vector_pointing_posterior = np.array([np.cos(main_orientation), np.sin(main_orientation)]) 
 
         if main_props_obj.area > 0 and hasattr(main_props_obj, 'coords') and hasattr(main_props_obj, 'centroid'):
             coords_main_body = main_props_obj.coords 
@@ -120,12 +156,10 @@ def extract_ml_features(
             if main_props_obj.area > 0:
                  features['posterior_area_ratio'] = positive_projection_pixels / main_props_obj.area
 
-            # Update _axis_vector_pointing_posterior based on posterior_area_ratio
             if not (features['posterior_area_ratio'] >= 0.5): 
                 main_props_obj._axis_vector_pointing_posterior = -axis_vector_rc_unit
             else:
                 main_props_obj._axis_vector_pointing_posterior = axis_vector_rc_unit
-        # else: main_props_obj._axis_vector_pointing_posterior remains default if area is 0 or coords/centroid missing
 
         if features['main_area'] < params.get('min_significant_area', 300):
             logger.debug(f"Main object area {features['main_area']} is less than min_significant_area. "
@@ -152,7 +186,6 @@ def extract_ml_features(
             coords_main_body = main_props_obj.coords
             centroid_main_body = np.array(main_props_obj.centroid)
             
-            # Use the determined _axis_vector_pointing_posterior from main_props_obj
             relative_coords_for_slice = coords_main_body - centroid_main_body
             projections_for_slice = np.dot(relative_coords_for_slice, main_props_obj._axis_vector_pointing_posterior)
             
@@ -163,7 +196,6 @@ def extract_ml_features(
                 posterior_coords = coords_main_body[posterior_indices]
                 
                 if posterior_coords.shape[0] > 0:
-                    # Ensure coordinates are within image bounds before assignment
                     valid_rows = np.clip(posterior_coords[:, 0], 0, img_gray_input_shape[0] - 1)
                     valid_cols = np.clip(posterior_coords[:, 1], 0, img_gray_input_shape[1] - 1)
                     posterior_pixel_mask[valid_rows, valid_cols] = True
@@ -197,10 +229,8 @@ def extract_ml_features(
                 
                 egg_orientation = getattr(p_egg_candidate, 'orientation', 0.0) 
                 delta_angle_abs = abs(main_orientation - egg_orientation)
-                acute_delta_angle = min(delta_angle_abs, np.pi - delta_angle_abs) # Ensures angle is between 0 and pi/2
+                acute_delta_angle = min(delta_angle_abs, np.pi - delta_angle_abs) 
                 
-                # Check if egg orientation is roughly perpendicular to main body orientation
-                # Tolerance for perpendicularity
                 orientation_diff_rad = abs(acute_delta_angle - (np.pi / 2.0)) 
                 orientation_tolerance_rad = np.deg2rad(params.get('orientation_diff_tolerance_deg', 60.0))
                 
@@ -226,6 +256,9 @@ def extract_ml_features(
 
         return features, main_props_obj, egg_area_props_obj
 
+    except ConfigError as ce: 
+        logger.error(f"Configuration error during feature extraction for {os.path.basename(image_path)}: {ce}")
+        raise 
     except Exception as e:
         logger.exception(f"Error extracting ML features for {os.path.basename(image_path)}: {e}")
         return None, None, None
@@ -243,7 +276,11 @@ if __name__ == '__main__':
             print("ML feature extraction parameters (or egg_posterior_pixel_fraction) "
                   "not found in config. Using hardcoded defaults for test.")
             ml_params = { 
-                'gaussian_sigma': 1.0, 'otsu_threshold_multiplier': 0.5, 'closing_selem_size': 3,
+                'gaussian_sigma': 1.0, 
+                'thresholding_mode': 'otsu', 
+                'otsu_threshold_multiplier': 0.5, 
+                'fixed_threshold_value': 70, # Example for fixed (0-255)
+                'closing_selem_size': 3,
                 'min_noise_size': 50, 'min_significant_area': 100, 
                 'egg_posterior_pixel_fraction': 0.45, 
                 'egg_threshold_quantile': 0.90, 
@@ -255,7 +292,11 @@ if __name__ == '__main__':
     except FileNotFoundError:
         print("Config file not found. Using hardcoded ML params for test.")
         ml_params = { 
-            'gaussian_sigma': 1.0, 'otsu_threshold_multiplier': 0.5, 'closing_selem_size': 3,
+            'gaussian_sigma': 1.0, 
+            'thresholding_mode': 'otsu',
+            'otsu_threshold_multiplier': 0.5,
+            'fixed_threshold_value': 70, # Example for fixed (0-255)
+            'closing_selem_size': 3,
             'min_noise_size': 50, 'min_significant_area': 100, 
             'egg_posterior_pixel_fraction': 0.45,
             'egg_threshold_quantile': 0.90,
@@ -267,11 +308,12 @@ if __name__ == '__main__':
 
     test_image_v = np.zeros((200, 200), dtype=np.uint8)
     rr_body_v, cc_body_v = skimage.draw.ellipse(100, 100, 70, 25, rotation=np.deg2rad(10)) 
-    test_image_v[rr_body_v, cc_body_v] = 150
+    test_image_v[rr_body_v, cc_body_v] = 150 
+    
     rr_heavy, cc_heavy = skimage.draw.ellipse(100 + int(70*0.6*np.cos(np.deg2rad(10))), 
                                               100 + int(70*0.6*np.sin(np.deg2rad(10))), 
                                               15,10, rotation=np.deg2rad(10))
-    test_image_v[rr_heavy, cc_heavy] = 160
+    test_image_v[rr_heavy, cc_heavy] = 160 
 
     rr_egg_v, cc_egg_v = skimage.draw.ellipse(100 + int(70*0.5*np.cos(np.deg2rad(10))) , 
                                               100 + int(70*0.5*np.sin(np.deg2rad(10))), 
@@ -279,32 +321,45 @@ if __name__ == '__main__':
     test_image_v[rr_egg_v, cc_egg_v] = 220 
 
     test_image_v_float = skimage.util.img_as_float(test_image_v) 
-    skimage.io.imsave("temp_ml_feature_test_image_pixel_slice_config.png", skimage.util.img_as_ubyte(test_image_v_float))
-    logger.info("Saved temp_ml_feature_test_image_pixel_slice_config.png for inspection.")
+    temp_img_filename = "temp_ml_feature_test_image_threshold_mode_int.png"
+    skimage.io.imsave(temp_img_filename, skimage.util.img_as_ubyte(test_image_v_float)) # Save as ubyte
+    logger.info(f"Saved {temp_img_filename} for inspection.")
     
-    features_v, main_props_v, egg_props_v = extract_ml_features(
-        "temp_ml_feature_test_image_pixel_slice_config.png", ml_params, test_image_v_float
+    logger.info("\n--- Testing with Otsu thresholding mode ---")
+    ml_params_otsu = ml_params.copy()
+    ml_params_otsu['thresholding_mode'] = 'otsu'
+    features_otsu, _, _ = extract_ml_features(
+        temp_img_filename, ml_params_otsu, image_array_gray=test_image_v_float # Pass float version for processing
     )
+    if features_otsu:
+        print(f"Otsu mode - Main Area: {features_otsu.get('main_area')}, Egg Area: {features_otsu.get('total_egg_area')}")
+    else:
+        print("Otsu mode - Feature extraction failed.")
 
-    if features_v:
-        print(f"\nPixel Slice (Configurable Fraction: {ml_params.get('egg_posterior_pixel_fraction')}) Body Features:")
-        for k, v_val in features_v.items(): print(f"  {k}: {v_val}")
-        if main_props_v: 
-            print(f"  Main Orientation (deg): {np.rad2deg(main_props_v.orientation)}")
-            if hasattr(main_props_v, '_posterior_coords_for_egg_search'): 
-                num_posterior_pixels = main_props_v._posterior_coords_for_egg_search.shape[0]
-                expected_frac = ml_params.get('egg_posterior_pixel_fraction', 0.45)
-                print(f"  Number of pixels in posterior {expected_frac*100:.0f}% mask: {num_posterior_pixels}")
-                print(f"  Approx expected posterior {expected_frac*100:.0f}% pixels: {main_props_v.area * expected_frac:.0f}")
-            if hasattr(main_props_v, '_axis_vector_pointing_posterior'):
-                print(f"  Axis vector pointing posterior (attached): {main_props_v._axis_vector_pointing_posterior}")
+    logger.info("\n--- Testing with Fixed thresholding mode ---")
+    ml_params_fixed = ml_params.copy()
+    ml_params_fixed['thresholding_mode'] = 'fixed'
+    # Ensure fixed_threshold_value is appropriate (0-255)
+    fixed_val_to_test_int = ml_params_fixed.get('fixed_threshold_value', 70) 
+    print(f"Fixed mode using fixed_threshold_value (0-255 from config): {fixed_val_to_test_int}")
 
-        if features_v['total_egg_area'] > 0: 
-            logger.info(f"Pixel Slice (Config Frac): Egg area detected.")
-        else: 
-            logger.warning(f"Pixel Slice (Config Frac): Egg area NOT detected.")
-    else: 
-        logger.error(f"Pixel Slice (Config Frac): ML Feature extraction failed.")
+    features_fixed, _, _ = extract_ml_features(
+        temp_img_filename, ml_params_fixed, image_array_gray=test_image_v_float # Pass float version
+    )
+    if features_fixed:
+        print(f"Fixed mode - Main Area: {features_fixed.get('main_area')}, Egg Area: {features_fixed.get('total_egg_area')}")
+    else:
+        print("Fixed mode - Feature extraction failed.")
 
-    if os.path.exists("temp_ml_feature_test_image_pixel_slice_config.png"):
-        os.remove("temp_ml_feature_test_image_pixel_slice_config.png")
+    logger.info("\n--- Testing with Invalid thresholding mode ---")
+    ml_params_invalid = ml_params.copy()
+    ml_params_invalid['thresholding_mode'] = 'bad_mode'
+    try:
+        extract_ml_features(temp_img_filename, ml_params_invalid, image_array_gray=test_image_v_float)
+    except ConfigError as e:
+        print(f"Correctly caught ConfigError for invalid mode: {e}")
+    except Exception as e:
+        print(f"Unexpected error for invalid mode test: {e}")
+
+    if os.path.exists(temp_img_filename):
+        os.remove(temp_img_filename)

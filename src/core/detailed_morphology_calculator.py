@@ -11,6 +11,8 @@ from typing import Dict, Any, Optional, Tuple
 # skimage.draw no longer needed here
 from skimage.measure._regionprops import RegionProperties 
 
+from src.utils.common_exceptions import ConfigError # Added for raising config error
+
 logger = logging.getLogger(__name__)
 
 def reconstruct_main_body_masks(
@@ -19,11 +21,10 @@ def reconstruct_main_body_masks(
 ) -> Tuple[Optional[np.ndarray], Optional[np.ndarray], Optional[RegionProperties]]:
     """
     Reconstructs the raw (unfilled) and filled main body masks using Stage 3 parameters.
-    (Identical to previous version)
     """
     try:
         if not np.issubdtype(image_gray_original.dtype, np.floating):
-            image_gray = skimage.util.img_as_float(image_gray_original)
+            image_gray = skimage.util.img_as_float(image_gray_original) # Converts to 0-1 float
         else:
             image_gray = image_gray_original.copy()
 
@@ -35,14 +36,50 @@ def reconstruct_main_body_masks(
             logger.warning("Image became blank after blurring during mask reconstruction.")
             return None, None, None
 
-        try:
-            otsu_thresh = skimage.filters.threshold_otsu(blurred_image)
-        except ValueError:
-            logger.warning("Otsu threshold failed during mask reconstruction.")
-            return None, None, None
+        thresholding_mode = s3_feature_extraction_params.get('thresholding_mode', 'otsu') 
+        final_threshold_value_float: Optional[float] = None # This will be the 0-1 float threshold
 
-        adjusted_thresh = otsu_thresh * s3_feature_extraction_params.get('otsu_threshold_multiplier', 0.9)
-        main_binary_mask_initial = blurred_image > adjusted_thresh
+        if thresholding_mode == 'otsu':
+            if blurred_image.min() == blurred_image.max():
+                logger.warning("Image is uniform after blurring. Otsu thresholding cannot be applied robustly in mask reconstruction.")
+                return None, None, None
+            try:
+                otsu_thresh_val_raw = skimage.filters.threshold_otsu(blurred_image)
+            except ValueError:
+                logger.warning("Otsu threshold failed during mask reconstruction.")
+                return None, None, None
+            
+            otsu_multiplier = s3_feature_extraction_params.get('otsu_threshold_multiplier', 0.9)
+            final_threshold_value_float = otsu_thresh_val_raw * otsu_multiplier
+            logger.debug(f"MaskRecon: Using Otsu thresholding. Raw: {otsu_thresh_val_raw:.4f}, Mult: {otsu_multiplier}, Final (0-1): {final_threshold_value_float:.4f}")
+
+        elif thresholding_mode == 'fixed':
+            fixed_thresh_val_config_int = s3_feature_extraction_params.get('fixed_threshold_value')
+            if fixed_thresh_val_config_int is None:
+                logger.error("MaskRecon: Thresholding mode is 'fixed' but 'fixed_threshold_value' not provided in s3_feature_extraction_params.")
+                raise ConfigError("thresholding_mode is 'fixed' but 'fixed_threshold_value' is missing from s3_feature_extraction_params for mask reconstruction.")
+            
+            try:
+                fixed_thresh_int = int(fixed_thresh_val_config_int)
+            except ValueError:
+                logger.error(f"MaskRecon: 'fixed_threshold_value' ({fixed_thresh_val_config_int}) must be an integer (0-255).")
+                raise ConfigError(f"MaskRecon: 'fixed_threshold_value' ({fixed_thresh_val_config_int}) is not a valid integer.")
+
+            if not (0 <= fixed_thresh_int <= 255):
+                logger.warning(f"MaskRecon: Fixed threshold (config) {fixed_thresh_int} outside 0-255. Ensure intended.")
+            
+            final_threshold_value_float = fixed_thresh_int / 255.0 # Convert to 0-1 float
+            logger.debug(f"MaskRecon: Using fixed thresholding. Config (0-255): {fixed_thresh_int}, Converted (0-1): {final_threshold_value_float:.4f}")
+        
+        else:
+            logger.error(f"MaskRecon: Invalid thresholding_mode: '{thresholding_mode}'. Supported: 'otsu', 'fixed'.")
+            raise ConfigError(f"Invalid thresholding_mode: '{thresholding_mode}' in s3_feature_extraction_params for mask reconstruction.")
+
+        if final_threshold_value_float is None:
+             logger.error("MaskRecon: Final threshold value (float) not set. Aborting mask reconstruction.")
+             return None, None, None
+        
+        main_binary_mask_initial = blurred_image > final_threshold_value_float
 
         main_cleaned_mask = skimage.morphology.remove_small_objects(
             main_binary_mask_initial, min_size=s3_feature_extraction_params.get('min_noise_size', 50)
@@ -71,24 +108,20 @@ def reconstruct_main_body_masks(
         return raw_body_mask_for_props.astype(np.uint8) * 255, \
                filled_body_mask.astype(np.uint8) * 255, \
                main_props_filled
-
+    
+    except ConfigError as ce: 
+        logger.error(f"Configuration error during mask reconstruction: {ce}")
+        raise
     except Exception as e:
         logger.exception(f"Error reconstructing main body masks: {e}")
         return None, None, None
 
-# estimate_ideal_body_mask_and_area and its helpers are REMOVED
 
 def calculate_detailed_body_morphology(
     raw_body_mask: Optional[np.ndarray],      # uint8, 0 or 255
     filled_body_mask: Optional[np.ndarray],   # uint8, 0 or 255
     intensity_image_for_props: Optional[np.ndarray] = None
-    # ideal_body_mask parameter removed
 ) -> Dict[str, Any]:
-    """
-    Calculates detailed morphological features for the main body.
-    `main_area_ideal_s4` is removed.
-    (Identical to previous version where ideal_body_mask was removed as a parameter)
-    """
     features: Dict[str, Any] = {}
 
     keys_to_init = ['main_area_raw_s4', 'solidity_s4', 'compactness_rect_s4', 'extent_raw_s4',
@@ -163,27 +196,56 @@ def calculate_detailed_body_morphology(
 if __name__ == '__main__':
     logging.basicConfig(level=logging.DEBUG)
     test_img_gray = np.zeros((200, 200), dtype=np.uint8) 
+    # Main body with intensity 150
     cv2.ellipse(test_img_gray, (100,100), (80,40), angle=30, startAngle=0, endAngle=360, color=150, thickness=-1)
+    # Hole inside
     cv2.ellipse(test_img_gray, (90,90), (15,10), angle=30, startAngle=0, endAngle=360, color=0, thickness=-1)
     
-    dummy_s3_params = {
+    # Test with Otsu mode
+    dummy_s3_params_otsu = {
         'gaussian_sigma': 1.0,
+        'thresholding_mode': 'otsu', 
         'otsu_threshold_multiplier': 0.4, 
         'min_noise_size': 10,
         'closing_selem_size': 0
     }
-
-    raw_mask, filled_mask, props_filled = reconstruct_main_body_masks(test_img_gray, dummy_s3_params)
-
-    if raw_mask is not None and filled_mask is not None and props_filled is not None:
-        logger.info(f"Reconstructed Raw mask area: {np.sum(raw_mask > 0)}")
-        logger.info(f"Reconstructed Filled mask area: {np.sum(filled_mask > 0)}")
-
-        # ideal_body_mask is no longer calculated or passed here
-        detailed_features = calculate_detailed_body_morphology(raw_mask, filled_mask, test_img_gray)
-        print("\nDetailed Body Morphology Features (no ideal, no egg specific):")
-        for k, v in detailed_features.items():
-            print(f"  {k}: {v}")
-        assert 'main_area_ideal_s4' not in detailed_features 
+    print("\n--- Testing with Otsu Thresholding Mode for Mask Reconstruction ---")
+    raw_mask_o, filled_mask_o, _ = reconstruct_main_body_masks(test_img_gray.copy(), dummy_s3_params_otsu)
+    if raw_mask_o is not None:
+        print(f"Otsu - Reconstructed Raw mask area: {np.sum(raw_mask_o > 0)}")
+        detailed_features_o = calculate_detailed_body_morphology(raw_mask_o, filled_mask_o, test_img_gray)
+        print("Otsu - Detailed Body Morphology Features:")
+        for k, v in detailed_features_o.items(): print(f"  {k}: {v}")
     else:
-        logger.error("Mask reconstruction failed for test image in __main__.")
+        print("Otsu - Mask reconstruction failed.")
+
+    # Test with Fixed mode (0-255 integer from config)
+    # Image intensities are 0 and 150. float version will be 0 and 150/255 ~ 0.588.
+    # A fixed threshold of e.g. 80 (0-255 scale) -> 80/255 ~ 0.31 float scale.
+    dummy_s3_params_fixed = {
+        'gaussian_sigma': 1.0,
+        'thresholding_mode': 'fixed', 
+        'fixed_threshold_value': 80, # Integer 0-255 from config
+        'min_noise_size': 10,
+        'closing_selem_size': 0
+    }
+    print("\n--- Testing with Fixed Thresholding Mode for Mask Reconstruction ---")
+    raw_mask_f, filled_mask_f, _ = reconstruct_main_body_masks(test_img_gray.copy(), dummy_s3_params_fixed)
+    if raw_mask_f is not None:
+        print(f"Fixed - Reconstructed Raw mask area: {np.sum(raw_mask_f > 0)}")
+        detailed_features_f = calculate_detailed_body_morphology(raw_mask_f, filled_mask_f, test_img_gray)
+        print("Fixed - Detailed Body Morphology Features:")
+        for k, v in detailed_features_f.items(): print(f"  {k}: {v}")
+    else:
+        print("Fixed - Mask reconstruction failed.")
+    
+    dummy_s3_params_invalid = {
+        'thresholding_mode': 'invalid_mode'
+    }
+    print("\n--- Testing with Invalid Thresholding Mode ---")
+    try:
+        reconstruct_main_body_masks(test_img_gray.copy(), dummy_s3_params_invalid)
+    except ConfigError as e:
+        print(f"Correctly caught ConfigError for invalid mode: {e}")
+    except Exception as e:
+        print(f"Unexpected error during invalid mode test: {e}")
