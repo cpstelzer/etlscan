@@ -8,6 +8,7 @@ import skimage.draw
 import numpy as np
 import os
 import logging
+import cv2 # For bitwise_not if needed
 from scipy import ndimage as ndi
 from typing import Optional, Dict, Any, Tuple, List
 
@@ -38,17 +39,30 @@ def extract_ml_features(
     
     try:
         if image_array_gray is None:
-            image_gray = skimage.io.imread(image_path, as_gray=True)
+            # Load as grayscale. If it's float, ensure it's 0-1. If uint8, convert.
+            img_loaded_gray = skimage.io.imread(image_path, as_gray=True)
+            # skimage.io.imread with as_gray=True returns float64 in [0,1] or original dtype if already gray.
+            # We need to ensure it's float [0,1] for consistent processing.
+            if not np.issubdtype(img_loaded_gray.dtype, np.floating):
+                 image_gray = skimage.util.img_as_float(img_loaded_gray)
+            else:
+                 image_gray = img_loaded_gray # Already float, assume [0,1]
         else:
-            image_gray = image_array_gray.copy() 
+            image_gray = image_array_gray.copy() # Assume input image_array_gray is already float [0,1]
 
         img_gray_input_shape = image_gray.shape 
 
-        if not np.issubdtype(image_gray.dtype, np.floating):
-            image_gray = skimage.util.img_as_float(image_gray) # Converts to 0-1 float
+        # Apply illumination adjustment if needed
+        # This should be done on the 0-1 float image.
+        # Inversion: 1.0 - val for float images.
+        s3_illumination_mode = params.get('illumination', 'darkfield')
+        if s3_illumination_mode == 'collimated':
+            logger.debug(f"S3 Feature Extraction: Illumination '{s3_illumination_mode}'. Inverting image for {os.path.basename(image_path)}.")
+            image_gray = 1.0 - image_gray # Invert float image
+            # Note: skimage.util.invert also works and handles dtypes, but 1.0 - img is fine for floats.
         
         if image_gray.max() < 1e-9: 
-            logger.debug(f"Image {os.path.basename(image_path)} is empty or near-empty. No features extracted.")
+            logger.debug(f"Image {os.path.basename(image_path)} is empty or near-empty after potential inversion. No features extracted.")
             return None, None, None
 
         blurred_image = skimage.filters.gaussian(image_gray, sigma=params.get('gaussian_sigma', 1.0))
@@ -58,7 +72,7 @@ def extract_ml_features(
             return None, None, None
         
         thresholding_mode = params.get('thresholding_mode', 'otsu') 
-        final_threshold_value_float: Optional[float] = None # This will be the 0-1 float threshold
+        final_threshold_value_float: Optional[float] = None 
 
         if thresholding_mode == 'otsu':
             if blurred_image.min() == blurred_image.max(): 
@@ -89,7 +103,7 @@ def extract_ml_features(
             if not (0 <= fixed_thresh_int <= 255):
                 logger.warning(f"Fixed threshold value (config) {fixed_thresh_int} for {os.path.basename(image_path)} is outside the 0-255 range. Ensure this is intended.")
             
-            final_threshold_value_float = fixed_thresh_int / 255.0 # Convert to 0-1 float
+            final_threshold_value_float = fixed_thresh_int / 255.0 
             logger.debug(f"Using fixed thresholding for {os.path.basename(image_path)}. Config value (0-255): {fixed_thresh_int}, Converted threshold (0-1): {final_threshold_value_float:.4f}")
         
         else:
@@ -122,6 +136,7 @@ def extract_ml_features(
             logger.debug(f"No components found in main body mask for {os.path.basename(image_path)}.")
             return features, None, None 
         
+        # Pass the (potentially inverted) image_gray for intensity props
         main_props_all = skimage.measure.regionprops(labeled_main_mask, intensity_image=image_gray, cache=False)
         main_props_all = sorted(main_props_all, key=lambda x: x.area, reverse=True)
         main_props_obj = main_props_all[0] 
@@ -166,14 +181,33 @@ def extract_ml_features(
                          f"Skipping egg detection for {os.path.basename(image_path)}.")
             return features, main_props_obj, None
 
+        # Egg detection uses blurred_image (derived from potentially inverted image_gray)
         high_thresh_quantile = params.get('egg_threshold_quantile', 0.92)
-        non_zero_pixels = blurred_image[blurred_image > 1e-6] 
+        # If image_gray was inverted, blurred_image reflects that.
+        # For inverted ("collimated"), "bright" eggs will be dark in blurred_image.
+        # So, if collimated, we should look for pixels *below* a low quantile.
+        # If darkfield, "bright" eggs are bright in blurred_image, look *above* a high quantile.
         
-        if non_zero_pixels.size == 0: high_thresh_val = 1.0 
-        else: high_thresh_val = np.quantile(non_zero_pixels, high_thresh_quantile)
-            
-        egg_binary_mask_initial = blurred_image > high_thresh_val
+        non_zero_pixels_in_blurred = blurred_image[blurred_image > 1e-6] # Use blurred_image for egg thresholding
         
+        if non_zero_pixels_in_blurred.size == 0:
+            egg_binary_mask_initial = np.zeros_like(blurred_image, dtype=bool)
+        else:
+            if s3_illumination_mode == 'collimated':
+                # Eggs are dark, so threshold is a low value. We want pixels *less* than this.
+                # The quantile should be a low one, e.g., 0.1 means 10th percentile.
+                # Config 'egg_threshold_quantile' for collimated should be e.g. 0.1 or 0.2
+                # For consistency, let's assume egg_threshold_quantile for collimated means "darkness quantile"
+                actual_egg_quantile = params.get('egg_threshold_quantile', 0.1) # Default to low for collimated if not specific
+                egg_thresh_val = np.quantile(non_zero_pixels_in_blurred, actual_egg_quantile)
+                egg_binary_mask_initial = blurred_image < egg_thresh_val
+                logger.debug(f"Egg detection (collimated): quantile={actual_egg_quantile}, thresh_val={egg_thresh_val:.4f}")
+            else: # darkfield
+                actual_egg_quantile = params.get('egg_threshold_quantile', 0.92) # Default to high for darkfield
+                egg_thresh_val = np.quantile(non_zero_pixels_in_blurred, actual_egg_quantile)
+                egg_binary_mask_initial = blurred_image > egg_thresh_val
+                logger.debug(f"Egg detection (darkfield): quantile={actual_egg_quantile}, thresh_val={egg_thresh_val:.4f}")
+
         posterior_pixel_mask = np.zeros(img_gray_input_shape, dtype=bool)
         egg_posterior_fraction = params.get('egg_posterior_pixel_fraction', 0.45)
         if not (0 < egg_posterior_fraction < 1):
@@ -209,6 +243,7 @@ def extract_ml_features(
 
         egg_binary_mask_constrained = egg_binary_mask_initial & posterior_pixel_mask
         
+        # Intensity image for egg props should be the same (potentially inverted) image_gray
         egg_labeled_mask, egg_num_labels_cand = skimage.measure.label(egg_binary_mask_constrained, return_num=True, connectivity=2)
 
         if egg_num_labels_cand > 0 and main_props_obj is not None:
@@ -276,14 +311,15 @@ if __name__ == '__main__':
             print("ML feature extraction parameters (or egg_posterior_pixel_fraction) "
                   "not found in config. Using hardcoded defaults for test.")
             ml_params = { 
+                'illumination': 'darkfield', # Add for testing
                 'gaussian_sigma': 1.0, 
                 'thresholding_mode': 'otsu', 
                 'otsu_threshold_multiplier': 0.5, 
-                'fixed_threshold_value': 70, # Example for fixed (0-255)
+                'fixed_threshold_value': 70, 
                 'closing_selem_size': 3,
                 'min_noise_size': 50, 'min_significant_area': 100, 
                 'egg_posterior_pixel_fraction': 0.45, 
-                'egg_threshold_quantile': 0.90, 
+                'egg_threshold_quantile': 0.90, # For darkfield; for collimated, this should be low, e.g., 0.1
                 'egg_min_area': 50, 'egg_max_area': 5000,
                 'egg_min_solidity': 0.60, 'egg_max_solidity': 0.99,
                 'egg_min_eccentricity': 0.2, 
@@ -292,10 +328,11 @@ if __name__ == '__main__':
     except FileNotFoundError:
         print("Config file not found. Using hardcoded ML params for test.")
         ml_params = { 
+            'illumination': 'darkfield',
             'gaussian_sigma': 1.0, 
             'thresholding_mode': 'otsu',
             'otsu_threshold_multiplier': 0.5,
-            'fixed_threshold_value': 70, # Example for fixed (0-255)
+            'fixed_threshold_value': 70, 
             'closing_selem_size': 3,
             'min_noise_size': 50, 'min_significant_area': 100, 
             'egg_posterior_pixel_fraction': 0.45,
@@ -318,33 +355,50 @@ if __name__ == '__main__':
     rr_egg_v, cc_egg_v = skimage.draw.ellipse(100 + int(70*0.5*np.cos(np.deg2rad(10))) , 
                                               100 + int(70*0.5*np.sin(np.deg2rad(10))), 
                                               15, 20, rotation=np.deg2rad(10+90))
-    test_image_v[rr_egg_v, cc_egg_v] = 220 
+    test_image_v[rr_egg_v, cc_egg_v] = 220 # Bright eggs for darkfield
 
     test_image_v_float = skimage.util.img_as_float(test_image_v) 
-    temp_img_filename = "temp_ml_feature_test_image_threshold_mode_int.png"
-    skimage.io.imsave(temp_img_filename, skimage.util.img_as_ubyte(test_image_v_float)) # Save as ubyte
+    temp_img_filename = "temp_ml_feature_test_image_illum.png"
+    skimage.io.imsave(temp_img_filename, skimage.util.img_as_ubyte(test_image_v_float))
     logger.info(f"Saved {temp_img_filename} for inspection.")
     
-    logger.info("\n--- Testing with Otsu thresholding mode ---")
-    ml_params_otsu = ml_params.copy()
-    ml_params_otsu['thresholding_mode'] = 'otsu'
-    features_otsu, _, _ = extract_ml_features(
-        temp_img_filename, ml_params_otsu, image_array_gray=test_image_v_float # Pass float version for processing
+    logger.info("\n--- Testing with Otsu thresholding mode (darkfield) ---")
+    ml_params_otsu_dark = ml_params.copy()
+    ml_params_otsu_dark['thresholding_mode'] = 'otsu'
+    ml_params_otsu_dark['illumination'] = 'darkfield'
+    features_otsu_dark, _, _ = extract_ml_features(
+        temp_img_filename, ml_params_otsu_dark, image_array_gray=test_image_v_float 
     )
-    if features_otsu:
-        print(f"Otsu mode - Main Area: {features_otsu.get('main_area')}, Egg Area: {features_otsu.get('total_egg_area')}")
+    if features_otsu_dark:
+        print(f"Otsu (darkfield) - Main Area: {features_otsu_dark.get('main_area')}, Egg Area: {features_otsu_dark.get('total_egg_area')}")
     else:
-        print("Otsu mode - Feature extraction failed.")
+        print("Otsu (darkfield) - Feature extraction failed.")
+
+    logger.info("\n--- Testing with Otsu thresholding mode (collimated) ---")
+    # For collimated, eggs would be darker than background. Our test image has bright eggs.
+    # Inversion will make body dark, eggs dark.
+    # For this test to make sense for collimated egg detection, egg_threshold_quantile should be low.
+    ml_params_otsu_collim = ml_params.copy()
+    ml_params_otsu_collim['thresholding_mode'] = 'otsu'
+    ml_params_otsu_collim['illumination'] = 'collimated'
+    ml_params_otsu_collim['egg_threshold_quantile'] = 0.1 # Expect dark eggs
+    features_otsu_collim, _, _ = extract_ml_features(
+        temp_img_filename, ml_params_otsu_collim, image_array_gray=test_image_v_float
+    )
+    if features_otsu_collim:
+        print(f"Otsu (collimated) - Main Area: {features_otsu_collim.get('main_area')}, Egg Area: {features_otsu_collim.get('total_egg_area')}")
+    else:
+        print("Otsu (collimated) - Feature extraction failed.")
+
 
     logger.info("\n--- Testing with Fixed thresholding mode ---")
     ml_params_fixed = ml_params.copy()
     ml_params_fixed['thresholding_mode'] = 'fixed'
-    # Ensure fixed_threshold_value is appropriate (0-255)
     fixed_val_to_test_int = ml_params_fixed.get('fixed_threshold_value', 70) 
     print(f"Fixed mode using fixed_threshold_value (0-255 from config): {fixed_val_to_test_int}")
 
     features_fixed, _, _ = extract_ml_features(
-        temp_img_filename, ml_params_fixed, image_array_gray=test_image_v_float # Pass float version
+        temp_img_filename, ml_params_fixed, image_array_gray=test_image_v_float 
     )
     if features_fixed:
         print(f"Fixed mode - Main Area: {features_fixed.get('main_area')}, Egg Area: {features_fixed.get('total_egg_area')}")

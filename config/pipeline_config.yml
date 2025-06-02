@@ -30,6 +30,14 @@ stage_01_initial_detection:
     radius_fraction: 0.67 # Factor to shrink auto-detected or fixed radius
   # Parameters for wellcounter_imaging_module.analyze_microorganisms
   particle_analysis:
+    illumination: "collimated" # "darkfield" or "collimated"
+    apply_convolution: False
+    convolution_kernel: # Standard 5x5 sharpening-like kernel
+      - [0,  0,  0,  0,  0]
+      - [0, -1, -1, -1,  0]
+      - [0, -1, 10, -1,  0]
+      - [0, -1, -1, -1,  0]
+      - [0,  0,  0,  0,  0]
     microorganism_threshold: 25
     min_microorganism_area: 200
     microorganism_blur_kernel: 5 # Must be odd
@@ -86,13 +94,14 @@ stage_03_ml_classification:
   image_extensions: [".png", ".tif", ".tiff", ".jpg", ".jpeg"] # For scanning image dirs
   # Feature extraction parameters
   feature_extraction_params:
+    illumination: "collimated" # "darkfield" or "collimated" - for processing cropped images
     gaussian_sigma: 1.0
-    thresholding_mode: "fixed" # Options: "otsu", "fixed". Default is "otsu" if not specified.
+    thresholding_mode: "otsu" # Options: "otsu", "fixed". Default is "otsu" if not specified.
     # For Otsu mode:
-    otsu_threshold_multiplier: 0.4 
+    otsu_threshold_multiplier: 0.7 
     # For Fixed mode (value should be 0-255 for uint8 images, will be converted to 0-1 float internally):
     fixed_threshold_value: 80 # Example: use if thresholding_mode is "fixed"
-    closing_selem_size: 6
+    closing_selem_size: 1
     min_noise_size: 50
     min_significant_area: 300
     # Egg area detection parameters
