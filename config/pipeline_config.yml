@@ -21,13 +21,13 @@ system:
 
 # Stage 1: Initial Detection (derived from ws_background_subtraction & wellcounter_imaging_module)
 stage_01_initial_detection:
-  bg_offset_val: 110 # Frame offset for background selection
+  bg_offset_val: 180 # Frame offset for background selection
   # Parameters for wellcounter_imaging_module.mask_well_area
   well_masking:
     create_mask: True
     auto_center_mask: True
     radius_px: 2000 # Effective radius for masking, relative to well size
-    radius_fraction: 0.67 # Factor to shrink auto-detected or fixed radius
+    radius_fraction: 0.77 # Factor to shrink auto-detected or fixed radius
   # Parameters for wellcounter_imaging_module.analyze_microorganisms
   particle_analysis:
     illumination: "collimated" # "darkfield" or "collimated"
@@ -39,7 +39,7 @@ stage_01_initial_detection:
       - [0, -1, -1, -1,  0]
       - [0,  0,  0,  0,  0]
     microorganism_threshold: 25
-    min_microorganism_area: 200
+    min_microorganism_area: 500
     microorganism_blur_kernel: 5 # Must be odd
     filter_by_shape: False # If True, uses hardcoded quantiles from original wim
     # Parameters for unsubtracted analysis (if used, currently part of wim.image_analysis_of_sample logic)

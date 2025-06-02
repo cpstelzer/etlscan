@@ -48,7 +48,7 @@ DEFAULT_FLOAT_MIN, DEFAULT_FLOAT_MAX = 0.0, 100.0
 class FeatureViewerApp:
     def __init__(self, master):
         self.master = master
-        master.title("Interactive Viewer (S1/S3/S4 Toggle)"); master.geometry("1400x900") 
+        master.title("Interactive Viewer (S1/S3/S4 Toggle)"); master.geometry("1450x900") # Slightly wider for FG selector
         self.image_path = None; self.image_array_gray_float = None 
         self.default_params = {}; self.current_params = {} 
         self.param_vars = {} 
@@ -133,7 +133,7 @@ class FeatureViewerApp:
         top_controls_frame = ttk.Frame(main_frame); top_controls_frame.pack(fill=tk.X, pady=5)
         self.load_button = ttk.Button(top_controls_frame, text="Load", command=self.dispatch_load_action); self.load_button.pack(side=tk.LEFT, padx=5)
         self.s1_fg_image_selector_label = ttk.Label(top_controls_frame, text="FG (S1):")
-        self.s1_fg_image_selector = ttk.Combobox(top_controls_frame, textvariable=self.s1_selected_fg_filepath_var, state="disabled", width=35)
+        self.s1_fg_image_selector = ttk.Combobox(top_controls_frame, textvariable=self.s1_selected_fg_filepath_var, state="disabled", width=50) # BROADER SELECTOR
         self.s1_fg_image_selector.bind("<<ComboboxSelected>>", self.on_s1_fg_image_selected)
         self.status_label = ttk.Label(top_controls_frame, text="Load."); self.status_label.pack(side=tk.LEFT, padx=10, expand=True, fill=tk.X)
         toggle_frame = ttk.Frame(top_controls_frame); toggle_frame.pack(side=tk.RIGHT, padx=5)
@@ -143,19 +143,12 @@ class FeatureViewerApp:
 
         paned_window = ttk.PanedWindow(main_frame, orient=tk.HORIZONTAL); paned_window.pack(fill=tk.BOTH, expand=True, pady=5)
         controls_frame_outer = ttk.Labelframe(paned_window, text="Params", padding="10"); paned_window.add(controls_frame_outer, weight=1) 
-        
-        # Configure grid for controls_frame_outer to make canvas_params expand
-        controls_frame_outer.grid_rowconfigure(0, weight=1)    # CORRECTED
-        controls_frame_outer.grid_columnconfigure(0, weight=1) # CORRECTED
-
+        controls_frame_outer.grid_rowconfigure(0, weight=1); controls_frame_outer.grid_columnconfigure(0, weight=1) 
         canvas_params = tk.Canvas(controls_frame_outer); scrollbar_params = ttk.Scrollbar(controls_frame_outer, orient="vertical", command=canvas_params.yview)
         self.controls_frame_inner = ttk.Frame(canvas_params)
         self.controls_frame_inner.bind("<Configure>", lambda e: canvas_params.configure(scrollregion=canvas_params.bbox("all")))
         canvas_params.create_window((0,0), window=self.controls_frame_inner, anchor="nw"); canvas_params.configure(yscrollcommand=scrollbar_params.set)
-        
-        canvas_params.grid(row=0, column=0, sticky="nsew") # canvas_params uses grid within controls_frame_outer
-        scrollbar_params.grid(row=0, column=1, sticky="ns") # scrollbar uses grid within controls_frame_outer
-
+        canvas_params.grid(row=0, column=0, sticky="nsew"); scrollbar_params.grid(row=0, column=1, sticky="ns")
         self.controls_frame_inner.bind('<Enter>', lambda e: self._bind_mousewheel(e, canvas_params)); self.controls_frame_inner.bind('<Leave>', lambda e: self._unbind_mousewheel(e, canvas_params))
         
         self.s1_params_frame = ttk.Frame(self.controls_frame_inner); ttk.Label(self.s1_params_frame, text="S1 Params", font='Helvetica 10 bold').pack(fill=tk.X, pady=(5,2)); self.create_s1_param_controls(self.s1_params_frame)
@@ -399,13 +392,13 @@ class FeatureViewerApp:
             disp_rgb = cv2.cvtColor(img_an, cv2.COLOR_GRAY2BGR)
             if df_p is not None:
                 for _, p_r in df_p.iterrows():
-                    try: x,y,w,h = map(int, [p_r['bounding_x'],p_r['bounding_y'],p_r['bounding_w'],p_r['bounding_h']]); cv2.rectangle(disp_rgb, (x,y), (x+w,y+h), (255,255,0), 2)
+                    try: x,y,w,h = map(int, [p_r['bounding_x'],p_r['bounding_y'],p_r['bounding_w'],p_r['bounding_h']]); cv2.rectangle(disp_rgb, (x,y), (x+w,y+h), (255,255,0), 3) # THICKER BBOX (3)
                     except: pass
             self.ax_dynamic_vis.imshow(disp_rgb)
             if wm_uint8 is not None:
                 h_im, w_im = wm_uint8.shape; xc, yc = np.meshgrid(np.arange(w_im), np.arange(h_im))
                 masked_out = (wm_uint8 == 0) 
-                self.ax_dynamic_vis.contourf(xc, yc, masked_out, levels=[0.5,1.5], colors='red', hatches=['////'], alpha=0.35)
+                self.ax_dynamic_vis.contourf(xc, yc, masked_out, levels=[0.5,1.5], colors='red', hatches=['//'], alpha=0.35) # THINNER HATCH ('//')
             title_s1 = f"FG: {fg_fn}\nBG: {bg_row['filename']} (Offset: {s1_bg_off})\nParticles: {p_c}"
             self.ax_dynamic_vis.set_title(title_s1, fontsize=8, loc='center'); self.ax_dynamic_vis.set_axis_off()
         elif mode in ["S3", "S4"]: 
