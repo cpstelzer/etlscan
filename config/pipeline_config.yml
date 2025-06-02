@@ -91,7 +91,7 @@ stage_03_ml_classification:
     # For Otsu mode:
     otsu_threshold_multiplier: 0.4 
     # For Fixed mode (value should be 0-255 for uint8 images, will be converted to 0-1 float internally):
-    fixed_threshold_value: unsubtracted_threshold # Example: use if thresholding_mode is "fixed"
+    fixed_threshold_value: 80 # Example: use if thresholding_mode is "fixed"
     closing_selem_size: 6
     min_noise_size: 50
     min_significant_area: 300
