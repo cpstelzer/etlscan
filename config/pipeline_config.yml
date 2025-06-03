@@ -65,34 +65,35 @@ stage_01_initial_detection:
     enabled: False # Set to true to save intermediate images like original wim
     output_subdir_suffix: "_wim_particle_detection_debug"
 
-# Stage 2: Quality Filter (derived from ws_extract_sharp_objects & wellscanner_util_module)
 stage_02_quality_filter:
-  # Cropping parameters for wellscanner_util_module.process_single_particle
   intermediate_crop:
-    mode: "centroid_square" # 'bounding_box' or 'centroid_square'
-    square_size: 150 # Size for intermediate crops for sharpness analysis
-    bbox_column_mapping:
+    mode: "centroid_square" # "bounding_box" or "centroid_square"
+    square_size: 150 # For 'centroid_square' mode
+    bbox_column_mapping: # For 'bounding_box' mode, maps to S1 CSV columns
       x: "bounding_x"
       y: "bounding_y"
       w: "bounding_w"
       h: "bounding_h"
-  # Black mask detection parameters
   black_mask_check:
-    min_area_ratio: 0.05
-  # Sharpness metrics to calculate
-  sharpness_metrics:
+    min_area_ratio: 0.05 # Min area of black component to total for it to be a mask
+  sharpness_metrics: # List of raw sharpness metrics to normalize and combine
     - "variance_laplacian"
     - "tenengrad_variance"
-    - "energy_laplacian"
+    - "energy_laplacian" # Example: comment out if not desired
     - "energy_gradient"
-  # Criteria for filtering "sharp objects" to be saved
-  final_sharp_object_filter:
-    variance_laplacian_min: 105
-    tenengrad_variance_min: 6700
-    energy_laplacian_min: 1730000
-    energy_gradient_min: 145000000
-  # Final crop size for saved "sharp objects"
-  final_sharp_crop_size: 200
+  final_sharp_object_filter: # Criteria for objects to be saved as final sharp crops
+    # Add metrics here, e.g., combined_sharpness_min: 0.3
+    # Ensure the metric name here matches a column in the s2_analyzed_particles_df
+    # (either a raw metric or 'combined_sharpness' or a normalized metric like 'variance_laplacian_norm')
+    combined_sharpness_min: 0.25
+    # variance_laplacian_min: 50.0 # Example of another filter
+  final_sharp_crop_size: 150 # Pixel dimension for the final square crop of sharp objects
+
+  # --- NEW SECTION FOR TOGGLING FILTERS ---
+  filters_enabled:
+    black_mask_artifact: true   # true to enable black mask artifact filtering, false to disable
+    on_crop_boundary: false    # true to enable on-crop-boundary filtering, false to disable
+    final_sharpness: true     # true to enable the 'final_sharp_object_filter' and saving of sharp crops, false to disable
 
 # Stage 3: ML Classification (derived from ws_identify_ideal_fems)
 stage_03_ml_classification:
