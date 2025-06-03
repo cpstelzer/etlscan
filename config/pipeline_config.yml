@@ -28,9 +28,9 @@ stage_01_initial_detection:
     auto_center_mask: True
     radius_px: 2000 # Effective radius for masking, relative to well size
     radius_fraction: 0.77 # Factor to shrink auto-detected or fixed radius
-  # Parameters for wellcounter_imaging_module.analyze_microorganisms
-  particle_analysis:
-    illumination: "collimated" # "darkfield" or "collimated"
+  # Parameters for wellcounter_imaging_module.analyze_microorganisms (SUBTRACTED IMAGE ANALYSIS)
+  particle_analysis: # This section is for the SUBTRACTED images
+    illumination: "collimated" # "darkfield" or "collimated" (affects how subtracted image is processed if it implies inversion)
     apply_convolution: False
     convolution_kernel: # Standard 5x5 sharpening-like kernel
       - [0,  0,  0,  0,  0]
@@ -38,17 +38,24 @@ stage_01_initial_detection:
       - [0, -1, 10, -1,  0]
       - [0, -1, -1, -1,  0]
       - [0,  0,  0,  0,  0]
-    microorganism_threshold: 25
-    min_microorganism_area: 500
-    microorganism_blur_kernel: 5 # Must be odd
+    microorganism_threshold: 25 # For subtracted image
+    min_microorganism_area: 500 # For subtracted image
+    microorganism_blur_kernel: 5 # For subtracted image, must be odd, 0 to disable
     filter_by_shape: False # If True, uses hardcoded quantiles from original wim
-    # Parameters for unsubtracted analysis (if used, currently part of wim.image_analysis_of_sample logic)
-    unsubtracted_threshold: 70
-  # Parameters for compare_detected_particles (used in original wim.image_analysis_of_sample)
+  # Parameters for UNSUBTRACTED (original FG) image analysis
+  unsubtracted_particle_analysis:
+    illumination: "collimated" # "darkfield" or "collimated".
+                               # 'collimated' if original FG is brightfield-like (dark objects on bright bg -> invert to find bright objects).
+                               # 'darkfield' if original FG is darkfield-like (bright objects on dark bg -> no inversion).
+    blur_kernel_size: 3        # Blur kernel size (e.g., 3, 5, 0 to disable). Must be odd if > 0.
+    thresholding_mode: "otsu"  # "otsu" or "fixed"
+    fixed_threshold_value: 70  # Threshold value if mode is "fixed" (0-255)
+    min_particle_area: 300     # Min area for particles in unsubtracted FG image
+  # Parameters for compare_detected_particles (used to match subtracted and unsubtracted particles)
   particle_comparison:
-    search_radius_factor: 2
-    default_particle_area: 500
-  # Parameters for image_analysis_of_sample logic (frames for wim method)
+    search_radius_factor: 2.0
+    default_particle_area: 2000 # Typical particle area in pixels (used to derive search_radius)
+  # Parameters for image_analysis_of_sample logic (frames for wim method) - kept for reference
   wim_image_analysis_frames:
     frame1_delay: 0
     frame2_delay: 2
@@ -85,7 +92,7 @@ stage_02_quality_filter:
     energy_laplacian_min: 1730000
     energy_gradient_min: 145000000
   # Final crop size for saved "sharp objects"
-  final_sharp_crop_size: 150
+  final_sharp_crop_size: 200
 
 # Stage 3: ML Classification (derived from ws_identify_ideal_fems)
 stage_03_ml_classification:
