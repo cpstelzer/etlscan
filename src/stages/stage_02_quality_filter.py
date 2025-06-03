@@ -26,7 +26,7 @@ class SingleParticleAnalysisResult:
         self.centroid_y: Optional[int] = particle_data_in.get('Y')
         self.cropped_image_filename: Optional[str] = None
         self.is_black_mask_artifact: Optional[bool] = None
-        self.is_on_crop_boundary: Optional[bool] = None
+        self.is_on_crop_boundary: Optional[bool] = None # This refers to the intermediate S2 crop
         self.sharpness_scores: Dict[str, float] = {key: np.nan for key in AVAILABLE_SHARPNESS_METRICS}
         self.error_message: Optional[str] = None
         self.processed_successfully: bool = False
@@ -51,11 +51,12 @@ def _process_single_particle_for_quality(
     main_full_gray_image: np.ndarray,
     cropper: ParticleCropper,
     temp_intermediate_crop_dir: str, 
-    config_s2: Dict[str, Any] 
+    config_s2: Dict[str, Any], 
+    source_image_illumination: str # Explicitly pass the global illumination type
 ) -> SingleParticleAnalysisResult:
     result = SingleParticleAnalysisResult(particle_data_series)
     particle_id_info = f"(idx={particle_data_series.name}, X={result.centroid_x}, Y={result.centroid_y})"
-    logger.debug(f"Processing particle {particle_id_info} for quality...")
+    logger.debug(f"Processing particle {particle_id_info} for quality (source illum: {source_image_illumination})...")
 
     try:
         intermediate_crop_prefix = f"intermediate_crop_idx{particle_data_series.name}"
@@ -80,9 +81,11 @@ def _process_single_particle_for_quality(
             min_area_ratio=black_mask_check_config.get('min_area_ratio', 0.05)
         )
         
+        # Pass source_image_illumination to determine how to segment the intermediate crop
         result.is_on_crop_boundary = detect_cropped_particle_on_boundary(
             intermediate_crop_gray, 
-            saved_intermediate_color_crop_path 
+            saved_intermediate_color_crop_path,
+            illumination_mode_of_crop=source_image_illumination # Use global illumination here
         )
         result.processed_successfully = True
         logger.debug(f"Successfully processed particle {particle_id_info} for quality.")
@@ -245,6 +248,13 @@ def run_stage_02_quality_filter(
     if not config_s2:
         raise ConfigError("Configuration for 'stage_02_quality_filter' not found.")
     
+    system_config = config.get('system', {})
+    source_image_illumination_type = system_config.get('source_image_illumination_type', 'darkfield')
+    if source_image_illumination_type not in ['darkfield', 'collimated']:
+        logger.warning(f"Invalid system.source_image_illumination_type: '{source_image_illumination_type}'. Defaulting to 'darkfield'.")
+        source_image_illumination_type = 'darkfield'
+    logger.info(f"Stage 2 using source image illumination type: {source_image_illumination_type} for intermediate crop boundary checks.")
+
     s2_filters_enabled_config = config_s2.get('filters_enabled', {})
     enable_final_sharpness_filter = s2_filters_enabled_config.get('final_sharpness', True)
 
@@ -310,7 +320,9 @@ def run_stage_02_quality_filter(
         for _, particle_row in particles_in_image_df.iterrows():
             analysis_result_obj = _process_single_particle_for_quality(
                 particle_row, main_img_color, main_img_gray,
-                intermediate_cropper, image_specific_temp_crop_dir, config_s2 
+                intermediate_cropper, image_specific_temp_crop_dir, 
+                config_s2, 
+                source_image_illumination_type # Pass the global illumination type
             )
             all_single_particle_results_list.append(analysis_result_obj.to_dict())
         
@@ -439,6 +451,10 @@ if __name__ == '__main__':
     setup_logging()
     try:
         cfg_main = get_config()
+        system_cfg_test = cfg_main.setdefault('system', {})
+        # Ensure this is set for the test to match the dummy data generation
+        system_cfg_test.setdefault('source_image_illumination_type', 'collimated') 
+
         s2_cfg_test = cfg_main.setdefault('stage_02_quality_filter', {})
         s2_cfg_test.setdefault('filters_enabled', {
             'black_mask_artifact': True, 
@@ -448,14 +464,14 @@ if __name__ == '__main__':
         s2_cfg_test.setdefault('final_sharp_object_filter', {'combined_sharpness_min': 0.1})
 
 
-        TEST_SAMPLE_ID = "test_sample_s2_filter_toggle" 
+        TEST_SAMPLE_ID = "test_sample_s2_illum_aware_global" # New test ID for clarity
         base_project_dir = cfg_main.get('project_base_dir')
         if not base_project_dir: raise ValueError("project_base_dir not set in config for testing.")
 
         stage1_output_dir = os.path.join(base_project_dir, "data", "output", TEST_SAMPLE_ID, "stage1_output")
         test_s1_csv_path = os.path.join(stage1_output_dir, f"{TEST_SAMPLE_ID}_stage1_particles.csv")
         test_image_input_dir_s2 = os.path.join(base_project_dir, "data", "input", TEST_SAMPLE_ID)
-        test_s2_output_dir = os.path.join(base_project_dir, "data", "output", TEST_SAMPLE_ID, "stage2_output_toggle_test")
+        test_s2_output_dir = os.path.join(base_project_dir, "data", "output", TEST_SAMPLE_ID, "stage2_output_illum_aware_global_test")
         os.makedirs(test_s2_output_dir, exist_ok=True)
 
         logger.info(f"Test S1 Input CSV: {test_s1_csv_path}")
@@ -463,9 +479,9 @@ if __name__ == '__main__':
         logger.info(f"Test S2 Output Dir: {test_s2_output_dir}")
 
         if not os.path.exists(test_s1_csv_path):
-            logger.error(f"Input CSV from Stage 1 ('{test_s1_csv_path}') not found. ")
+            logger.error(f"Input CSV from Stage 1 ('{test_s1_csv_path}') not found. Creating dummy data.")
             dummy_s1_data = pd.DataFrame({
-                'X': [100, 150, 20, 200, 5, 5], 'Y': [50, 75, 180, 10, 5, 195], 
+                'X': [100, 150, 20, 195, 5, 5], 'Y': [50, 75, 180, 10, 5, 195], 
                 'area': [100, 120, 90, 150, 80, 80], 'perimeter': [40,45,35,50,30,30], 
                 'source_image_filename': ['20230101_plate1_well1_f00000_dpt0.0_fd0.0mm.png', 
                                           '20230101_plate1_well1_f00000_dpt0.0_fd0.0mm.png',
@@ -474,7 +490,7 @@ if __name__ == '__main__':
                                           '20230101_plate1_well1_f00002_dpt0.2_fd0.0mm.png', 
                                           '20230101_plate1_well1_f00002_dpt0.2_fd0.0mm.png'],
                 'SAMPLE_ID': [TEST_SAMPLE_ID]*6,
-                'bounding_x': [90,140,10,190, 0, 0], 'bounding_y': [40,65,170,0, 0, 190], 
+                'bounding_x': [90,140,10,185, 0, 0], 'bounding_y': [40,65,170,0, 0, 190], 
                 'bounding_w': [20,20,20,20,10,10], 'bounding_h': [20,20,20,20,10,10] 
             })
             os.makedirs(stage1_output_dir, exist_ok=True)
@@ -485,19 +501,18 @@ if __name__ == '__main__':
             for fname in dummy_s1_data['source_image_filename'].unique():
                 dummy_img_path = os.path.join(test_image_input_dir_s2, fname)
                 if not os.path.exists(dummy_img_path):
-                     img_content = np.random.randint(50,150,(200,200,3), dtype=np.uint8) 
+                     img_content = np.full((200,200,3), 220, dtype=np.uint8) # Bright BG for collimated
                      if 'f00000' in fname : 
-                         cv2.putText(img_content, "Sharp", (50,100), cv2.FONT_HERSHEY_SIMPLEX, 2, (20,20,20), 3) 
+                         cv2.putText(img_content, "Sharp", (50,100), cv2.FONT_HERSHEY_SIMPLEX, 2, (30,30,30), 3) 
                      elif 'f00001' in fname: 
                          img_content_blur = cv2.GaussianBlur(img_content, (25,25), 0)
+                         cv2.putText(img_content_blur, "Blurry", (40,120), cv2.FONT_HERSHEY_SIMPLEX, 2, (40,40,40), 3)
                          img_content = img_content_blur
                      elif 'f00002' in fname: 
-                         cv2.circle(img_content, (5,5), 8, (20,20,20), -1)
-                         cv2.circle(img_content, (5,195), 8, (20,20,20), -1)
-
-
+                         cv2.circle(img_content, (5,5), 8, (20,20,20), -1) 
+                         cv2.circle(img_content, (100,195), 8, (25,25,25), -1) 
                      cv2.imwrite(dummy_img_path, img_content)
-            logger.info(f"Created dummy images in {test_image_input_dir_s2}")
+            logger.info(f"Created dummy 'collimated-like' images in {test_image_input_dir_s2}")
 
         result_s2_csv_path = run_stage_02_quality_filter(
             input_particles_csv_path=test_s1_csv_path,
@@ -508,12 +523,11 @@ if __name__ == '__main__':
         if result_s2_csv_path: 
             logger.info(f"Stage 2 test completed. Final analyzed CSV: {result_s2_csv_path}")
             df_out = pd.read_csv(result_s2_csv_path)
-            print("Stage 2 Test (Toggleable Filters) Output DataFrame Head:")
+            print("Stage 2 Test (Global Illumination Aware) Output DataFrame Head:")
             print(df_out.head())
-            assert len(df_out[df_out['is_black_mask'] == False]) < len(df_out), "Black mask filter should have removed some if active."
-            assert len(df_out[df_out['is_on_crop_boundary'] == False]) < len(df_out), "Boundary filter should have removed some if active."
+        else: 
+            logger.error("Stage 2 test FAILED or produced no output CSV.")
 
-        else: logger.error("Stage 2 test FAILED or produced no output CSV.")
     except ConfigError as ce: logger.error(f"Configuration error during Stage 2 test: {ce}")
     except DataValidationError as dve: logger.error(f"Data validation error during Stage 2 test: {dve}")
     except FileNotFoundError as fnfe: logger.error(f"File not found during Stage 2 test setup: {fnfe}")

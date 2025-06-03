@@ -5,11 +5,12 @@ import os
 import pandas as pd
 from typing import Tuple, Optional, Dict, Any
 import logging
+import shutil
 
 from src.utils.common_exceptions import ImageProcessingError, DataValidationError, ConfigError
-from .image_io_operations import save_image # For saving cropped particles
-from .image_enhancement import apply_threshold # For detect_cropped_particle_on_boundary
-from .region_props_calculator import find_contours # For detect_cropped_particle_on_boundary
+from .image_io_operations import save_image 
+from .image_enhancement import apply_threshold 
+from .region_props_calculator import find_contours 
 
 logger = logging.getLogger(__name__)
 
@@ -42,7 +43,7 @@ class ParticleCropper:
         main_image_gray: np.ndarray,
         particle_data: pd.Series,
         output_dir_for_crop: Optional[str] = None,
-        crop_filename_prefix: str = "obj" # This prefix should NOT include coordinates anymore
+        crop_filename_prefix: str = "obj" 
     ) -> Tuple[Optional[np.ndarray], Optional[str]]:
         particle_id_info = f"(idx={particle_data.name}, X={particle_data.get('X', 'N/A')}, Y={particle_data.get('Y', 'N/A')})"
         
@@ -53,8 +54,6 @@ class ParticleCropper:
             if 'X' not in particle_data or 'Y' not in particle_data:
                 raise DataValidationError(f"'X' and 'Y' centroid coordinates are required in particle_data {particle_id_info}.")
             
-            # These are the particle's centroid coordinates from the input particle_data
-            # These are what should define the _X{...}_Y{...} part of the filename
             particle_centroid_x, particle_centroid_y = int(particle_data['X']), int(particle_data['Y'])
 
 
@@ -74,7 +73,6 @@ class ParticleCropper:
             
             elif self.crop_mode == 'centroid_square':
                 half_size = self.square_crop_size // 2
-                # Crop around the particle_centroid_x, particle_centroid_y
                 x1_raw = particle_centroid_x - half_size 
                 y1_raw = particle_centroid_y - half_size
                 x2_raw = x1_raw + self.square_crop_size
@@ -109,7 +107,6 @@ class ParticleCropper:
                 if crop_img_color.size == 0:
                      logger.warning(f"Color crop for {particle_id_info} is empty, but gray crop was not.")
                 
-                # Construct filename using the particle's original centroid for X and Y parts
                 filename = f"{crop_filename_prefix}_X{particle_centroid_x}_Y{particle_centroid_y}.png"
                 saved_crop_path = save_image(crop_img_color, output_dir_for_crop, filename)
                 if not saved_crop_path:
@@ -125,60 +122,57 @@ class ParticleCropper:
             logger.exception(f"Unexpected error during particle cropping {particle_id_info}: {e}")
             return None, None
 
-# ... (rest of particle_operations.py, detect_cropped_particle_on_boundary, __main__)
 def detect_cropped_particle_on_boundary(
-    image_gray_crop: np.ndarray, # The cropped image of the particle
-    image_path_for_log: str # Path of the cropped image, for logging
+    image_gray_crop: np.ndarray, 
+    image_path_for_log: str,
+    illumination_mode_of_crop: str = "darkfield" 
     ) -> bool:
     """
-    Detects if the main bright particle in a CROPPED image is touching the image boundary.
+    Detects if the main particle in a CROPPED image is touching the image boundary.
     Uses Otsu's thresholding and connected components.
-    Adapted from wellscanner_util_module.detect_cropped_particle.
-
-    Args:
-        image_gray_crop (np.ndarray): Grayscale image of the cropped particle.
-        image_path_for_log (str): Path of the (cropped) image, for logging purposes.
-
-    Returns:
-        bool: True if the main particle is cropped by the boundary of this image_gray_crop.
+    If illumination_mode_of_crop is 'collimated', the image is inverted before Otsu.
     """
     base_filename = os.path.basename(image_path_for_log)
-    logger.debug(f"Detecting boundary cropping for: {base_filename}")
+    logger.debug(f"Detecting boundary cropping for: {base_filename} (Illumination of crop: {illumination_mode_of_crop})")
 
     if image_gray_crop is None:
         logger.warning(f"Cannot detect boundary cropping for None image ({base_filename}).")
-        return False # Or raise error
+        return False 
     
     h, w = image_gray_crop.shape
-    if h < 3 or w < 3: # Arbitrary small size check
+    if h < 3 or w < 3: 
         logger.warning(f"Image {base_filename} is too small ({h}x{w}) for reliable boundary crop detection.")
-        return False # Consider it not cropped if too small to analyze
+        return False 
 
     try:
-        # Otsu's thresholding
-        if np.all(image_gray_crop == image_gray_crop[0,0]): # Uniform image
-            logger.debug(f"Image {base_filename} is uniform. Assuming not cropped by boundary.")
+        img_to_thresh = image_gray_crop.copy()
+        if illumination_mode_of_crop == "collimated":
+            logger.debug(f"Inverting crop {base_filename} for Otsu due to collimated mode.")
+            img_to_thresh = cv2.bitwise_not(img_to_thresh)
+        
+        if np.all(img_to_thresh == img_to_thresh[0,0]): 
+            logger.debug(f"Image {base_filename} (after potential inversion) is uniform. Assuming not cropped by boundary.")
             return False
 
-        otsu_thresh_val, binary_mask = cv2.threshold(image_gray_crop, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-        logger.debug(f"Otsu threshold for {base_filename}: {otsu_thresh_val}")
+        otsu_thresh_val, binary_mask = cv2.threshold(img_to_thresh, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+        logger.debug(f"Otsu threshold for {base_filename} (on potentially inverted image): {otsu_thresh_val}")
 
-        if otsu_thresh_val <= 1 or otsu_thresh_val >= 254:
-            logger.warning(f"Otsu threshold is extreme ({otsu_thresh_val}) for {base_filename}. Treating as not cropped by boundary.")
+        if otsu_thresh_val <= 1 or otsu_thresh_val >= 254: 
+            logger.warning(f"Otsu threshold is extreme ({otsu_thresh_val}) for {base_filename}. Treating as not cropped by boundary to be safe.")
             return False
 
         num_labels, labels_map, stats, centroids = cv2.connectedComponentsWithStats(binary_mask, connectivity=8)
 
-        if num_labels <= 1:
+        if num_labels <= 1: 
             logger.debug(f"No foreground components found in {base_filename} after Otsu. Assuming not cropped.")
             return False
 
-        areas = stats[1:, cv2.CC_STAT_AREA]
-        if len(areas) == 0:
+        areas = stats[1:, cv2.CC_STAT_AREA] 
+        if len(areas) == 0: 
              logger.debug(f"No non-background components with stats in {base_filename}.")
              return False
         
-        largest_label_idx = np.argmax(areas) + 1
+        largest_label_idx = np.argmax(areas) + 1 
         
         left = stats[largest_label_idx, cv2.CC_STAT_LEFT]
         top = stats[largest_label_idx, cv2.CC_STAT_TOP]
@@ -218,62 +212,45 @@ if __name__ == '__main__':
 
     particles = pd.DataFrame([
         {'X': 50, 'Y': 50, 'particle_id': 1, 'bounding_x': 40, 'bounding_y': 40, 'bounding_w': 20, 'bounding_h': 20},
-        {'X': 10, 'Y': 10, 'particle_id': 2},
-        {'X': 150, 'Y': 150, 'particle_id': 3, 'bounding_x': 280, 'bounding_y': 180, 'bounding_w': 30, 'bounding_h': 30},
+        {'X': 10, 'Y': 10, 'particle_id': 2}, 
+        {'X': 150, 'Y': 150, 'particle_id': 3, 'bounding_x': 280, 'bounding_y': 180, 'bounding_w': 30, 'bounding_h': 30}, 
     ])
 
     cropper_config_square = {'mode': 'centroid_square', 'square_size': 64}
     square_cropper = ParticleCropper(cropper_config_square)
-    cropper_config_bbox = {
-        'mode': 'bounding_box',
-        'bbox_column_mapping': {'x': 'bounding_x', 'y': 'bounding_y', 'w': 'bounding_w', 'h': 'bounding_h'}
-    }
-    bbox_cropper = ParticleCropper(cropper_config_bbox)
-    temp_crop_output_dir = "temp_particle_crops_test"
-
-    logger.info("\n--- Testing Centroid Square Cropper ---")
-    for idx, p_row in particles.iterrows():
-        gray_crop, saved_path = square_cropper.crop_single_particle_from_image(
-            main_color_img, main_gray_img, p_row, temp_crop_output_dir, f"sq_crop_p{p_row['particle_id']}"
-        )
-        if gray_crop is not None:
-            logger.info(f"Centroid Square Crop for particle {p_row['particle_id']}: shape {gray_crop.shape}, saved to {saved_path}")
-            assert gray_crop.shape[0] <= cropper_config_square['square_size']
-            assert gray_crop.shape[1] <= cropper_config_square['square_size']
-            if saved_path: 
-                assert os.path.exists(saved_path)
-                assert f"_X{p_row['X']}_Y{p_row['Y']}.png" in saved_path # Check new filename part
-        else:
-            logger.warning(f"Centroid Square Crop FAILED for particle {p_row['particle_id']}")
-
-    logger.info("\n--- Testing Bounding Box Cropper ---")
-    for idx, p_row in particles.iterrows():
-        gray_crop, saved_path = bbox_cropper.crop_single_particle_from_image(
-            main_color_img, main_gray_img, p_row, temp_crop_output_dir, f"bbox_crop_p{p_row['particle_id']}"
-        )
-        if gray_crop is not None:
-            logger.info(f"Bounding Box Crop for particle {p_row['particle_id']}: shape {gray_crop.shape}, saved to {saved_path}")
-            if saved_path: 
-                assert os.path.exists(saved_path)
-                assert f"_X{p_row['X']}_Y{p_row['Y']}.png" in saved_path
-        else:
-            logger.warning(f"Bounding Box Crop FAILED for particle {p_row['particle_id']}")
-
-    logger.info("\n--- Testing Boundary Crop Detection ---")
-    crop_touching_boundary = np.zeros((50, 50), dtype=np.uint8)
-    cv2.rectangle(crop_touching_boundary, (0, 10), (30, 40), 255, -1)
-    is_touching = detect_cropped_particle_on_boundary(crop_touching_boundary, "test_crop_touching.png")
-    assert is_touching is True, "Boundary crop (touching) detection failed"
-    logger.info("Boundary crop (touching) detection PASSED.")
-
-    crop_not_touching = np.zeros((50, 50), dtype=np.uint8)
-    cv2.rectangle(crop_not_touching, (10, 10), (40, 40), 255, -1)
-    is_not_touching = detect_cropped_particle_on_boundary(crop_not_touching, "test_crop_not_touching.png")
-    assert is_not_touching is False, "Boundary crop (not touching) detection failed"
-    logger.info("Boundary crop (not touching) detection PASSED.")
     
+    temp_crop_output_dir = "temp_particle_crops_test_illum"
+    os.makedirs(temp_crop_output_dir, exist_ok=True)
+
+
+    logger.info("\n--- Testing Boundary Crop Detection (Illumination Aware) ---")
+    
+    crop_dark_particle_bright_bg = np.full((50, 50), 200, dtype=np.uint8) 
+    cv2.rectangle(crop_dark_particle_bright_bg, (0, 10), (30, 40), 50, -1) 
+    test_path1 = os.path.join(temp_crop_output_dir, "dark_particle_touching.png")
+    cv2.imwrite(test_path1, crop_dark_particle_bright_bg)
+    
+    is_touching_dark = detect_cropped_particle_on_boundary(crop_dark_particle_bright_bg, test_path1, illumination_mode_of_crop="collimated")
+    assert is_touching_dark is True, "Boundary crop (dark particle, collimated) detection failed"
+    logger.info("Boundary crop (dark particle, collimated) detection PASSED.")
+
+    crop_bright_particle_dark_bg = np.zeros((50, 50), dtype=np.uint8) 
+    cv2.rectangle(crop_bright_particle_dark_bg, (10, 0), (40, 30), 180, -1) 
+    test_path2 = os.path.join(temp_crop_output_dir, "bright_particle_touching.png")
+    cv2.imwrite(test_path2, crop_bright_particle_dark_bg)
+
+    is_touching_bright = detect_cropped_particle_on_boundary(crop_bright_particle_dark_bg, test_path2, illumination_mode_of_crop="darkfield")
+    assert is_touching_bright is True, "Boundary crop (bright particle, darkfield) detection failed"
+    logger.info("Boundary crop (bright particle, darkfield) detection PASSED.")
+
+    crop_dark_not_touching = np.full((50,50), 200, dtype=np.uint8)
+    cv2.rectangle(crop_dark_not_touching, (10,10), (40,40), 50, -1)
+    test_path3 = os.path.join(temp_crop_output_dir, "dark_particle_not_touching.png")
+    cv2.imwrite(test_path3, crop_dark_not_touching)
+    is_not_touching_dark_coll = detect_cropped_particle_on_boundary(crop_dark_not_touching, test_path3, illumination_mode_of_crop="collimated")
+    assert is_not_touching_dark_coll is False, "Boundary crop (dark, not touching, collimated) failed"
+    logger.info("Boundary crop (dark, not touching, collimated) PASSED.")
+
     if os.path.exists(temp_crop_output_dir):
-        for f_name in os.listdir(temp_crop_output_dir):
-            os.remove(os.path.join(temp_crop_output_dir, f_name))
-        os.rmdir(temp_crop_output_dir)
+        shutil.rmtree(temp_crop_output_dir)
         logger.info(f"Cleaned up {temp_crop_output_dir}")

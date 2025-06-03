@@ -18,6 +18,7 @@ logging:
 system:
   image_width_px: 4504 # Example, used if auto_center_mask is False
   image_height_px: 4504 # Example, used if auto_center_mask is False
+  source_image_illumination_type: "collimated" # << NEW GLOBAL SETTING, taking "collimated" as the consistent value from your original S1/S3
 
 # Stage 1: Initial Detection (derived from ws_background_subtraction & wellcounter_imaging_module)
 stage_01_initial_detection:
@@ -30,7 +31,7 @@ stage_01_initial_detection:
     radius_fraction: 0.77 # Factor to shrink auto-detected or fixed radius
   # Parameters for wellcounter_imaging_module.analyze_microorganisms (SUBTRACTED IMAGE ANALYSIS)
   particle_analysis: # This section is for the SUBTRACTED images
-    illumination: "collimated" # "darkfield" or "collimated" (affects how subtracted image is processed if it implies inversion)
+    # illumination: "collimated" # << REMOVED - Uses system.source_image_illumination_type to prepare inputs
     apply_convolution: False
     convolution_kernel: # Standard 5x5 sharpening-like kernel
       - [0,  0,  0,  0,  0]
@@ -44,9 +45,7 @@ stage_01_initial_detection:
     filter_by_shape: False # If True, uses hardcoded quantiles from original wim
   # Parameters for UNSUBTRACTED (original FG) image analysis
   unsubtracted_particle_analysis:
-    illumination: "collimated" # "darkfield" or "collimated".
-                               # 'collimated' if original FG is brightfield-like (dark objects on bright bg -> invert to find bright objects).
-                               # 'darkfield' if original FG is darkfield-like (bright objects on dark bg -> no inversion).
+    # illumination: "collimated" # << REMOVED - Uses system.source_image_illumination_type
     blur_kernel_size: 3        # Blur kernel size (e.g., 3, 5, 0 to disable). Must be odd if > 0.
     thresholding_mode: "otsu"  # "otsu" or "fixed"
     fixed_threshold_value: 70  # Threshold value if mode is "fixed" (0-255)
@@ -79,49 +78,38 @@ stage_02_quality_filter:
   sharpness_metrics: # List of raw sharpness metrics to normalize and combine
     - "variance_laplacian"
     - "tenengrad_variance"
-    - "energy_laplacian" # Example: comment out if not desired
+    - "energy_laplacian" 
     - "energy_gradient"
-  final_sharp_object_filter: # Criteria for objects to be saved as final sharp crops
-    # Add metrics here, e.g., combined_sharpness_min: 0.3
-    # Ensure the metric name here matches a column in the s2_analyzed_particles_df
-    # (either a raw metric or 'combined_sharpness' or a normalized metric like 'variance_laplacian_norm')
+  final_sharp_object_filter: 
     combined_sharpness_min: 0.25
-    # variance_laplacian_min: 50.0 # Example of another filter
-  final_sharp_crop_size: 150 # Pixel dimension for the final square crop of sharp objects
-
-  # --- NEW SECTION FOR TOGGLING FILTERS ---
+  final_sharp_crop_size: 150 
   filters_enabled:
-    black_mask_artifact: true   # true to enable black mask artifact filtering, false to disable
-    on_crop_boundary: false    # true to enable on-crop-boundary filtering, false to disable
-    final_sharpness: true     # true to enable the 'final_sharp_object_filter' and saving of sharp crops, false to disable
+    black_mask_artifact: true   
+    on_crop_boundary: true    
+    final_sharpness: true     
 
 # Stage 3: ML Classification (derived from ws_identify_ideal_fems)
 stage_03_ml_classification:
   model_filename: "rf_fem_classifier.joblib"
   scaler_filename: "rf_fem_scaler.joblib"
-  image_extensions: [".png", ".tif", ".tiff", ".jpg", ".jpeg"] # For scanning image dirs
-  # Feature extraction parameters
+  image_extensions: [".png", ".tif", ".tiff", ".jpg", ".jpeg"] 
   feature_extraction_params:
-    illumination: "collimated" # "darkfield" or "collimated" - for processing cropped images
+    # illumination: "collimated" # << REMOVED - Uses system.source_image_illumination_type
     gaussian_sigma: 1.0
-    thresholding_mode: "otsu" # Options: "otsu", "fixed". Default is "otsu" if not specified.
-    # For Otsu mode:
-    otsu_threshold_multiplier: 0.7 
-    # For Fixed mode (value should be 0-255 for uint8 images, will be converted to 0-1 float internally):
-    fixed_threshold_value: 80 # Example: use if thresholding_mode is "fixed"
-    closing_selem_size: 1
+    thresholding_mode: "otsu" 
+    otsu_threshold_multiplier: 0.7
+    fixed_threshold_value: 80 
+    closing_selem_size: 3
     min_noise_size: 50
     min_significant_area: 300
-    # Egg area detection parameters
     egg_posterior_pixel_fraction: 0.4 
-    egg_threshold_quantile: 0.8 
+    egg_threshold_quantile: 0.8 # This quantile is now applied to the image *after* it has been potentially inverted based on source_image_illumination_type. So, if particles (and eggs) are bright in that domain, use a high quantile.
     egg_min_area: 50             
     egg_max_area: 5000           
     egg_min_solidity: 0.60       
     egg_max_solidity: 0.99       
     egg_min_eccentricity: 0.2    
     orientation_diff_tolerance_deg: 85 
-  # Training parameters for RandomForest
   training_params:
     good_data_subdir: "good" 
     bad_data_subdir: "bad"   
@@ -135,13 +123,11 @@ stage_03_ml_classification:
       class_weight: ["balanced", null]
     grid_search_cv_folds: 3
     grid_search_scoring: "f1_weighted" 
-
   post_ml_filters:
     deduplication:
       enabled: true
       proximity_threshold_pixels: 100 
       max_adjacent_frame_difference: 2 
-    
     boundary_recheck:
       enabled: true
 
