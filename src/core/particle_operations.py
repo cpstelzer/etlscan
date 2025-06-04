@@ -6,6 +6,8 @@ import pandas as pd
 from typing import Tuple, Optional, Dict, Any
 import logging
 import shutil
+import skimage.util
+import skimage.filters # Added for skimage.filters.threshold_otsu
 
 from src.utils.common_exceptions import ImageProcessingError, DataValidationError, ConfigError
 from .image_io_operations import save_image 
@@ -123,53 +125,76 @@ class ParticleCropper:
             return None, None
 
 def detect_cropped_particle_on_boundary(
-    image_gray_crop: np.ndarray, 
+    image_gray_crop_uint8: np.ndarray, # Expects uint8 input
     image_path_for_log: str,
-    illumination_mode_of_crop: str = "darkfield" 
+    illumination_mode_of_crop: str,
+    thresholding_mode: str,
+    otsu_threshold_multiplier: float,
+    fixed_threshold_value_int: int # 0-255
     ) -> bool:
     """
     Detects if the main particle in a CROPPED image is touching the image boundary.
-    Uses Otsu's thresholding and connected components.
-    If illumination_mode_of_crop is 'collimated', the image is inverted before Otsu.
+    Uses thresholding consistent with the main pipeline (e.g., extract_ml_features).
     """
     base_filename = os.path.basename(image_path_for_log)
-    logger.debug(f"Detecting boundary cropping for: {base_filename} (Illumination of crop: {illumination_mode_of_crop})")
+    log_prefix = f"BoundaryCheck '{base_filename}' (Illum: {illumination_mode_of_crop}, ThreshMode: {thresholding_mode}):"
 
-    if image_gray_crop is None:
-        logger.warning(f"Cannot detect boundary cropping for None image ({base_filename}).")
+    if image_gray_crop_uint8 is None:
+        logger.warning(f"{log_prefix} Cannot detect boundary for None image.")
         return False 
     
-    h, w = image_gray_crop.shape
+    h, w = image_gray_crop_uint8.shape
     if h < 3 or w < 3: 
-        logger.warning(f"Image {base_filename} is too small ({h}x{w}) for reliable boundary crop detection.")
+        logger.warning(f"{log_prefix} Image too small ({h}x{w}) for reliable boundary detection.")
         return False 
 
     try:
-        img_to_thresh = image_gray_crop.copy()
+        # 1. Convert to float [0,1] for consistent processing with skimage
+        img_float_for_segment = skimage.util.img_as_float(image_gray_crop_uint8)
+
+        # 2. Invert if collimated (operates on float image)
         if illumination_mode_of_crop == "collimated":
-            logger.debug(f"Inverting crop {base_filename} for Otsu due to collimated mode.")
-            img_to_thresh = cv2.bitwise_not(img_to_thresh)
+            logger.debug(f"{log_prefix} Inverting crop for segmentation.")
+            img_float_for_segment = 1.0 - img_float_for_segment
         
-        if np.all(img_to_thresh == img_to_thresh[0,0]): 
-            logger.debug(f"Image {base_filename} (after potential inversion) is uniform. Assuming not cropped by boundary.")
-            return False
+        # 3. (No blurring is applied here, to keep edge precision for boundary check on small crops)
 
-        otsu_thresh_val, binary_mask = cv2.threshold(img_to_thresh, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-        logger.debug(f"Otsu threshold for {base_filename} (on potentially inverted image): {otsu_thresh_val}")
+        # 4. Apply threshold based on mode (mimicking extract_ml_features)
+        binary_mask_bool: np.ndarray
+        if thresholding_mode == 'otsu':
+            if img_float_for_segment.min() == img_float_for_segment.max():
+                logger.debug(f"{log_prefix} Image is uniform. Assuming not on boundary.")
+                return False
+            try:
+                otsu_thresh_raw_sk = skimage.filters.threshold_otsu(img_float_for_segment) # float 0-1
+            except ValueError:
+                logger.warning(f"{log_prefix} Skimage Otsu failed (likely uniform/empty). Assuming not on boundary.")
+                return False
+            
+            final_thresh_float = otsu_thresh_raw_sk * otsu_threshold_multiplier
+            logger.debug(f"{log_prefix} Otsu: RawSk={otsu_thresh_raw_sk:.4f}, Mult={otsu_threshold_multiplier}, FinalFloatThresh={final_thresh_float:.4f}")
+            binary_mask_bool = img_float_for_segment > final_thresh_float
 
-        if otsu_thresh_val <= 1 or otsu_thresh_val >= 254: 
-            logger.warning(f"Otsu threshold is extreme ({otsu_thresh_val}) for {base_filename}. Treating as not cropped by boundary to be safe.")
-            return False
+        elif thresholding_mode == 'fixed':
+            final_thresh_float = fixed_threshold_value_int / 255.0
+            logger.debug(f"{log_prefix} Fixed: ValueInt={fixed_threshold_value_int}, FinalFloatThresh={final_thresh_float:.4f}")
+            binary_mask_bool = img_float_for_segment > final_thresh_float
+        else:
+            logger.error(f"{log_prefix} Invalid thresholding_mode: '{thresholding_mode}'.")
+            return False # Or raise error
 
-        num_labels, labels_map, stats, centroids = cv2.connectedComponentsWithStats(binary_mask, connectivity=8)
+        binary_mask_uint8 = binary_mask_bool.astype(np.uint8) * 255
+        
+        # 5. Proceed with connected components on binary_mask_uint8
+        num_labels, _, stats, _ = cv2.connectedComponentsWithStats(binary_mask_uint8, connectivity=8)
 
-        if num_labels <= 1: 
-            logger.debug(f"No foreground components found in {base_filename} after Otsu. Assuming not cropped.")
+        if num_labels <= 1: # Only background label
+            logger.debug(f"{log_prefix} No foreground components found after thresholding. Assuming not cropped by boundary.")
             return False
 
         areas = stats[1:, cv2.CC_STAT_AREA] 
         if len(areas) == 0: 
-             logger.debug(f"No non-background components with stats in {base_filename}.")
+             logger.debug(f"{log_prefix} No non-background components with stats.")
              return False
         
         largest_label_idx = np.argmax(areas) + 1 
@@ -178,10 +203,8 @@ def detect_cropped_particle_on_boundary(
         top = stats[largest_label_idx, cv2.CC_STAT_TOP]
         width_comp = stats[largest_label_idx, cv2.CC_STAT_WIDTH]
         height_comp = stats[largest_label_idx, cv2.CC_STAT_HEIGHT]
-        area_comp = stats[largest_label_idx, cv2.CC_STAT_AREA]
-
-        logger.debug(f"Largest component in {base_filename} (L{largest_label_idx}): "
-                     f"Area={area_comp}, BBox=({left},{top},{width_comp},{height_comp})")
+        
+        logger.debug(f"{log_prefix} Largest component (L{largest_label_idx}): Area={stats[largest_label_idx, cv2.CC_STAT_AREA]}, BBox=({left},{top},{width_comp},{height_comp})")
 
         touches_top_border = (top == 0)
         touches_bottom_border = (top + height_comp == h)
@@ -192,9 +215,9 @@ def detect_cropped_particle_on_boundary(
                                  touches_left_border or touches_right_border
         
         if is_cropped_by_boundary:
-            logger.debug(f"Particle in {base_filename} touches the crop's boundary. Marked as BOUNDARY_CROPPED.")
+            logger.info(f"{log_prefix} Particle touches the crop's boundary. Marked as BOUNDARY_CROPPED.")
         else:
-            logger.debug(f"Particle in {base_filename} does not touch the crop's boundary. Marked as NOT BOUNDARY_CROPPED.")
+            logger.debug(f"{log_prefix} Particle does not touch the crop's boundary. Marked as NOT BOUNDARY_CROPPED.")
         
         return is_cropped_by_boundary
 
@@ -219,37 +242,58 @@ if __name__ == '__main__':
     cropper_config_square = {'mode': 'centroid_square', 'square_size': 64}
     square_cropper = ParticleCropper(cropper_config_square)
     
-    temp_crop_output_dir = "temp_particle_crops_test_illum"
+    temp_crop_output_dir = "temp_particle_crops_test_skimage_thresh" # New test dir name
     os.makedirs(temp_crop_output_dir, exist_ok=True)
 
 
-    logger.info("\n--- Testing Boundary Crop Detection (Illumination Aware) ---")
+    logger.info("\n--- Testing Boundary Crop Detection (Skimage Thresholding Logic) ---")
     
-    crop_dark_particle_bright_bg = np.full((50, 50), 200, dtype=np.uint8) 
-    cv2.rectangle(crop_dark_particle_bright_bg, (0, 10), (30, 40), 50, -1) 
-    test_path1 = os.path.join(temp_crop_output_dir, "dark_particle_touching.png")
-    cv2.imwrite(test_path1, crop_dark_particle_bright_bg)
+    # Example: Dark particle on bright background (simulating "collimated" original)
+    crop_dark_particle_bright_bg_distinct = np.full((50, 50), 250, dtype=np.uint8) # Very bright BG
+    cv2.rectangle(crop_dark_particle_bright_bg_distinct, (0, 10), (30, 40), 10, -1) # Very dark particle, touches left
+    test_path1_distinct = os.path.join(temp_crop_output_dir, "dark_particle_touching_distinct_sk.png")
+    cv2.imwrite(test_path1_distinct, crop_dark_particle_bright_bg_distinct)
     
-    is_touching_dark = detect_cropped_particle_on_boundary(crop_dark_particle_bright_bg, test_path1, illumination_mode_of_crop="collimated")
-    assert is_touching_dark is True, "Boundary crop (dark particle, collimated) detection failed"
-    logger.info("Boundary crop (dark particle, collimated) detection PASSED.")
+    is_touching_sk_otsu = detect_cropped_particle_on_boundary(
+        crop_dark_particle_bright_bg_distinct, test_path1_distinct, 
+        illumination_mode_of_crop="collimated", 
+        thresholding_mode="otsu",
+        otsu_threshold_multiplier=0.45, # Consistent with typical S3 config
+        fixed_threshold_value_int=70   # Not used for Otsu mode
+    )
+    assert is_touching_sk_otsu is True, "Boundary crop (distinct dark particle, collimated, skimage Otsu logic) detection failed"
+    logger.info("Boundary crop (distinct dark particle, collimated, skimage Otsu logic) detection PASSED.")
 
-    crop_bright_particle_dark_bg = np.zeros((50, 50), dtype=np.uint8) 
-    cv2.rectangle(crop_bright_particle_dark_bg, (10, 0), (40, 30), 180, -1) 
-    test_path2 = os.path.join(temp_crop_output_dir, "bright_particle_touching.png")
-    cv2.imwrite(test_path2, crop_bright_particle_dark_bg)
+    # Test with fixed thresholding
+    crop_fixed_thresh_touching = np.full((50,50), 100, dtype=np.uint8)
+    cv2.rectangle(crop_fixed_thresh_touching, (40,10), (49,40), 200, -1) # Bright particle touches right
+    test_path_fixed = os.path.join(temp_crop_output_dir, "fixed_thresh_touching_sk.png")
+    cv2.imwrite(test_path_fixed, crop_fixed_thresh_touching)
 
-    is_touching_bright = detect_cropped_particle_on_boundary(crop_bright_particle_dark_bg, test_path2, illumination_mode_of_crop="darkfield")
-    assert is_touching_bright is True, "Boundary crop (bright particle, darkfield) detection failed"
-    logger.info("Boundary crop (bright particle, darkfield) detection PASSED.")
+    is_touching_sk_fixed = detect_cropped_particle_on_boundary(
+        crop_fixed_thresh_touching, test_path_fixed,
+        illumination_mode_of_crop="darkfield", # Particle is bright
+        thresholding_mode="fixed",
+        otsu_threshold_multiplier=0.45, # Not used
+        fixed_threshold_value_int=150 # Should segment the particle
+    )
+    assert is_touching_sk_fixed is True, "Boundary crop (bright particle, darkfield, skimage Fixed logic) failed"
+    logger.info("Boundary crop (bright particle, darkfield, skimage Fixed logic) PASSED.")
 
-    crop_dark_not_touching = np.full((50,50), 200, dtype=np.uint8)
-    cv2.rectangle(crop_dark_not_touching, (10,10), (40,40), 50, -1)
-    test_path3 = os.path.join(temp_crop_output_dir, "dark_particle_not_touching.png")
-    cv2.imwrite(test_path3, crop_dark_not_touching)
-    is_not_touching_dark_coll = detect_cropped_particle_on_boundary(crop_dark_not_touching, test_path3, illumination_mode_of_crop="collimated")
-    assert is_not_touching_dark_coll is False, "Boundary crop (dark, not touching, collimated) failed"
-    logger.info("Boundary crop (dark, not touching, collimated) PASSED.")
+    # Test for not touching
+    crop_dark_not_touching_sk = np.full((50,50), 200, dtype=np.uint8)
+    cv2.rectangle(crop_dark_not_touching_sk, (10,10), (40,40), 50, -1) # Not touching
+    test_path3_sk = os.path.join(temp_crop_output_dir, "dark_particle_not_touching_sk.png")
+    cv2.imwrite(test_path3_sk, crop_dark_not_touching_sk)
+    is_not_touching_sk = detect_cropped_particle_on_boundary(
+        crop_dark_not_touching_sk, test_path3_sk, 
+        illumination_mode_of_crop="collimated",
+        thresholding_mode="otsu",
+        otsu_threshold_multiplier=0.45,
+        fixed_threshold_value_int=70
+    )
+    assert is_not_touching_sk is False, "Boundary crop (dark, not touching, collimated, skimage Otsu) failed"
+    logger.info("Boundary crop (dark, not touching, collimated, skimage Otsu) PASSED.")
 
     if os.path.exists(temp_crop_output_dir):
         shutil.rmtree(temp_crop_output_dir)

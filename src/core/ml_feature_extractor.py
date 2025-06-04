@@ -45,17 +45,21 @@ def extract_ml_features(
             else:
                  image_gray = img_loaded_gray 
         else:
-            image_gray = image_array_gray.copy() 
+            # Ensure it's float if coming from array
+            if not np.issubdtype(image_array_gray.dtype, np.floating):
+                image_gray = skimage.util.img_as_float(image_array_gray)
+            else:
+                image_gray = image_array_gray.copy()
+
 
         img_gray_input_shape = image_gray.shape 
 
-        # Get global source illumination type from params
         source_illumination_type = params.get('source_image_illumination_type', 'darkfield')
         if source_illumination_type not in ['darkfield', 'collimated']:
             logger.warning(f"Invalid source_image_illumination_type '{source_illumination_type}' in params. Defaulting to 'darkfield'.")
             source_illumination_type = 'darkfield'
 
-        image_gray_for_processing = image_gray.copy() # Use this for processing steps
+        image_gray_for_processing = image_gray.copy() 
         if source_illumination_type == 'collimated':
             logger.debug(f"ML Feature Extraction: Source illumination '{source_illumination_type}'. Inverting image for {os.path.basename(image_path)}.")
             image_gray_for_processing = 1.0 - image_gray_for_processing
@@ -64,29 +68,30 @@ def extract_ml_features(
             logger.debug(f"Image {os.path.basename(image_path)} is empty or near-empty after potential inversion. No features extracted.")
             return None, None, None
 
-        blurred_image = skimage.filters.gaussian(image_gray_for_processing, sigma=params.get('gaussian_sigma', 1.0))
+        # --- MODIFICATION: Pre-thresholding blur REMOVED for main body segmentation ---
+        # blurred_image = skimage.filters.gaussian(image_gray_for_processing, sigma=params.get('gaussian_sigma', 1.0))
+        # Use image_gray_for_processing directly for thresholding
+        image_to_threshold = image_gray_for_processing
+        # --- END MODIFICATION ---
         
-        if blurred_image.min() == blurred_image.max(): 
-            logger.debug(f"Image {os.path.basename(image_path)} became blank after blurring. No features.")
+        if image_to_threshold.min() == image_to_threshold.max(): 
+            logger.debug(f"Image {os.path.basename(image_path)} became blank or uniform before thresholding. No features.")
             return None, None, None
         
-        # Use thresholding parameters passed in `params`
         thresholding_mode = params.get('thresholding_mode', 'otsu') 
         final_threshold_value_float: Optional[float] = None 
 
         if thresholding_mode == 'otsu':
-            if blurred_image.min() == blurred_image.max(): 
-                logger.warning(f"Image {os.path.basename(image_path)} is uniform after blurring. Otsu thresholding cannot be applied robustly. Skipping feature extraction.")
-                return None, None, None
+            # image_to_threshold is already float [0,1]
             try:
-                otsu_thresh_val_raw = skimage.filters.threshold_otsu(blurred_image)
+                otsu_thresh_val_raw_sk = skimage.filters.threshold_otsu(image_to_threshold)
             except ValueError: 
-                logger.warning(f"Otsu threshold failed for {os.path.basename(image_path)}. Skipping feature extraction.")
+                logger.warning(f"Skimage Otsu threshold failed for {os.path.basename(image_path)}. Skipping feature extraction.")
                 return None, None, None
             
-            otsu_multiplier = params.get('otsu_threshold_multiplier', 0.45) # Default from centralized config idea
-            final_threshold_value_float = otsu_thresh_val_raw * otsu_multiplier
-            logger.debug(f"Using Otsu thresholding for {os.path.basename(image_path)}. Raw Otsu: {otsu_thresh_val_raw:.4f}, Multiplier: {otsu_multiplier}, Final threshold (0-1): {final_threshold_value_float:.4f}")
+            otsu_multiplier = params.get('otsu_threshold_multiplier', 0.45)
+            final_threshold_value_float = otsu_thresh_val_raw_sk * otsu_multiplier
+            logger.debug(f"Using Skimage Otsu thresholding for {os.path.basename(image_path)}. Raw Skimage Otsu: {otsu_thresh_val_raw_sk:.4f}, Multiplier: {otsu_multiplier}, Final threshold (0-1): {final_threshold_value_float:.4f}")
 
         elif thresholding_mode == 'fixed':
             fixed_thresh_val_config_int = params.get('fixed_threshold_value')
@@ -100,9 +105,6 @@ def extract_ml_features(
                 logger.error(f"'fixed_threshold_value' ({fixed_thresh_val_config_int}) must be an integer (0-255).")
                 raise ConfigError(f"'fixed_threshold_value' ({fixed_thresh_val_config_int}) is not a valid integer.")
 
-            if not (0 <= fixed_thresh_int <= 255): # Allow outside 0-1 range from config, but 0-255 for int
-                logger.warning(f"Fixed threshold value (config) {fixed_thresh_int} for {os.path.basename(image_path)} is outside the 0-255 range. Ensure this is intended.")
-            
             final_threshold_value_float = fixed_thresh_int / 255.0 
             logger.debug(f"Using fixed thresholding for {os.path.basename(image_path)}. Config value (0-255): {fixed_thresh_int}, Converted threshold (0-1): {final_threshold_value_float:.4f}")
         
@@ -114,28 +116,29 @@ def extract_ml_features(
              logger.error(f"Final threshold value (float) not set for {os.path.basename(image_path)}. Aborting feature extraction for this image.")
              return None, None, None
         
-        main_binary_mask = blurred_image > final_threshold_value_float
+        main_binary_mask_initial_bool = image_to_threshold > final_threshold_value_float # Result is boolean array
         
-        main_cleaned_mask = skimage.morphology.remove_small_objects(
-            main_binary_mask, min_size=params.get('min_noise_size', 50)
+        main_cleaned_mask_bool = skimage.morphology.remove_small_objects(
+            main_binary_mask_initial_bool, min_size=params.get('min_noise_size', 50)
         )
         
         selem_closing_size = params.get('closing_selem_size', 3)
         if selem_closing_size > 0:
             selem_closing = skimage.morphology.disk(selem_closing_size)
-            main_closed_mask = skimage.morphology.binary_closing(main_cleaned_mask, selem_closing)
+            main_closed_mask_bool = skimage.morphology.binary_closing(main_cleaned_mask_bool, selem_closing)
         else:
-            main_closed_mask = main_cleaned_mask
+            main_closed_mask_bool = main_cleaned_mask_bool
             
-        main_filled_mask = ndi.binary_fill_holes(main_closed_mask)
+        main_filled_mask_bool = ndi.binary_fill_holes(main_closed_mask_bool)
 
-        labeled_main_mask, num_labels = skimage.measure.label(main_filled_mask, return_num=True, connectivity=2)
+        labeled_main_mask, num_labels = skimage.measure.label(main_filled_mask_bool, return_num=True, connectivity=2)
         features['num_components'] = int(num_labels)
 
         if num_labels == 0:
             logger.debug(f"No components found in main body mask for {os.path.basename(image_path)}.")
             return features, None, None 
         
+        # Intensity image for regionprops should be the one used for segmentation (potentially inverted)
         main_props_all = skimage.measure.regionprops(labeled_main_mask, intensity_image=image_gray_for_processing, cache=False)
         main_props_all = sorted(main_props_all, key=lambda x: x.area, reverse=True)
         main_props_obj = main_props_all[0] 
@@ -175,18 +178,21 @@ def extract_ml_features(
                          f"Skipping egg detection for {os.path.basename(image_path)}.")
             return features, main_props_obj, None
 
+        # Egg detection uses its own blurring based on 'gaussian_sigma' in params
+        # It uses the original image_gray_for_processing, which might have been inverted
+        egg_blurred_image = skimage.filters.gaussian(image_gray_for_processing, sigma=params.get('gaussian_sigma', 1.0))
         actual_egg_quantile = params.get('egg_threshold_quantile', 0.92) 
         
-        non_zero_pixels_in_blurred = blurred_image[blurred_image > 1e-6] 
-        if non_zero_pixels_in_blurred.size == 0:
-            egg_binary_mask_initial = np.zeros_like(blurred_image, dtype=bool)
+        non_zero_pixels_in_egg_blurred = egg_blurred_image[egg_blurred_image > 1e-6] 
+        if non_zero_pixels_in_egg_blurred.size == 0:
+            egg_binary_mask_initial_bool = np.zeros_like(egg_blurred_image, dtype=bool)
         else:
-            egg_thresh_val = np.quantile(non_zero_pixels_in_blurred, actual_egg_quantile)
-            egg_binary_mask_initial = blurred_image > egg_thresh_val 
-            logger.debug(f"Egg detection (using potentially pre-inverted image for main body): quantile={actual_egg_quantile}, thresh_val={egg_thresh_val:.4f}")
+            egg_thresh_val = np.quantile(non_zero_pixels_in_egg_blurred, actual_egg_quantile)
+            egg_binary_mask_initial_bool = egg_blurred_image > egg_thresh_val 
+            logger.debug(f"Egg detection: quantile={actual_egg_quantile}, thresh_val={egg_thresh_val:.4f} (applied to blurred, potentially inverted image)")
 
 
-        posterior_pixel_mask = np.zeros(img_gray_input_shape, dtype=bool)
+        posterior_pixel_mask_bool = np.zeros(img_gray_input_shape, dtype=bool)
         egg_posterior_fraction = params.get('egg_posterior_pixel_fraction', 0.45)
         if not (0 < egg_posterior_fraction < 1):
             logger.warning(f"egg_posterior_pixel_fraction ({egg_posterior_fraction}) is out of (0,1) range. Defaulting to 0.45.")
@@ -205,9 +211,9 @@ def extract_ml_features(
                 posterior_indices = projections_for_slice > projection_threshold_val
                 posterior_coords = coords_main_body[posterior_indices]
                 if posterior_coords.shape[0] > 0:
-                    valid_rows = np.clip(posterior_coords[:, 0], 0, img_gray_input_shape[0] - 1)
-                    valid_cols = np.clip(posterior_coords[:, 1], 0, img_gray_input_shape[1] - 1)
-                    posterior_pixel_mask[valid_rows, valid_cols] = True
+                    valid_rows = np.clip(posterior_coords[:, 0].astype(int), 0, img_gray_input_shape[0] - 1)
+                    valid_cols = np.clip(posterior_coords[:, 1].astype(int), 0, img_gray_input_shape[1] - 1)
+                    posterior_pixel_mask_bool[valid_rows, valid_cols] = True
                 main_props_obj._posterior_coords_for_egg_search = posterior_coords 
             else:
                 logger.debug(f"No projections calculated for posterior slice for {os.path.basename(image_path)}.")
@@ -215,11 +221,12 @@ def extract_ml_features(
             logger.debug(f"Could not define posterior pixel area for {os.path.basename(image_path)} "
                          f"(main_props missing, zero area, or no coords).")
 
-        egg_binary_mask_constrained = egg_binary_mask_initial & posterior_pixel_mask
+        egg_binary_mask_constrained_bool = egg_binary_mask_initial_bool & posterior_pixel_mask_bool
         
-        egg_labeled_mask, egg_num_labels_cand = skimage.measure.label(egg_binary_mask_constrained, return_num=True, connectivity=2)
+        egg_labeled_mask, egg_num_labels_cand = skimage.measure.label(egg_binary_mask_constrained_bool, return_num=True, connectivity=2)
 
         if egg_num_labels_cand > 0 and main_props_obj is not None:
+            # Intensity image for egg regionprops should be the same as for main body props
             egg_props_candidates = skimage.measure.regionprops(egg_labeled_mask, intensity_image=image_gray_for_processing, cache=False)
             
             valid_egg_candidates = []
@@ -280,7 +287,6 @@ if __name__ == '__main__':
         source_illum_from_config = system_cfg.get('source_image_illumination_type', 'darkfield')
         global_thresh_cfg = system_cfg.get('thresholding', {})
         
-        # Prepare params for extract_ml_features by merging S3 feature params with global system settings
         ml_params_for_test = feature_extraction_params_from_s3_cfg.copy()
         ml_params_for_test['source_image_illumination_type'] = source_illum_from_config
         ml_params_for_test['thresholding_mode'] = global_thresh_cfg.get('mode', 'otsu')
@@ -289,13 +295,12 @@ if __name__ == '__main__':
 
         if not feature_extraction_params_from_s3_cfg or 'egg_posterior_pixel_fraction' not in feature_extraction_params_from_s3_cfg: 
             print("ML feature extraction parameters not found/complete in config. Using hardcoded defaults for test.")
-            # Hardcoded params also need to reflect the structure expected by extract_ml_features
             ml_params_for_test = { 
                 'source_image_illumination_type': 'darkfield', 
                 'thresholding_mode': 'otsu', 
                 'otsu_threshold_multiplier': 0.5, 
                 'fixed_threshold_value': 70, 
-                'gaussian_sigma': 1.0, 
+                'gaussian_sigma': 1.0, # Still used for egg detection blurring
                 'closing_selem_size': 3, 'min_noise_size': 50, 
                 'min_significant_area': 100, 'egg_posterior_pixel_fraction': 0.45, 
                 'egg_threshold_quantile': 0.90, 'egg_min_area': 50, 'egg_max_area': 5000,
@@ -309,7 +314,7 @@ if __name__ == '__main__':
             'thresholding_mode': 'otsu', 
             'otsu_threshold_multiplier': 0.5, 
             'fixed_threshold_value': 70,
-            'gaussian_sigma': 1.0, 
+            'gaussian_sigma': 1.0, # Still used for egg detection blurring
             'closing_selem_size': 3, 'min_noise_size': 50, 'min_significant_area': 100, 
             'egg_posterior_pixel_fraction': 0.45, 'egg_threshold_quantile': 0.90, 'egg_min_area': 50, 
             'egg_max_area': 5000, 'egg_min_solidity': 0.60, 'egg_max_solidity': 0.99, 
@@ -329,10 +334,10 @@ if __name__ == '__main__':
     test_image_v[rr_egg_v, cc_egg_v] = 220 
 
     test_image_v_float = skimage.util.img_as_float(test_image_v) 
-    temp_img_filename = "temp_ml_feature_test_central_thresh.png"
+    temp_img_filename = "temp_ml_feature_test_no_blur_main_body.png"
     skimage.io.imsave(temp_img_filename, skimage.util.img_as_ubyte(test_image_v_float))
     
-    logger.info(f"\n--- Testing ML feature extraction with centralized thresholding and illumination ---")
+    logger.info(f"\n--- Testing ML feature extraction (main body NO BLUR, egg detection blurs) ---")
     logger.info(f"Runtime params for extract_ml_features: {ml_params_for_test}")
     
     features_test, _, _ = extract_ml_features(

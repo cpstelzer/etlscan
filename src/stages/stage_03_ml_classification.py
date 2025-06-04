@@ -360,12 +360,19 @@ def _apply_temporal_spatial_deduplication(candidates_df: pd.DataFrame, dedup_con
     logger.info(f"Deduplication complete. Kept {num_after} from {num_before} candidates.")
     return deduplicated_df
 
-def _apply_boundary_recheck(candidates_df: pd.DataFrame, boundary_config: Dict[str, Any], global_source_illumination: str) -> pd.DataFrame:
+def _apply_boundary_recheck(
+    candidates_df: pd.DataFrame, 
+    boundary_config: Dict[str, Any], 
+    global_source_illumination: str,
+    global_threshold_mode: str, # Added
+    global_otsu_multiplier: float,
+    global_fixed_threshold_value: int # Added
+    ) -> pd.DataFrame:
     if not boundary_config.get('enabled', False) or candidates_df.empty:
         logger.info("Boundary re-check filter is disabled or no candidates to filter.")
         return candidates_df
 
-    logger.info(f"Applying boundary re-check filter (Source Illum for check: {global_source_illumination})...")
+    logger.info(f"Applying boundary re-check filter (Source Illum for check: {global_source_illumination}, ThreshMode: {global_threshold_mode})...")
     if 'image_path' not in candidates_df.columns:
         logger.error("Missing 'image_path' column for boundary re-check. Skipping.")
         return candidates_df
@@ -373,14 +380,19 @@ def _apply_boundary_recheck(candidates_df: pd.DataFrame, boundary_config: Dict[s
     indices_to_keep = []
     for index, row in candidates_df.iterrows():
         image_path = row['image_path']
-        img_color = load_image(image_path, mode='color')
-        if img_color is None:
+        # Load as uint8 gray, as expected by detect_cropped_particle_on_boundary
+        img_gray_uint8 = load_image(image_path, mode='gray') 
+        if img_gray_uint8 is None:
             logger.warning(f"Could not load image {image_path} for boundary check. Excluding it."); continue
-        img_gray = convert_to_grayscale(img_color)
-        if img_gray is None:
-            logger.warning(f"Could not convert image {image_path} to grayscale for boundary check. Excluding it."); continue
         
-        is_on_boundary = detect_cropped_particle_on_boundary(img_gray, image_path, illumination_mode_of_crop=global_source_illumination)
+        is_on_boundary = detect_cropped_particle_on_boundary(
+            img_gray_uint8, 
+            image_path, 
+            illumination_mode_of_crop=global_source_illumination,
+            thresholding_mode=global_threshold_mode, # Pass new param
+            otsu_threshold_multiplier=global_otsu_multiplier,
+            fixed_threshold_value_int=global_fixed_threshold_value # Pass new param
+        )
         
         if not is_on_boundary: indices_to_keep.append(index)
         else: logger.debug(f"Particle in {os.path.basename(image_path)} detected on boundary during re-check. Removing.")
@@ -449,12 +461,17 @@ def run_stage_03_ml_classification(
     if not config_s3:
         raise ConfigError("Configuration for 'stage_03_ml_classification' not found.")
 
-    # Get global system settings (illumination and thresholding)
     global_system_config = config.get('system', {})
-    if not global_system_config.get('thresholding'):
+    global_threshold_cfg = global_system_config.get('thresholding', {})
+    if not global_threshold_cfg:
         raise ConfigError("System-wide thresholding configuration ('system.thresholding') not found.")
     
-    logger.info(f"Stage 3 using global system config: Illum='{global_system_config.get('source_image_illumination_type')}', Thresh='{global_system_config.get('thresholding')}'")
+    global_illumination_type = global_system_config.get('source_image_illumination_type', 'darkfield')
+    global_thresh_mode = global_threshold_cfg.get('mode', 'otsu')
+    global_otsu_multiplier = global_threshold_cfg.get('otsu_threshold_multiplier', 0.45)
+    global_fixed_thresh_val = global_threshold_cfg.get('fixed_threshold_value', 70)
+
+    logger.info(f"Stage 3 using global system config: Illum='{global_illumination_type}', ThreshMode='{global_thresh_mode}'")
 
     trained_model: Optional[RandomForestClassifier] = None
     fitted_scaler: Optional[StandardScaler] = None
@@ -509,21 +526,19 @@ def run_stage_03_ml_classification(
             input_sharp_objects_dir=sharp_objects_image_dir,
             model=trained_model, scaler=fitted_scaler,
             feature_names_for_prediction=feature_names_for_model,
-            config_s3=config_s3, # Contains S3 specific feature_extraction_params (without illum/thresh)
-            global_system_config=global_system_config, # Contains global illum/thresh
+            config_s3=config_s3, 
+            global_system_config=global_system_config, 
             current_sample_id=sample_id 
         )
         
         stage3_final_output_dir = os.path.join(output_dir_stage3, "ideal_fems_ML_classified")
         os.makedirs(stage3_final_output_dir, exist_ok=True)
 
-        # Prepare params for visualization by merging S3 base feature params with global settings
         ml_feat_params_base_s3 = config_s3.get('feature_extraction_params', {}).copy()
-        ml_feat_params_base_s3['source_image_illumination_type'] = global_system_config.get('source_image_illumination_type')
-        global_thresh_cfg_s3_vis = global_system_config.get('thresholding', {})
-        ml_feat_params_base_s3['thresholding_mode'] = global_thresh_cfg_s3_vis.get('mode')
-        ml_feat_params_base_s3['otsu_threshold_multiplier'] = global_thresh_cfg_s3_vis.get('otsu_threshold_multiplier')
-        ml_feat_params_base_s3['fixed_threshold_value'] = global_thresh_cfg_s3_vis.get('fixed_threshold_value')
+        ml_feat_params_base_s3['source_image_illumination_type'] = global_illumination_type
+        ml_feat_params_base_s3['thresholding_mode'] = global_thresh_mode
+        ml_feat_params_base_s3['otsu_threshold_multiplier'] = global_otsu_multiplier
+        ml_feat_params_base_s3['fixed_threshold_value'] = global_fixed_thresh_val
 
         if ml_candidates_df.empty:
             logger.info(f"No ML positive candidates found or prediction failed for sample {sample_id}.")
@@ -540,7 +555,14 @@ def run_stage_03_ml_classification(
         df_after_dedup = _apply_temporal_spatial_deduplication(df_with_sharpness, dedup_config)
         
         boundary_config = post_ml_filter_configs.get('boundary_recheck', {'enabled': False})
-        final_filtered_df = _apply_boundary_recheck(df_after_dedup, boundary_config, global_system_config.get('source_image_illumination_type', 'darkfield'))
+        final_filtered_df = _apply_boundary_recheck(
+            df_after_dedup, 
+            boundary_config, 
+            global_illumination_type,
+            global_thresh_mode,
+            global_otsu_multiplier,
+            global_fixed_thresh_val
+        )
         
         if os.path.exists(stage3_final_output_dir):
             target_subdir_for_sample_output = os.path.join(output_dir_stage3, "ideal_fems_ML_classified")

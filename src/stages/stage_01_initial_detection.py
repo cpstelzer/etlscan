@@ -8,6 +8,8 @@ import logging
 from typing import Union, Optional, List, Dict, Any, Tuple
 from sklearn.neighbors import BallTree 
 import shutil
+import skimage.util # Added for img_as_float
+import skimage.filters # Added for skimage.filters.threshold_otsu
 
 from src.utils import (
     get_config, load_dataframe_from_csv, save_dataframe_to_csv,
@@ -15,7 +17,7 @@ from src.utils import (
 )
 from src.utils.common_exceptions import ProcessingError, ConfigError, DataValidationError
 from src.core.image_io_operations import load_image 
-from src.core.image_enhancement import subtract_images, apply_threshold, apply_blur
+from src.core.image_enhancement import subtract_images, apply_threshold, apply_blur # apply_blur might still be used for subtracted path
 from src.core.masking_operations import mask_well_area, apply_mask 
 from src.core.region_props_calculator import find_contours, calculate_contour_measurements, filter_contours_by_area
 
@@ -24,7 +26,7 @@ logger = logging.getLogger(__name__)
 # Removed global _s1_unsub_debug_saved
 
 def _parse_image_filenames(image_dir_path: str) -> Optional[pd.DataFrame]:
-    # ... (no changes)
+    # ... (no changes from previous correct version)
     if not image_dir_path or not isinstance(image_dir_path, str):
         logger.error(f"Invalid image_dir_path provided to _parse_image_filenames: {image_dir_path} (type: {type(image_dir_path)}).")
         return None 
@@ -62,7 +64,7 @@ def _parse_image_filenames(image_dir_path: str) -> Optional[pd.DataFrame]:
     return df
 
 def _filter_image_df(df: pd.DataFrame) -> pd.DataFrame:
-    # ... (no changes)
+    # ... (no changes from previous correct version)
     if df.empty: return df
     initial_len = len(df)
     if not df.empty and df.iloc[0]["frame"] == 0:
@@ -85,12 +87,12 @@ def _analyze_single_subtracted_image(
     image_to_analyze_gray: np.ndarray, 
     config_stage1_particle_analysis: Dict[str, Any] 
     ) -> Tuple[Optional[pd.DataFrame], int, Optional[np.ndarray]]: 
-    # ... (no changes)
+    # ... (no changes from previous correct version, this uses its own thresholding for subtracted images)
     apply_conv = config_stage1_particle_analysis.get('apply_convolution', True)
     kernel_list = config_stage1_particle_analysis.get('convolution_kernel')
     threshold_val = config_stage1_particle_analysis.get('microorganism_threshold', 30)
     min_area = config_stage1_particle_analysis.get('min_microorganism_area', 50)
-    blur_kernel_size = config_stage1_particle_analysis.get('microorganism_blur_kernel', 3)
+    blur_kernel_size_sub = config_stage1_particle_analysis.get('microorganism_blur_kernel', 3) # Renamed to avoid clash
     if image_to_analyze_gray is None: return None, 0, None
     if image_to_analyze_gray.dtype != np.uint8:
         logger.warning(f"Input image to _analyze_single_subtracted_image is {image_to_analyze_gray.dtype}, expected uint8. Attempting conversion.")
@@ -107,11 +109,11 @@ def _analyze_single_subtracted_image(
     binary_img = apply_threshold(processed_img, threshold_val, "binary")
     if binary_img is None: logger.error("Thresholding failed in _analyze_single_subtracted_image."); return None, 0, None 
     img_for_contours = binary_img
-    if blur_kernel_size > 0 and blur_kernel_size % 2 == 1:
-        blurred_binary_img = apply_blur(binary_img, blur_kernel_size, "median")
+    if blur_kernel_size_sub > 0 and blur_kernel_size_sub % 2 == 1:
+        blurred_binary_img = apply_blur(binary_img, blur_kernel_size_sub, "median")
         if blurred_binary_img is not None: img_for_contours = blurred_binary_img
         else: logger.warning("Blurring failed, using unblurred binary for subtracted analysis.")
-    elif blur_kernel_size > 0 : logger.warning(f"Invalid blur_kernel_size {blur_kernel_size}, skipping blur.")
+    elif blur_kernel_size_sub > 0 : logger.warning(f"Invalid blur_kernel_size {blur_kernel_size_sub}, skipping blur.")
     contours = find_contours(img_for_contours, mode="external", method="simple")
     if not contours: return pd.DataFrame(), 0, img_for_contours 
     valid_contours = filter_contours_by_area(contours, min_area)
@@ -123,93 +125,107 @@ def _analyze_single_subtracted_image(
     return particles_df, len(particles_df), img_for_contours
 
 def _analyze_unsubtracted_fg_image(
-    original_fg_image_gray: np.ndarray, 
-    config_s1_unsubtracted_analysis: Dict[str, Any], # Contains blur_kernel_size, min_particle_area
+    original_fg_image_gray_uint8: np.ndarray, # Expects uint8
+    config_s1_unsubtracted_analysis: Dict[str, Any], # Contains min_particle_area (blur_kernel_size is now ignored here)
     global_threshold_config: Dict[str, Any], # Contains mode, otsu_multiplier, fixed_value
     source_image_illumination: str 
 ) -> Tuple[Optional[pd.DataFrame], int, Optional[np.ndarray], Optional[np.ndarray]]:
     """
     Analyzes a single original (unsubtracted) grayscale foreground image.
-    Uses global thresholding configuration.
-    Returns: particles_df, count, final_binary_mask, image_after_potential_inversion (for debug)
+    Uses global thresholding configuration. No pre-blurring for main segmentation.
+    Returns: particles_df, count, final_binary_mask (uint8), image_after_potential_inversion (float, for debug)
     """
-    blur_ksize = config_s1_unsubtracted_analysis.get('blur_kernel_size', 0)
+    # blur_ksize = config_s1_unsubtracted_analysis.get('blur_kernel_size', 0) # This is now ignored for segmentation
     min_area = config_s1_unsubtracted_analysis.get('min_particle_area', 50)
 
-    # Get thresholding parameters from global_threshold_config
     threshold_mode = global_threshold_config.get('mode', 'otsu')
-    fixed_thresh_val = global_threshold_config.get('fixed_threshold_value', 70) # Integer 0-255
+    fixed_thresh_val_int = global_threshold_config.get('fixed_threshold_value', 70) # Integer 0-255
     otsu_multiplier = global_threshold_config.get('otsu_threshold_multiplier', 0.45) # Float
 
-    if original_fg_image_gray is None or original_fg_image_gray.dtype != np.uint8:
-        logger.error("Unsubtracted FG image is None or not uint8.")
+    if original_fg_image_gray_uint8 is None:
+        logger.error("Unsubtracted FG image is None.")
+        return None, 0, None, None
+    if original_fg_image_gray_uint8.dtype != np.uint8:
+        logger.error(f"Unsubtracted FG image expected uint8, got {original_fg_image_gray_uint8.dtype}")
         return None, 0, None, None
 
-    img_proc = original_fg_image_gray.copy()
-    img_proc_after_inversion_for_debug = None 
+    # 1. Convert to float [0,1] for consistent processing
+    img_float_for_segment = skimage.util.img_as_float(original_fg_image_gray_uint8)
+    img_float_after_inversion_for_debug = None 
 
+    # 2. Invert if collimated (operates on float image)
     if source_image_illumination == 'collimated':
         logger.debug("Unsubtracted analysis: Source illumination is 'collimated'. Inverting image.")
-        img_proc = cv2.bitwise_not(img_proc)
-        img_proc_after_inversion_for_debug = img_proc.copy()
+        img_float_for_segment = 1.0 - img_float_for_segment
+        img_float_after_inversion_for_debug = img_float_for_segment.copy()
     
-    if blur_ksize > 0 and blur_ksize % 2 == 1:
-        blurred_img_proc = apply_blur(img_proc, blur_ksize, "gaussian") 
-        if blurred_img_proc is None:
-            logger.warning("Blurring failed in unsubtracted analysis. Using unblurred (but potentially inverted) image.")
-        else:
-            img_proc = blurred_img_proc
-    elif blur_ksize > 0:
-        logger.warning(f"Invalid blur_kernel_size {blur_ksize} for unsubtracted analysis, skipping blur.")
+    # --- MODIFICATION: Pre-thresholding blur REMOVED ---
+    # if blur_ksize > 0 and blur_ksize % 2 == 1:
+    #     # apply_blur works on uint8, so convert back if needed, or adapt apply_blur
+    #     # For now, let's assume if blur was intended, it'd be on the uint8 version before float conversion.
+    #     # Since we removed it, this section is commented.
+    #     pass
+    # --- END MODIFICATION ---
+    
+    image_to_threshold_float = img_float_for_segment # Use unblurred float image
 
-    binary_img: Optional[np.ndarray] = None
+    final_binary_mask_bool: Optional[np.ndarray] = None
     if threshold_mode == 'otsu':
-        if img_proc.min() == img_proc.max(): 
-            logger.warning("Image for unsubtracted Otsu is uniform. Thresholding may fail or be meaningless.")
-            # If uniform, Otsu might return 0 or max. If it's 0, and particles are bright, mask will be all white.
-            # If particles are dark (after inversion), mask will be all black.
-            # This behavior of cv2.threshold with THRESH_OTSU on uniform image needs to be considered.
-            # For now, proceed, but log this state.
-        
-        # Convert float image_proc (0-1) to uint8 (0-255) for cv2.threshold with THRESH_OTSU
-        # This was a previous bug where Otsu was applied to float. Now img_proc is already uint8.
-        # No, img_proc can become float if original_fg_image_gray was float and source_image_illumination was darkfield.
-        # Ensure img_proc is uint8 before Otsu.
-        # However, original_fg_image_gray is asserted to be uint8 at the start.
-        # Bitwise_not preserves uint8. GaussianBlur preserves dtype. So img_proc should be uint8.
-        
-        otsu_thresh_val_raw_cv, _ = cv2.threshold(img_proc, 0, 255, cv2.THRESH_OTSU) # Get Otsu value
-        final_threshold_for_binary = otsu_thresh_val_raw_cv * otsu_multiplier
-        logger.debug(f"Unsub Otsu: Raw CV Otsu val={otsu_thresh_val_raw_cv}, mult={otsu_multiplier}, final_thresh={final_threshold_for_binary}")
-        _, binary_img = cv2.threshold(img_proc, int(final_threshold_for_binary), 255, cv2.THRESH_BINARY)
+        if image_to_threshold_float.min() == image_to_threshold_float.max(): 
+            logger.warning("Image for unsubtracted Otsu (float) is uniform. Thresholding may fail or be meaningless.")
+            # Create an all-black mask if uniform, as Otsu might give unexpected results
+            final_binary_mask_bool = np.zeros_like(image_to_threshold_float, dtype=bool)
+        else:
+            try:
+                otsu_thresh_val_raw_sk = skimage.filters.threshold_otsu(image_to_threshold_float) # float 0-1
+            except ValueError:
+                logger.warning("Skimage Otsu failed for unsubtracted image. Assuming no particles.")
+                final_binary_mask_bool = np.zeros_like(image_to_threshold_float, dtype=bool)
+            else:
+                final_threshold_for_binary_float = otsu_thresh_val_raw_sk * otsu_multiplier
+                logger.debug(f"Unsub S1 Otsu: Raw Skimage Otsu val={otsu_thresh_val_raw_sk:.4f}, mult={otsu_multiplier}, final_thresh_float={final_threshold_for_binary_float:.4f}")
+                final_binary_mask_bool = image_to_threshold_float > final_threshold_for_binary_float
 
     elif threshold_mode == 'fixed':
-        binary_img = apply_threshold(img_proc, int(fixed_thresh_val), "binary")
+        final_threshold_for_binary_float = fixed_thresh_val_int / 255.0
+        logger.debug(f"Unsub S1 Fixed: Config value (0-255)={fixed_thresh_val_int}, Converted threshold_float={final_threshold_for_binary_float:.4f}")
+        final_binary_mask_bool = image_to_threshold_float > final_threshold_for_binary_float
     else:
         logger.error(f"Invalid thresholding_mode '{threshold_mode}' for unsubtracted analysis.")
-        return None, 0, None, img_proc_after_inversion_for_debug
+        debug_img_to_return = skimage.util.img_as_ubyte(img_float_after_inversion_for_debug) if img_float_after_inversion_for_debug is not None else None
+        return None, 0, None, debug_img_to_return
     
-    if binary_img is None:
-        logger.error("Thresholding failed for unsubtracted image.")
-        return None, 0, None, img_proc_after_inversion_for_debug
+    if final_binary_mask_bool is None: # Should not happen if logic is correct
+        logger.error("Binary mask was not generated in unsubtracted analysis.")
+        debug_img_to_return = skimage.util.img_as_ubyte(img_float_after_inversion_for_debug) if img_float_after_inversion_for_debug is not None else None
+        return None, 0, None, debug_img_to_return
+
+    final_binary_mask_uint8 = final_binary_mask_bool.astype(np.uint8) * 255
     
-    contours = find_contours(binary_img, mode="external", method="simple")
-    if not contours: return pd.DataFrame(), 0, binary_img, img_proc_after_inversion_for_debug
+    # Note: Stage 1 unsubtracted does not have the full morphological chain of S3 (remove small, close, fill holes)
+    # It directly finds contours on the (now unblurred) thresholded image.
+    contours = find_contours(final_binary_mask_uint8, mode="external", method="simple")
+    
+    debug_img_float_return = img_float_after_inversion_for_debug if img_float_after_inversion_for_debug is not None else img_float_for_segment
+    debug_img_uint8_return = skimage.util.img_as_ubyte(debug_img_float_return)
+
+
+    if not contours: return pd.DataFrame(), 0, final_binary_mask_uint8, debug_img_uint8_return
 
     valid_contours = filter_contours_by_area(contours, min_area)
-    if not valid_contours: return pd.DataFrame(), 0, binary_img, img_proc_after_inversion_for_debug
+    if not valid_contours: return pd.DataFrame(), 0, final_binary_mask_uint8, debug_img_uint8_return
 
     particle_measurements_list = [m for cnt in valid_contours if (m := calculate_contour_measurements(cnt))]
-    if not particle_measurements_list: return pd.DataFrame(), 0, binary_img, img_proc_after_inversion_for_debug
+    if not particle_measurements_list: return pd.DataFrame(), 0, final_binary_mask_uint8, debug_img_uint8_return
         
     particles_df = pd.DataFrame(particle_measurements_list)
     particles_df = particles_df.sort_values(by=['Y', 'X'], ascending=[True, True]).reset_index(drop=True)
     
-    return particles_df, len(particles_df), binary_img, img_proc_after_inversion_for_debug
+    return particles_df, len(particles_df), final_binary_mask_uint8, debug_img_uint8_return
 
 
 def _compare_and_fuse_particle_dfs(df_ref: pd.DataFrame, df_query: pd.DataFrame, config_s1_comparison: Dict[str, Any]) -> pd.DataFrame:
-    # ... (no changes)
+    # ... (no changes from previous correct version)
     logger.info(f"Comparing {len(df_ref)} ref particles with {len(df_query)} query particles.")
     if df_ref.empty or df_query.empty:
         logger.info("One or both DataFrames for comparison are empty. Returning empty DataFrame.")
@@ -263,7 +279,7 @@ def run_stage_01_initial_detection(
     sample_id: str 
     ) -> Optional[str]:
     
-    s1_unsub_debug_images_saved_this_run = False 
+    s1_unsub_debug_images_saved_this_run = False # Reset for each run call
 
     logger.info(f"--- Stage 1: Initial Detection for Sample ID: {sample_id} ---")
     config = get_config()
@@ -277,10 +293,11 @@ def run_stage_01_initial_detection(
         raise ConfigError("System-wide thresholding configuration ('system.thresholding') not found.")
     
     logger.info(f"Stage 1 processing with source_image_illumination_type: {source_image_illumination}")
-    logger.info(f"Stage 1 using global thresholding config: {global_threshold_config}")
+    logger.info(f"Stage 1 using global thresholding config for unsubtracted analysis: {global_threshold_config}")
     
     particle_analysis_subtracted_config = config_s1.get('particle_analysis', {})
-    unsubtracted_analysis_config = config_s1.get('unsubtracted_particle_analysis', {}) # Still contains blur_kernel_size, min_particle_area
+    # Unsubtracted analysis config now mainly for min_particle_area; blur_kernel_size is ignored for segmentation.
+    unsubtracted_analysis_config = config_s1.get('unsubtracted_particle_analysis', {}) 
     if not unsubtracted_analysis_config: raise ConfigError("Missing 'unsubtracted_particle_analysis' config in Stage 1.")
     
     particle_comparison_config = config_s1.get('particle_comparison', {})
@@ -307,17 +324,21 @@ def run_stage_01_initial_detection(
         if not os.path.exists(fg_filepath) or not os.path.exists(bg_filepath): logger.warning(f"FG or BG file not found. Skipping pair."); continue
         if fg_row['fd_mm'] != bg_row['fd_mm']: logger.warning(f"Mismatch fd_mm for FG/BG. Skipping pair."); continue
         try:
-            img_a_gray_orig = load_image(fg_filepath, mode='gray'); img_b_gray_orig = load_image(bg_filepath, mode='gray') 
-            if img_a_gray_orig is None or img_b_gray_orig is None: logger.error(f"Failed to load FG/BG. Skipping {fg_row['filename']}."); continue
+            img_a_gray_orig_uint8 = load_image(fg_filepath, mode='gray') # uint8
+            img_b_gray_orig_uint8 = load_image(bg_filepath, mode='gray') # uint8
+            if img_a_gray_orig_uint8 is None or img_b_gray_orig_uint8 is None: 
+                logger.error(f"Failed to load FG/BG. Skipping {fg_row['filename']}.")
+                continue
             
             well_mask_uint8 = None
             if mask_cfg.get('create_mask', False):
-                _, well_mask_uint8 = mask_well_area(img_a_gray_orig.copy(), mask_cfg, system_cfg)
+                _, well_mask_uint8 = mask_well_area(img_a_gray_orig_uint8.copy(), mask_cfg, system_cfg)
                 if well_mask_uint8 is None: logger.warning(f"Well masking failed for {fg_row['filename']}.")
             
-            img_a_for_sub = img_a_gray_orig.copy(); img_b_for_sub = img_b_gray_orig.copy()
+            img_a_for_sub = img_a_gray_orig_uint8.copy(); img_b_for_sub = img_b_gray_orig_uint8.copy()
+            # Subtracted path inversion and thresholding remains specific to its config
             if source_image_illumination == 'collimated': 
-                img_a_for_sub = cv2.bitwise_not(img_a_for_sub); img_b_for_sub = cv2.bitwise_not(img_b_for_sub)
+                 img_a_for_sub = cv2.bitwise_not(img_a_for_sub); img_b_for_sub = cv2.bitwise_not(img_b_for_sub)
             subtracted_img = subtract_images(img_a_for_sub, img_b_for_sub)
             if subtracted_img is None: logger.error(f"Subtraction failed for {fg_row['filename']}."); continue
             img_for_sub_analysis = apply_mask(subtracted_img, well_mask_uint8) if well_mask_uint8 is not None else subtracted_img
@@ -326,31 +347,32 @@ def run_stage_01_initial_detection(
                 sub_particles_df['SAMPLE_ID'] = sample_id; sub_particles_df['source_image_filename'] = fg_row['filename']
                 all_subtracted_particle_dfs.append(sub_particles_df); logger.debug(f"  FG '{fg_row['filename']}' (Subtracted): Found {p_count_sub} particles.")
 
-            img_for_unsub_analysis_input = img_a_gray_orig.copy()
+            # Prepare input for unsubtracted analysis (still uint8)
+            img_for_unsub_analysis_input_uint8 = img_a_gray_orig_uint8.copy()
             if well_mask_uint8 is not None:
-                if source_image_illumination == 'collimated':
-                    img_filled_outside_white = np.full_like(img_a_gray_orig, 255, dtype=np.uint8)
-                    img_for_unsub_analysis_input = cv2.bitwise_and(img_a_gray_orig, img_a_gray_orig, mask=well_mask_uint8) + \
-                                                   cv2.bitwise_and(img_filled_outside_white, img_filled_outside_white, mask=cv2.bitwise_not(well_mask_uint8))
+                if source_image_illumination == 'collimated': # masking after potential inversion of main analysis
+                    img_filled_outside_white = np.full_like(img_a_gray_orig_uint8, 255, dtype=np.uint8)
+                    img_for_unsub_analysis_input_uint8 = cv2.bitwise_and(img_a_gray_orig_uint8, img_a_gray_orig_uint8, mask=well_mask_uint8) + \
+                                                         cv2.bitwise_and(img_filled_outside_white, img_filled_outside_white, mask=cv2.bitwise_not(well_mask_uint8))
                 else: 
-                    img_for_unsub_analysis_input = apply_mask(img_a_gray_orig.copy(), well_mask_uint8)
+                    img_for_unsub_analysis_input_uint8 = apply_mask(img_a_gray_orig_uint8.copy(), well_mask_uint8)
             
-            unsub_particles_df, p_count_unsub, unsub_binary_debug, unsub_inverted_debug = _analyze_unsubtracted_fg_image(
-                img_for_unsub_analysis_input, 
-                unsubtracted_analysis_config, # Contains blur, min_area
-                global_threshold_config,      # Contains mode, otsu_mult, fixed_val
+            unsub_particles_df, p_count_unsub, unsub_binary_debug_uint8, unsub_inverted_debug_uint8 = _analyze_unsubtracted_fg_image(
+                img_for_unsub_analysis_input_uint8, # Pass uint8
+                unsubtracted_analysis_config, 
+                global_threshold_config,      
                 source_image_illumination
             )
             
             if not s1_unsub_debug_images_saved_this_run and idx == 0: 
-                if source_image_illumination == 'collimated' and unsub_inverted_debug is not None:
-                    cv2.imwrite(os.path.join(output_dir_stage1, f"{sample_id}_DEBUG_s1_unsub_inverted_input.png"), unsub_inverted_debug)
+                if source_image_illumination == 'collimated' and unsub_inverted_debug_uint8 is not None:
+                    cv2.imwrite(os.path.join(output_dir_stage1, f"{sample_id}_DEBUG_s1_unsub_inverted_input.png"), unsub_inverted_debug_uint8)
                     logger.info(f"DEBUG: Saved {sample_id}_DEBUG_s1_unsub_inverted_input.png")
-                if unsub_binary_debug is not None:
-                    cv2.imwrite(os.path.join(output_dir_stage1, f"{sample_id}_DEBUG_s1_unsub_binary_output.png"), unsub_binary_debug)
+                if unsub_binary_debug_uint8 is not None:
+                    cv2.imwrite(os.path.join(output_dir_stage1, f"{sample_id}_DEBUG_s1_unsub_binary_output.png"), unsub_binary_debug_uint8)
                     logger.info(f"DEBUG: Saved {sample_id}_DEBUG_s1_unsub_binary_output.png")
                 if well_mask_uint8 is not None and source_image_illumination == 'collimated':
-                     cv2.imwrite(os.path.join(output_dir_stage1, f"{sample_id}_DEBUG_s1_unsub_prepped_masked_input.png"), img_for_unsub_analysis_input)
+                     cv2.imwrite(os.path.join(output_dir_stage1, f"{sample_id}_DEBUG_s1_unsub_prepped_masked_input.png"), img_for_unsub_analysis_input_uint8)
                      logger.info(f"DEBUG: Saved {sample_id}_DEBUG_s1_unsub_prepped_masked_input.png")
                 s1_unsub_debug_images_saved_this_run = True
 
@@ -362,7 +384,7 @@ def run_stage_01_initial_detection(
     final_df_ref = pd.concat(all_subtracted_particle_dfs, ignore_index=True) if all_subtracted_particle_dfs else pd.DataFrame()
     final_df_query = pd.concat(all_unsubtracted_particle_dfs, ignore_index=True) if all_unsubtracted_particle_dfs else pd.DataFrame()
     logger.info(f"Total subtracted particles found: {len(final_df_ref)}")
-    logger.info(f"Total unsubtracted particles found: {len(final_df_query)}")
+    logger.info(f"Total unsubtracted particles found (after no-blur thresholding): {len(final_df_query)}")
     combined_particles_df = _compare_and_fuse_particle_dfs(final_df_ref, final_df_query, particle_comparison_config)
     if combined_particles_df.empty:
         logger.warning("No particle data matched and fused. Stage 1 results will be empty.")
@@ -389,17 +411,16 @@ if __name__ == '__main__':
         cfg_main = get_config() 
         system_cfg_test = cfg_main.setdefault('system', {})
         system_cfg_test.setdefault('source_image_illumination_type', 'collimated') 
-        # For testing, ensure global thresholding config is present if not already by full config load
         thresh_cfg_test = system_cfg_test.setdefault('thresholding', {})
         thresh_cfg_test.setdefault('mode', 'otsu')
         thresh_cfg_test.setdefault('otsu_threshold_multiplier', 0.45)
         thresh_cfg_test.setdefault('fixed_threshold_value', 70)
         
-        TEST_SAMPLE_ID = "test_sample_s1_central_thresh_v1" 
+        TEST_SAMPLE_ID = "test_sample_s1_no_blur_unsub" 
         base_project_dir = cfg_main.get('project_base_dir')
         if not base_project_dir: raise ValueError("project_base_dir not set in config for testing.")
         test_image_input_dir = os.path.join(base_project_dir, "data", "input", TEST_SAMPLE_ID)
-        test_stage1_output_dir = os.path.join(base_project_dir, "data", "output", TEST_SAMPLE_ID, "stage1_output_central_thresh_v1")
+        test_stage1_output_dir = os.path.join(base_project_dir, "data", "output", TEST_SAMPLE_ID, "stage1_output_no_blur_unsub")
         os.makedirs(test_stage1_output_dir, exist_ok=True); os.makedirs(test_image_input_dir, exist_ok=True) 
         logger.info(f"Test Input Dir: {test_image_input_dir}"); logger.info(f"Test Output Dir: {test_stage1_output_dir}")
         if not os.listdir(test_image_input_dir) or len(os.listdir(test_image_input_dir)) < 5 : 
@@ -409,22 +430,17 @@ if __name__ == '__main__':
             for i in range(num_frames_total):
                 dummy_fname = f"{date_str}_plate{plate_str}_well{well_str}_f{i:05d}_dpt0.0_fd0.0mm.png"
                 dummy_fpath = os.path.join(test_image_input_dir, dummy_fname)
-                dummy_img_content = np.full((200, 200), 200, dtype=np.uint8) 
-                cv2.circle(dummy_img_content, (50 + i * 20, 50 + i * 5), 15, 30, -1) 
-                if i % 2 == 0: cv2.circle(dummy_img_content, (150,150), 10, 40, -1) 
-                cv2.imwrite(dummy_fpath, dummy_img_content)
+                dummy_img_content_uint8 = np.full((200, 200), 200, dtype=np.uint8) 
+                cv2.circle(dummy_img_content_uint8, (50 + i * 20, 50 + i * 5), 15, 30, -1) 
+                if i % 2 == 0: cv2.circle(dummy_img_content_uint8, (150,150), 10, 40, -1) 
+                cv2.imwrite(dummy_fpath, dummy_img_content_uint8)
             logger.info(f"Created {num_frames_total} dummy 'collimated-like' images in {test_image_input_dir}")
         
-        logger.info("\n--- Running S1 Test with centralized thresholding config ---")
+        logger.info("\n--- Running S1 Test (NO BLUR for unsubtracted thresholding) ---")
         s1_cfg = cfg_main.setdefault('stage_01_initial_detection', {})
-        # Remove old thresholding params from s1_cfg if they exist (they shouldn't after config change)
-        s1_cfg.get('unsubtracted_particle_analysis', {}).pop('thresholding_mode', None)
-        s1_cfg.get('unsubtracted_particle_analysis', {}).pop('fixed_threshold_value', None)
-        
-        # Ensure other necessary params for unsubtracted_particle_analysis are there
         s1_unsub_cfg = s1_cfg.setdefault('unsubtracted_particle_analysis', {})
         s1_unsub_cfg.setdefault('min_particle_area', 30)
-        s1_unsub_cfg.setdefault('blur_kernel_size',3)
+        # s1_unsub_cfg.setdefault('blur_kernel_size',3) # This will be ignored by the updated _analyze_unsubtracted_fg_image
 
         s1_cfg.setdefault('particle_analysis', {'microorganism_threshold': 25, 'min_microorganism_area': 50, 'apply_convolution':False}) 
         s1_cfg.setdefault('particle_comparison', {'search_radius_factor': 2.0, 'default_particle_area': 100})
@@ -432,12 +448,12 @@ if __name__ == '__main__':
         
         result_csv_path = run_stage_01_initial_detection(image_dir_path=test_image_input_dir, output_dir_stage1=test_stage1_output_dir, sample_id=TEST_SAMPLE_ID)
         if result_csv_path: 
-            logger.info(f"S1 test with centralized thresholding completed. CSV: {result_csv_path}")
+            logger.info(f"S1 test (no unsub blur) completed. CSV: {result_csv_path}")
             df_out = pd.read_csv(result_csv_path)
             logger.info(f"Output DataFrame head:\n{df_out.head()}")
             logger.info(f"Number of particles in output: {len(df_out)}")
-            assert len(df_out) > 0, "Expected some fused particles for this test case with collimated source and masking fix."
-        else: logger.error("S1 test with centralized thresholding FAILED.")
+            assert len(df_out) > 0, "Expected some fused particles for this test case."
+        else: logger.error("S1 test (no unsub blur) FAILED.")
     except ConfigError as ce: logger.error(f"Configuration error during test: {ce}")
     except FileNotFoundError as fnfe: logger.error(f"File not found during test setup (check config paths and test data): {fnfe}")
     except Exception as e: logger.exception(f"An unexpected error occurred during the Stage 1 test: {e}")

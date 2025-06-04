@@ -48,11 +48,14 @@ class SingleParticleAnalysisResult:
 def _process_single_particle_for_quality(
     particle_data_series: pd.Series,
     main_full_color_image: np.ndarray,
-    main_full_gray_image: np.ndarray,
+    main_full_gray_image: np.ndarray, # This is uint8
     cropper: ParticleCropper,
     temp_intermediate_crop_dir: str, 
     config_s2: Dict[str, Any], 
-    source_image_illumination: str # Explicitly pass the global illumination type
+    source_image_illumination: str, 
+    global_threshold_mode: str,
+    global_otsu_multiplier: float,
+    global_fixed_threshold_value: int
 ) -> SingleParticleAnalysisResult:
     result = SingleParticleAnalysisResult(particle_data_series)
     particle_id_info = f"(idx={particle_data_series.name}, X={result.centroid_x}, Y={result.centroid_y})"
@@ -61,19 +64,19 @@ def _process_single_particle_for_quality(
     try:
         intermediate_crop_prefix = f"intermediate_crop_idx{particle_data_series.name}"
         
-        intermediate_crop_gray, saved_intermediate_color_crop_path = cropper.crop_single_particle_from_image(
+        intermediate_crop_gray_uint8, saved_intermediate_color_crop_path = cropper.crop_single_particle_from_image(
             main_full_color_image, main_full_gray_image, particle_data_series,
             output_dir_for_crop=temp_intermediate_crop_dir,
             crop_filename_prefix=intermediate_crop_prefix
         )
 
-        if intermediate_crop_gray is None or saved_intermediate_color_crop_path is None:
+        if intermediate_crop_gray_uint8 is None or saved_intermediate_color_crop_path is None:
             logger.warning(f"Cropping failed or intermediate crop not saved for {particle_id_info}.")
             result.error_message = "Cropping or intermediate save failed"
             return result 
 
         result.cropped_image_filename = os.path.basename(saved_intermediate_color_crop_path)
-        result.sharpness_scores = calculate_sharpness_metrics(intermediate_crop_gray)
+        result.sharpness_scores = calculate_sharpness_metrics(intermediate_crop_gray_uint8)
         
         black_mask_check_config = config_s2.get('black_mask_check', {})
         result.is_black_mask_artifact = detect_black_mask_artifact(
@@ -81,11 +84,13 @@ def _process_single_particle_for_quality(
             min_area_ratio=black_mask_check_config.get('min_area_ratio', 0.05)
         )
         
-        # Pass source_image_illumination to determine how to segment the intermediate crop
         result.is_on_crop_boundary = detect_cropped_particle_on_boundary(
-            intermediate_crop_gray, 
+            intermediate_crop_gray_uint8, # Pass the uint8 crop
             saved_intermediate_color_crop_path,
-            illumination_mode_of_crop=source_image_illumination # Use global illumination here
+            illumination_mode_of_crop=source_image_illumination, 
+            thresholding_mode=global_threshold_mode,
+            otsu_threshold_multiplier=global_otsu_multiplier,
+            fixed_threshold_value_int=global_fixed_threshold_value
         )
         result.processed_successfully = True
         logger.debug(f"Successfully processed particle {particle_id_info} for quality.")
@@ -255,6 +260,14 @@ def run_stage_02_quality_filter(
         source_image_illumination_type = 'darkfield'
     logger.info(f"Stage 2 using source image illumination type: {source_image_illumination_type} for intermediate crop boundary checks.")
 
+    global_threshold_config = system_config.get('thresholding', {})
+    if not global_threshold_config:
+        raise ConfigError("System-wide thresholding configuration ('system.thresholding') not found.")
+    
+    global_thresh_mode = global_threshold_config.get('mode', 'otsu')
+    global_otsu_multiplier = global_threshold_config.get('otsu_threshold_multiplier', 0.45) # Default to 0.45 if not found
+    global_fixed_thresh_val = global_threshold_config.get('fixed_threshold_value', 70) # Default
+
     s2_filters_enabled_config = config_s2.get('filters_enabled', {})
     enable_final_sharpness_filter = s2_filters_enabled_config.get('final_sharpness', True)
 
@@ -309,7 +322,7 @@ def run_stage_02_quality_filter(
         if main_img_color is None:
             logger.warning(f"Failed to load main image {full_image_path_color}. Skipping particles for this image.")
             continue
-        main_img_gray = convert_to_grayscale(main_img_color)
+        main_img_gray = convert_to_grayscale(main_img_color) # This will be uint8
         if main_img_gray is None:
             logger.warning(f"Failed to convert {full_image_path_color} to grayscale. Skipping.")
             continue
@@ -319,10 +332,13 @@ def run_stage_02_quality_filter(
 
         for _, particle_row in particles_in_image_df.iterrows():
             analysis_result_obj = _process_single_particle_for_quality(
-                particle_row, main_img_color, main_img_gray,
+                particle_row, main_img_color, main_img_gray, # main_img_gray is uint8
                 intermediate_cropper, image_specific_temp_crop_dir, 
                 config_s2, 
-                source_image_illumination_type # Pass the global illumination type
+                source_image_illumination_type, 
+                global_thresh_mode, # Pass global mode
+                global_otsu_multiplier, # Pass global multiplier
+                global_fixed_thresh_val # Pass global fixed value
             )
             all_single_particle_results_list.append(analysis_result_obj.to_dict())
         
@@ -452,8 +468,12 @@ if __name__ == '__main__':
     try:
         cfg_main = get_config()
         system_cfg_test = cfg_main.setdefault('system', {})
-        # Ensure this is set for the test to match the dummy data generation
         system_cfg_test.setdefault('source_image_illumination_type', 'collimated') 
+        thresh_cfg_test = system_cfg_test.setdefault('thresholding', {})
+        thresh_cfg_test.setdefault('mode', 'otsu') # Ensure mode is set for test
+        thresh_cfg_test.setdefault('otsu_threshold_multiplier', 0.45) 
+        thresh_cfg_test.setdefault('fixed_threshold_value', 70)
+
 
         s2_cfg_test = cfg_main.setdefault('stage_02_quality_filter', {})
         s2_cfg_test.setdefault('filters_enabled', {
@@ -464,14 +484,14 @@ if __name__ == '__main__':
         s2_cfg_test.setdefault('final_sharp_object_filter', {'combined_sharpness_min': 0.1})
 
 
-        TEST_SAMPLE_ID = "test_sample_s2_illum_aware_global" # New test ID for clarity
+        TEST_SAMPLE_ID = "test_sample_s2_skimage_thresh_final" 
         base_project_dir = cfg_main.get('project_base_dir')
         if not base_project_dir: raise ValueError("project_base_dir not set in config for testing.")
 
         stage1_output_dir = os.path.join(base_project_dir, "data", "output", TEST_SAMPLE_ID, "stage1_output")
         test_s1_csv_path = os.path.join(stage1_output_dir, f"{TEST_SAMPLE_ID}_stage1_particles.csv")
         test_image_input_dir_s2 = os.path.join(base_project_dir, "data", "input", TEST_SAMPLE_ID)
-        test_s2_output_dir = os.path.join(base_project_dir, "data", "output", TEST_SAMPLE_ID, "stage2_output_illum_aware_global_test")
+        test_s2_output_dir = os.path.join(base_project_dir, "data", "output", TEST_SAMPLE_ID, "stage2_output_skimage_thresh_final_test")
         os.makedirs(test_s2_output_dir, exist_ok=True)
 
         logger.info(f"Test S1 Input CSV: {test_s1_csv_path}")
@@ -501,17 +521,18 @@ if __name__ == '__main__':
             for fname in dummy_s1_data['source_image_filename'].unique():
                 dummy_img_path = os.path.join(test_image_input_dir_s2, fname)
                 if not os.path.exists(dummy_img_path):
-                     img_content = np.full((200,200,3), 220, dtype=np.uint8) # Bright BG for collimated
+                     img_content_uint8 = np.full((200,200), 220, dtype=np.uint8) # Bright BG for collimated
                      if 'f00000' in fname : 
-                         cv2.putText(img_content, "Sharp", (50,100), cv2.FONT_HERSHEY_SIMPLEX, 2, (30,30,30), 3) 
+                         cv2.putText(img_content_uint8, "Sharp", (50,100), cv2.FONT_HERSHEY_SIMPLEX, 2, (30), 3) 
                      elif 'f00001' in fname: 
-                         img_content_blur = cv2.GaussianBlur(img_content, (25,25), 0)
-                         cv2.putText(img_content_blur, "Blurry", (40,120), cv2.FONT_HERSHEY_SIMPLEX, 2, (40,40,40), 3)
-                         img_content = img_content_blur
+                         img_content_blur_uint8 = cv2.GaussianBlur(img_content_uint8, (25,25), 0)
+                         cv2.putText(img_content_blur_uint8, "Blurry", (40,120), cv2.FONT_HERSHEY_SIMPLEX, 2, (40), 3)
+                         img_content_uint8 = img_content_blur_uint8
                      elif 'f00002' in fname: 
-                         cv2.circle(img_content, (5,5), 8, (20,20,20), -1) 
-                         cv2.circle(img_content, (100,195), 8, (25,25,25), -1) 
-                     cv2.imwrite(dummy_img_path, img_content)
+                         cv2.rectangle(img_content_uint8, (0,0), (10,10), (20), -1) 
+                         cv2.rectangle(img_content_uint8, (0,190), (10,199), (25), -1) 
+
+                     cv2.imwrite(dummy_img_path, img_content_uint8) # Save as uint8
             logger.info(f"Created dummy 'collimated-like' images in {test_image_input_dir_s2}")
 
         result_s2_csv_path = run_stage_02_quality_filter(
@@ -523,8 +544,13 @@ if __name__ == '__main__':
         if result_s2_csv_path: 
             logger.info(f"Stage 2 test completed. Final analyzed CSV: {result_s2_csv_path}")
             df_out = pd.read_csv(result_s2_csv_path)
-            print("Stage 2 Test (Global Illumination Aware) Output DataFrame Head:")
+            print("Stage 2 Test (Skimage Thresholding Logic) Output DataFrame Head:")
             print(df_out.head())
+            if 'is_on_crop_boundary' in df_out.columns:
+                on_boundary_count = df_out[df_out['is_on_crop_boundary'] == True].shape[0]
+                not_on_boundary_count = df_out[df_out['is_on_crop_boundary'] == False].shape[0]
+                logger.info(f"Particles detected on boundary: {on_boundary_count}")
+                logger.info(f"Particles NOT detected on boundary: {not_on_boundary_count}")
         else: 
             logger.error("Stage 2 test FAILED or produced no output CSV.")
 
