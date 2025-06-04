@@ -723,7 +723,7 @@ class FeatureViewerApp:
             if df_ref is None: df_ref = pd.DataFrame() 
 
             img_for_unsub_analysis_prepared = img_fg_orig_uint8.copy()
-            if well_mask_uint8 is not None:
+            if well_mask_uint8 is not None: 
                 if s1_unsub_illum_eff == 'collimated': 
                     img_filled_outside_white = np.full_like(img_fg_orig_uint8, 255)
                     img_for_unsub_analysis_prepared = cv2.bitwise_and(img_fg_orig_uint8, img_fg_orig_uint8, mask=well_mask_uint8) + \
@@ -809,7 +809,10 @@ class FeatureViewerApp:
                         s1_particle_row, img_fg_orig_color_s2, img_fg_orig_uint8_s2,
                         s2_intermediate_cropper, s2_temp_intermediate_crop_dir, 
                         s2_eff_config_for_processing, 
-                        s2_eff_config_for_processing.get('viewer_source_illumination_type') 
+                        s2_eff_config_for_processing.get('viewer_source_illumination_type'),
+                        s1_unsub_thresh_eff_for_s2.get('mode'),
+                        s1_unsub_thresh_eff_for_s2.get('otsu_threshold_multiplier'),
+                        s1_unsub_thresh_eff_for_s2.get('fixed_threshold_value')
                     ) 
                     s2_single_particle_results_list.append(s2_result_obj.to_dict())
                 s2_detailed_analysis_df = pd.DataFrame(s2_single_particle_results_list)
@@ -928,16 +931,15 @@ class FeatureViewerApp:
                 if final_crop_gray is not None:
                     final_crop_bgr = cv2.cvtColor(final_crop_gray, cv2.COLOR_GRAY2BGR)
                     viewer_illum_for_s2_final_crop = self.param_vars['viewer_source_illumination_type'].get() 
+                    global_thresh_mode = self.param_vars['viewer_thresholding_mode'].get()
+                    global_otsu_mult = self.param_vars['viewer_otsu_threshold_multiplier'].get()
+                    global_fixed_val = self.param_vars['viewer_fixed_threshold_value'].get()
                     
                     img_to_thresh_for_contour = final_crop_gray.copy()
                     if viewer_illum_for_s2_final_crop == "collimated": img_to_thresh_for_contour = cv2.bitwise_not(img_to_thresh_for_contour)
                     
                     if np.all(img_to_thresh_for_contour == img_to_thresh_for_contour[0,0]): binary_mask_final_crop = np.zeros_like(img_to_thresh_for_contour, dtype=np.uint8)
                     else: 
-                        global_thresh_mode = self.param_vars['viewer_thresholding_mode'].get()
-                        global_otsu_mult = self.param_vars['viewer_otsu_threshold_multiplier'].get()
-                        global_fixed_val = self.param_vars['viewer_fixed_threshold_value'].get()
-                        
                         if global_thresh_mode == 'otsu':
                             otsu_val_fc, _ = cv2.threshold(img_to_thresh_for_contour, 0, 255, cv2.THRESH_OTSU)
                             final_thresh_fc = int(otsu_val_fc * global_otsu_mult)
@@ -955,12 +957,18 @@ class FeatureViewerApp:
                     self.ax_s2_single_crop.imshow(final_crop_bgr) 
                     self.ax_s2_single_crop.set_title(f"S2 Final Crop ({final_crop_gray.shape[1]}x{final_crop_gray.shape[0]})")
                     
-                    is_on_this_final_crop_boundary = detect_cropped_particle_on_boundary(final_crop_gray, f"viewer_final_crop_{s1_idx}.png", illumination_mode_of_crop=viewer_illum_for_s2_final_crop)
+                    is_on_this_final_crop_boundary = detect_cropped_particle_on_boundary(
+                        final_crop_gray, 
+                        f"viewer_final_crop_{s1_idx}.png", 
+                        illumination_mode_of_crop=viewer_illum_for_s2_final_crop,
+                        thresholding_mode=global_thresh_mode,
+                        otsu_threshold_multiplier=global_otsu_mult,
+                        fixed_threshold_value_int=int(global_fixed_val)
+                        )
                     
                     attr_text = f"File (Original S1 Frame): {fg_fn}\n"
                     attr_text += f"S1 Particle Index: {int(particle_attrs.get('input_particle_index', -1))}\nS1 Centroid: X={int(particle_attrs.get('X',-1))}, Y={int(particle_attrs.get('Y',-1))}\n\n"
-                    # Corrected line below:
-                    attr_text += f"--- S2 Intermediate Crop Info ---\nIntermediate Crop File: {particle_attrs.get('cropped_filename', 'N/A')}\nBlack Mask Artifact: {particle_attrs.get('is_black_mask', 'N/A')}\nOn Intermediate Crop Boundary: {particle_attrs.get('is_on_crop_boundary', 'N/A')} (based on viewer source illum: {self.current_params.get('s2_effective', {}).get('viewer_source_illumination_type')})\n\n"
+                    attr_text += f"--- S2 Intermediate Crop Info ---\nIntermediate Crop File: {particle_attrs.get('cropped_filename', 'N/A')}\nBlack Mask Artifact: {particle_attrs.get('is_black_mask', 'N/A')}\nOn Intermediate Crop Boundary: {particle_attrs.get('is_on_crop_boundary', 'N/A')} (based on viewer source illum: {self.current_params.get('s2_effective', {}).get('viewer_source_illumination_type')}, viewer thresh: {self.param_vars.get('viewer_thresholding_mode').get()})\n\n"
                     attr_text += f"--- S2 Final Crop Info (This View) ---\nSource Illumination (for this view's boundary check): {viewer_illum_for_s2_final_crop}\nOn THIS Final Crop Boundary: {is_on_this_final_crop_boundary}\n\n"
                     attr_text += f"--- Sharpness Scores ---\n"
                     for metric in AVAILABLE_SHARPNESS_METRICS: attr_text += f"{metric}: {particle_attrs.get(metric, np.nan):.2f}\n{metric}_norm: {particle_attrs.get(metric+'_norm', np.nan):.3f}\n"
