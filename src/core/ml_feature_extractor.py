@@ -64,15 +64,13 @@ def extract_ml_features(
             logger.debug(f"Image {os.path.basename(image_path)} is empty or near-empty after potential inversion. No features extracted.")
             return None, None, None
 
-        # `image_gray_for_processing` is now always in the domain where particles are bright
-        # `image_gray` (original, un-inverted for visualization if needed) is kept separate if inversion happened.
-
         blurred_image = skimage.filters.gaussian(image_gray_for_processing, sigma=params.get('gaussian_sigma', 1.0))
         
         if blurred_image.min() == blurred_image.max(): 
             logger.debug(f"Image {os.path.basename(image_path)} became blank after blurring. No features.")
             return None, None, None
         
+        # Use thresholding parameters passed in `params`
         thresholding_mode = params.get('thresholding_mode', 'otsu') 
         final_threshold_value_float: Optional[float] = None 
 
@@ -86,7 +84,7 @@ def extract_ml_features(
                 logger.warning(f"Otsu threshold failed for {os.path.basename(image_path)}. Skipping feature extraction.")
                 return None, None, None
             
-            otsu_multiplier = params.get('otsu_threshold_multiplier', 0.9)
+            otsu_multiplier = params.get('otsu_threshold_multiplier', 0.45) # Default from centralized config idea
             final_threshold_value_float = otsu_thresh_val_raw * otsu_multiplier
             logger.debug(f"Using Otsu thresholding for {os.path.basename(image_path)}. Raw Otsu: {otsu_thresh_val_raw:.4f}, Multiplier: {otsu_multiplier}, Final threshold (0-1): {final_threshold_value_float:.4f}")
 
@@ -94,7 +92,7 @@ def extract_ml_features(
             fixed_thresh_val_config_int = params.get('fixed_threshold_value')
             if fixed_thresh_val_config_int is None:
                 logger.error(f"Thresholding mode is 'fixed' but 'fixed_threshold_value' not provided in params for {os.path.basename(image_path)}. Cannot proceed.")
-                raise ConfigError("thresholding_mode is 'fixed' but 'fixed_threshold_value' is missing from feature_extraction_params.")
+                raise ConfigError("thresholding_mode is 'fixed' but 'fixed_threshold_value' is missing from params.")
             
             try:
                 fixed_thresh_int = int(fixed_thresh_val_config_int)
@@ -102,7 +100,7 @@ def extract_ml_features(
                 logger.error(f"'fixed_threshold_value' ({fixed_thresh_val_config_int}) must be an integer (0-255).")
                 raise ConfigError(f"'fixed_threshold_value' ({fixed_thresh_val_config_int}) is not a valid integer.")
 
-            if not (0 <= fixed_thresh_int <= 255):
+            if not (0 <= fixed_thresh_int <= 255): # Allow outside 0-1 range from config, but 0-255 for int
                 logger.warning(f"Fixed threshold value (config) {fixed_thresh_int} for {os.path.basename(image_path)} is outside the 0-255 range. Ensure this is intended.")
             
             final_threshold_value_float = fixed_thresh_int / 255.0 
@@ -110,7 +108,7 @@ def extract_ml_features(
         
         else:
             logger.error(f"Invalid thresholding_mode: '{thresholding_mode}' for {os.path.basename(image_path)}. Supported modes: 'otsu', 'fixed'.")
-            raise ConfigError(f"Invalid thresholding_mode: '{thresholding_mode}' in feature_extraction_params.")
+            raise ConfigError(f"Invalid thresholding_mode: '{thresholding_mode}' in params.")
 
         if final_threshold_value_float is None: 
              logger.error(f"Final threshold value (float) not set for {os.path.basename(image_path)}. Aborting feature extraction for this image.")
@@ -138,7 +136,6 @@ def extract_ml_features(
             logger.debug(f"No components found in main body mask for {os.path.basename(image_path)}.")
             return features, None, None 
         
-        # Intensity props should use image_gray_for_processing (which is inverted if source was collimated)
         main_props_all = skimage.measure.regionprops(labeled_main_mask, intensity_image=image_gray_for_processing, cache=False)
         main_props_all = sorted(main_props_all, key=lambda x: x.area, reverse=True)
         main_props_obj = main_props_all[0] 
@@ -178,17 +175,14 @@ def extract_ml_features(
                          f"Skipping egg detection for {os.path.basename(image_path)}.")
             return features, main_props_obj, None
 
-        # Egg detection: `blurred_image` is derived from `image_gray_for_processing` (already potentially inverted).
-        # Thus, eggs (if bright relative to organism/surroundings) should appear bright in `blurred_image`.
-        # We always use a high quantile threshold.
-        actual_egg_quantile = params.get('egg_threshold_quantile', 0.92) # Default high quantile
+        actual_egg_quantile = params.get('egg_threshold_quantile', 0.92) 
         
         non_zero_pixels_in_blurred = blurred_image[blurred_image > 1e-6] 
         if non_zero_pixels_in_blurred.size == 0:
             egg_binary_mask_initial = np.zeros_like(blurred_image, dtype=bool)
         else:
             egg_thresh_val = np.quantile(non_zero_pixels_in_blurred, actual_egg_quantile)
-            egg_binary_mask_initial = blurred_image > egg_thresh_val # Always look for pixels brighter than threshold
+            egg_binary_mask_initial = blurred_image > egg_thresh_val 
             logger.debug(f"Egg detection (using potentially pre-inverted image for main body): quantile={actual_egg_quantile}, thresh_val={egg_thresh_val:.4f}")
 
 
@@ -223,7 +217,6 @@ def extract_ml_features(
 
         egg_binary_mask_constrained = egg_binary_mask_initial & posterior_pixel_mask
         
-        # Intensity image for egg props is `image_gray_for_processing` (already potentially inverted)
         egg_labeled_mask, egg_num_labels_cand = skimage.measure.label(egg_binary_mask_constrained, return_num=True, connectivity=2)
 
         if egg_num_labels_cand > 0 and main_props_obj is not None:
@@ -280,18 +273,30 @@ if __name__ == '__main__':
     from src.utils.config_loader import get_config 
     try:
         cfg = get_config()
-        ml_params_from_config = cfg.get('stage_03_ml_classification', {}).get('feature_extraction_params', {})
-        source_illum_from_config = cfg.get('system',{}).get('source_image_illumination_type', 'darkfield')
+        s3_ml_cfg = cfg.get('stage_03_ml_classification', {})
+        feature_extraction_params_from_s3_cfg = s3_ml_cfg.get('feature_extraction_params', {})
         
-        ml_params = ml_params_from_config.copy()
-        ml_params['source_image_illumination_type'] = source_illum_from_config # Add to params for test
+        system_cfg = cfg.get('system', {})
+        source_illum_from_config = system_cfg.get('source_image_illumination_type', 'darkfield')
+        global_thresh_cfg = system_cfg.get('thresholding', {})
+        
+        # Prepare params for extract_ml_features by merging S3 feature params with global system settings
+        ml_params_for_test = feature_extraction_params_from_s3_cfg.copy()
+        ml_params_for_test['source_image_illumination_type'] = source_illum_from_config
+        ml_params_for_test['thresholding_mode'] = global_thresh_cfg.get('mode', 'otsu')
+        ml_params_for_test['otsu_threshold_multiplier'] = global_thresh_cfg.get('otsu_threshold_multiplier', 0.45)
+        ml_params_for_test['fixed_threshold_value'] = global_thresh_cfg.get('fixed_threshold_value', 70)
 
-        if not ml_params_from_config or 'egg_posterior_pixel_fraction' not in ml_params_from_config: 
+        if not feature_extraction_params_from_s3_cfg or 'egg_posterior_pixel_fraction' not in feature_extraction_params_from_s3_cfg: 
             print("ML feature extraction parameters not found/complete in config. Using hardcoded defaults for test.")
-            ml_params = { 
+            # Hardcoded params also need to reflect the structure expected by extract_ml_features
+            ml_params_for_test = { 
                 'source_image_illumination_type': 'darkfield', 
-                'gaussian_sigma': 1.0, 'thresholding_mode': 'otsu', 'otsu_threshold_multiplier': 0.5, 
-                'fixed_threshold_value': 70, 'closing_selem_size': 3, 'min_noise_size': 50, 
+                'thresholding_mode': 'otsu', 
+                'otsu_threshold_multiplier': 0.5, 
+                'fixed_threshold_value': 70, 
+                'gaussian_sigma': 1.0, 
+                'closing_selem_size': 3, 'min_noise_size': 50, 
                 'min_significant_area': 100, 'egg_posterior_pixel_fraction': 0.45, 
                 'egg_threshold_quantile': 0.90, 'egg_min_area': 50, 'egg_max_area': 5000,
                 'egg_min_solidity': 0.60, 'egg_max_solidity': 0.99, 'egg_min_eccentricity': 0.2, 
@@ -299,9 +304,12 @@ if __name__ == '__main__':
             }
     except FileNotFoundError:
         print("Config file not found. Using hardcoded ML params for test.")
-        ml_params = { 
-            'source_image_illumination_type': 'darkfield', 'gaussian_sigma': 1.0, 
-            'thresholding_mode': 'otsu', 'otsu_threshold_multiplier': 0.5, 'fixed_threshold_value': 70, 
+        ml_params_for_test = { 
+            'source_image_illumination_type': 'darkfield', 
+            'thresholding_mode': 'otsu', 
+            'otsu_threshold_multiplier': 0.5, 
+            'fixed_threshold_value': 70,
+            'gaussian_sigma': 1.0, 
             'closing_selem_size': 3, 'min_noise_size': 50, 'min_significant_area': 100, 
             'egg_posterior_pixel_fraction': 0.45, 'egg_threshold_quantile': 0.90, 'egg_min_area': 50, 
             'egg_max_area': 5000, 'egg_min_solidity': 0.60, 'egg_max_solidity': 0.99, 
@@ -321,19 +329,23 @@ if __name__ == '__main__':
     test_image_v[rr_egg_v, cc_egg_v] = 220 
 
     test_image_v_float = skimage.util.img_as_float(test_image_v) 
-    temp_img_filename = "temp_ml_feature_test_global_illum.png"
+    temp_img_filename = "temp_ml_feature_test_central_thresh.png"
     skimage.io.imsave(temp_img_filename, skimage.util.img_as_ubyte(test_image_v_float))
     
-    logger.info(f"\n--- Testing with source_image_illumination_type = '{ml_params['source_image_illumination_type']}' (from config/hardcoded) ---")
-    # The egg_threshold_quantile in config (0.8) should work if particles/eggs are bright after potential inversion.
+    logger.info(f"\n--- Testing ML feature extraction with centralized thresholding and illumination ---")
+    logger.info(f"Runtime params for extract_ml_features: {ml_params_for_test}")
+    
     features_test, _, _ = extract_ml_features(
-        temp_img_filename, ml_params, image_array_gray=test_image_v_float 
+        temp_img_filename, ml_params_for_test, image_array_gray=test_image_v_float 
     )
     if features_test:
-        print(f"Source: {ml_params['source_image_illumination_type']} - Main Area: {features_test.get('main_area')}, Egg Area: {features_test.get('total_egg_area')}")
-        assert features_test.get('total_egg_area', 0) > 0, f"Expected egg detection for {ml_params['source_image_illumination_type']} source."
+        print(f"Source Illum: {ml_params_for_test['source_image_illumination_type']}, "
+              f"Thresh Mode: {ml_params_for_test['thresholding_mode']} - "
+              f"Main Area: {features_test.get('main_area')}, Egg Area: {features_test.get('total_egg_area')}")
+        assert features_test.get('total_egg_area', 0) > 0, f"Expected egg detection for {ml_params_for_test['source_image_illumination_type']} source."
     else:
-        print(f"Source: {ml_params['source_image_illumination_type']} - Feature extraction failed.")
+        print(f"Source Illum: {ml_params_for_test['source_image_illumination_type']}, "
+              f"Thresh Mode: {ml_params_for_test['thresholding_mode']} - Feature extraction failed.")
 
 
     if os.path.exists(temp_img_filename):

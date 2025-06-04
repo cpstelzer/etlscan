@@ -16,21 +16,21 @@ logger = logging.getLogger(__name__)
 
 def reconstruct_main_body_masks(
     image_gray_original_float: np.ndarray, # Expected to be float [0,1], UNPROCESSED (not yet inverted)
-    s3_feature_extraction_params: Dict[str, Any] # This will now contain source_image_illumination_type
+    s3_feature_extraction_params: Dict[str, Any] # This will now contain source_image_illumination_type and global thresholding params
 ) -> Tuple[Optional[np.ndarray], Optional[np.ndarray], Optional[RegionProperties]]:
     """
-    Reconstructs the raw (unfilled) and filled main body masks using Stage 3 parameters.
+    Reconstructs the raw (unfilled) and filled main body masks using Stage 3 parameters
+    (which now include global illumination and thresholding settings).
     Handles illumination mode for consistent processing.
     """
     try:
         if not np.issubdtype(image_gray_original_float.dtype, np.floating):
-            # This should ideally not happen if caller sends float
             logger.warning("reconstruct_main_body_masks received non-float image. Converting.")
             image_gray_proc = skimage.util.img_as_float(image_gray_original_float) 
         else:
             image_gray_proc = image_gray_original_float.copy()
 
-        # Get global source illumination type from S3 params
+        # Get global source illumination type from S3 params (passed by Stage 4)
         source_illumination_type = s3_feature_extraction_params.get('source_image_illumination_type', 'darkfield')
         if source_illumination_type not in ['darkfield', 'collimated']:
             logger.warning(f"Invalid source_image_illumination_type '{source_illumination_type}' in s3_feature_extraction_params. Defaulting to 'darkfield'.")
@@ -50,6 +50,7 @@ def reconstruct_main_body_masks(
             logger.warning("Image became blank after blurring during mask reconstruction.")
             return None, None, None
 
+        # Use thresholding parameters from s3_feature_extraction_params
         thresholding_mode = s3_feature_extraction_params.get('thresholding_mode', 'otsu')
         final_threshold_value_float: Optional[float] = None 
 
@@ -62,19 +63,19 @@ def reconstruct_main_body_masks(
             except ValueError:
                 logger.warning("Otsu threshold failed during mask reconstruction.")
                 return None, None, None
-            otsu_multiplier = s3_feature_extraction_params.get('otsu_threshold_multiplier', 0.9)
+            otsu_multiplier = s3_feature_extraction_params.get('otsu_threshold_multiplier', 0.45) # Default from centralized config idea
             final_threshold_value_float = otsu_thresh_val_raw * otsu_multiplier
         elif thresholding_mode == 'fixed':
             fixed_thresh_val_config_int = s3_feature_extraction_params.get('fixed_threshold_value')
             if fixed_thresh_val_config_int is None:
-                raise ConfigError("thresholding_mode is 'fixed' but 'fixed_threshold_value' is missing.")
+                raise ConfigError("thresholding_mode is 'fixed' but 'fixed_threshold_value' is missing from s3_feature_extraction_params.")
             try:
                 fixed_thresh_int = int(fixed_thresh_val_config_int)
             except ValueError:
-                raise ConfigError(f"'fixed_threshold_value' ({fixed_thresh_val_config_int}) is not a valid int.")
+                raise ConfigError(f"'fixed_threshold_value' ({fixed_thresh_val_config_int}) from s3_feature_extraction_params is not a valid int.")
             final_threshold_value_float = fixed_thresh_int / 255.0
         else:
-            raise ConfigError(f"Invalid thresholding_mode: '{thresholding_mode}'.")
+            raise ConfigError(f"Invalid thresholding_mode: '{thresholding_mode}' in s3_feature_extraction_params.")
 
         if final_threshold_value_float is None:
              logger.error("MaskRecon: Final threshold value (float) not set.")
@@ -216,21 +217,22 @@ if __name__ == '__main__':
     cv2.ellipse(test_img_gray_uint8, (90,90), (15,10), angle=30, startAngle=0, endAngle=360, color=0, thickness=-1)
     test_img_gray_float_orig = skimage.util.img_as_float(test_img_gray_uint8) 
 
-    # Test with source_image_illumination_type = 'darkfield' (default in dummy params if not set globally)
+    # Test with source_image_illumination_type = 'darkfield'
+    # And using centralized thresholding params
     dummy_s3_params_darkfield = {
         'source_image_illumination_type': 'darkfield', # Explicitly set for test
+        'thresholding_mode': 'otsu', # From centralized config
+        'otsu_threshold_multiplier': 0.4, # From centralized config
+        'fixed_threshold_value': 70, # From centralized config (though not used if mode is otsu)
         'gaussian_sigma': 1.0,
-        'thresholding_mode': 'otsu',
-        'otsu_threshold_multiplier': 0.4,
         'min_noise_size': 10,
         'closing_selem_size': 0
+        # Other S3 feature params for egg detection, etc., are not relevant for mask reconstruction test itself
     }
-    print("\n--- Testing Mask Reconstruction (Otsu, Darkfield Source) ---")
+    print("\n--- Testing Mask Reconstruction (Otsu, Darkfield Source, Centralized Thresh) ---")
     raw_mask_df, filled_mask_df, _ = reconstruct_main_body_masks(test_img_gray_float_orig.copy(), dummy_s3_params_darkfield)
     if raw_mask_df is not None:
         print(f"Darkfield source - Reconstructed Raw mask area: {np.sum(raw_mask_df > 0)}")
-        # For morphology, intensity_image_for_props should match how the mask was made.
-        # If source was darkfield, reconstruct_main_body_masks uses it as is.
         detailed_features_df = calculate_detailed_body_morphology(raw_mask_df, filled_mask_df, test_img_gray_float_orig)
         print("Darkfield source - Detailed Body Morphology Features:")
         for k, v in detailed_features_df.items(): print(f"  {k}: {v}")
@@ -240,18 +242,17 @@ if __name__ == '__main__':
     # Test with source_image_illumination_type = 'collimated'
     dummy_s3_params_collimated = {
         'source_image_illumination_type': 'collimated', # Explicitly set for test
-        'gaussian_sigma': 1.0,
-        'thresholding_mode': 'otsu',
-        'otsu_threshold_multiplier': 0.4, 
+        'thresholding_mode': 'otsu', # From centralized config
+        'otsu_threshold_multiplier': 0.4, # From centralized config
+        'fixed_threshold_value': 70, # From centralized config
+        'gaussian_sigma': 1.0, 
         'min_noise_size': 10,
         'closing_selem_size': 0
     }
-    print("\n--- Testing Mask Reconstruction (Otsu, Collimated Source) ---")
+    print("\n--- Testing Mask Reconstruction (Otsu, Collimated Source, Centralized Thresh) ---")
     raw_mask_coll, filled_mask_coll, _ = reconstruct_main_body_masks(test_img_gray_float_orig.copy(), dummy_s3_params_collimated)
     if raw_mask_coll is not None:
         print(f"Collimated source - Reconstructed Raw mask area: {np.sum(raw_mask_coll > 0)}")
-        # If source was collimated, reconstruct_main_body_masks inverts it.
-        # So pass the INVERTED image for intensity_image_for_props.
         test_img_gray_float_inverted = 1.0 - test_img_gray_float_orig
         detailed_features_coll = calculate_detailed_body_morphology(raw_mask_coll, filled_mask_coll, test_img_gray_float_inverted)
         print("Collimated source - Detailed Body Morphology Features:")

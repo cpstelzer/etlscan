@@ -34,7 +34,7 @@ _learned_feature_names_during_training: Optional[List[str]] = None
 def _load_and_extract_features_for_training(
     image_directory: str,
     label: int,
-    ml_feature_extraction_params_with_illum: Dict[str, Any], # Now includes source_image_illumination_type
+    ml_processing_params: Dict[str, Any], # Contains S3 feature params + global illum + global thresh
     image_extensions: List[str]
 ) -> Tuple[List[List[Any]], List[int], Optional[List[str]]]:
     global _learned_feature_names_during_training
@@ -59,8 +59,8 @@ def _load_and_extract_features_for_training(
     for i, filename in enumerate(filenames):
         count_processed += 1
         image_path = os.path.join(image_directory, filename)
-        # Pass params which now include source_image_illumination_type
-        features_dict, _, _ = extract_ml_features(image_path, ml_feature_extraction_params_with_illum)
+        # Pass ml_processing_params which now include source_image_illumination_type and thresholding settings
+        features_dict, _, _ = extract_ml_features(image_path, ml_processing_params)
 
         if features_dict:
             if _learned_feature_names_during_training is None:
@@ -85,7 +85,7 @@ def _load_and_extract_features_for_training(
 
 def train_ml_model(
     config_s3: Dict[str, Any],
-    global_source_illumination: str, # New parameter
+    global_system_config: Dict[str, Any], # Contains global illum and global thresh
     force_retrain: bool = False
     ) -> Tuple[Optional[RandomForestClassifier], Optional[StandardScaler], Optional[List[str]]]:
     global _learned_feature_names_during_training
@@ -93,12 +93,18 @@ def train_ml_model(
 
     logger.info("--- Initiating ML Model Training ---")
     
-    training_params = config_s3.get('training_params', {})
-    ml_feature_extraction_params_base = config_s3.get('feature_extraction_params', {})
+    training_params_cfg = config_s3.get('training_params', {})
+    # Base S3 feature extraction params (without illumination/thresholding)
+    s3_feature_extraction_params_base = config_s3.get('feature_extraction_params', {})
     
-    # Add global source illumination to the feature extraction params for training
-    ml_params_for_training = ml_feature_extraction_params_base.copy()
-    ml_params_for_training['source_image_illumination_type'] = global_source_illumination
+    # Prepare the full parameter set for feature extraction during training
+    ml_params_for_training = s3_feature_extraction_params_base.copy()
+    ml_params_for_training['source_image_illumination_type'] = global_system_config.get('source_image_illumination_type', 'darkfield')
+    
+    global_thresh_cfg = global_system_config.get('thresholding', {})
+    ml_params_for_training['thresholding_mode'] = global_thresh_cfg.get('mode', 'otsu')
+    ml_params_for_training['otsu_threshold_multiplier'] = global_thresh_cfg.get('otsu_threshold_multiplier', 0.45)
+    ml_params_for_training['fixed_threshold_value'] = global_thresh_cfg.get('fixed_threshold_value', 70)
     
     image_exts = config_s3.get('image_extensions', ['.png', '.jpg'])
     
@@ -110,7 +116,6 @@ def train_ml_model(
     feature_names_path = model_path.replace(".joblib", "_feature_names.txt")
 
     if not force_retrain and os.path.exists(model_path) and os.path.exists(scaler_path) and os.path.exists(feature_names_path):
-        # ... (loading existing model logic unchanged) ...
         logger.info(f"Model '{model_path}', scaler '{scaler_path}', and feature names file '{feature_names_path}' already exist. Loading them.")
         try:
             model = joblib.load(model_path)
@@ -126,8 +131,8 @@ def train_ml_model(
 
 
     base_training_data_dir = get_training_data_dir()
-    good_dir = os.path.join(base_training_data_dir, training_params.get('good_data_subdir', 'good'))
-    bad_dir = os.path.join(base_training_data_dir, training_params.get('bad_data_subdir', 'bad'))
+    good_dir = os.path.join(base_training_data_dir, training_params_cfg.get('good_data_subdir', 'good'))
+    bad_dir = os.path.join(base_training_data_dir, training_params_cfg.get('bad_data_subdir', 'bad'))
 
     features_good, labels_good, learned_names_good = _load_and_extract_features_for_training(
         good_dir, 1, ml_params_for_training, image_exts
@@ -150,14 +155,13 @@ def train_ml_model(
         logger.error("No training data or features extracted. Training aborted.")
         return None, None, _learned_feature_names_during_training
 
-    # ... (rest of training logic: split, scale, GridSearchCV, save model - unchanged) ...
     logger.info(f"Total training samples: {len(all_labels_y)}. Number of features: {all_features_X.shape[1]}")
     logger.info(f"Feature names used for training: {_learned_feature_names_during_training}")
     class_counts = np.bincount(all_labels_y)
     if len(class_counts) < 2: logger.warning(f"Training data has only one class: {class_counts}. Stratify and some metrics might fail.")
     logger.info(f"Class distribution in training data: {class_counts}")
-    test_size = training_params.get('test_split_size', 0.25)
-    random_state = training_params.get('random_state', 42)
+    test_size = training_params_cfg.get('test_split_size', 0.25)
+    random_state = training_params_cfg.get('random_state', 42)
     try:
         X_train, X_test, y_train, y_test = train_test_split(all_features_X, all_labels_y, test_size=test_size, random_state=random_state, stratify=all_labels_y)
     except ValueError as e:
@@ -168,14 +172,14 @@ def train_ml_model(
     X_train_scaled = scaler.fit_transform(X_train)
     X_test_scaled = scaler.transform(X_test)
     logger.info("Training data scaled. Scaler fitted.")
-    rf_params_config = training_params.get('rf_param_grid', {})
-    if not rf_params_config:
+    rf_params_grid_config = training_params_cfg.get('rf_param_grid', {})
+    if not rf_params_grid_config:
         logger.warning("RandomForest param_grid not defined in config. Using default.")
         rf_params_parsed = {'n_estimators': [100], 'max_depth': [None], 'class_weight': ['balanced']}
     else: 
-        rf_params_parsed = {key: [None if v == 'null' else v for v in value_list] for key, value_list in rf_params_config.items()}
+        rf_params_parsed = {key: [None if v == 'null' else v for v in value_list] for key, value_list in rf_params_grid_config.items()}
     rf_model = RandomForestClassifier(random_state=random_state)
-    grid_search = GridSearchCV(estimator=rf_model,param_grid=rf_params_parsed,cv=training_params.get('grid_search_cv_folds', 3),n_jobs=-1, verbose=1,scoring=training_params.get('grid_search_scoring', 'f1_weighted'))
+    grid_search = GridSearchCV(estimator=rf_model,param_grid=rf_params_parsed,cv=training_params_cfg.get('grid_search_cv_folds', 3),n_jobs=-1, verbose=1,scoring=training_params_cfg.get('grid_search_scoring', 'f1_weighted'))
     logger.info("Starting GridSearchCV for RandomForest model...")
     grid_search.fit(X_train_scaled, y_train)
     best_model = grid_search.best_estimator_
@@ -209,21 +213,29 @@ def _predict_ml_candidates(
     model: RandomForestClassifier,
     scaler: StandardScaler,
     feature_names_for_prediction: List[str],
-    config_s3: Dict[str, Any], # Stage 3 specific config
-    global_source_illumination: str, # New parameter
+    config_s3: Dict[str, Any], 
+    global_system_config: Dict[str, Any], # Contains global illum and global thresh
     current_sample_id: str 
 ) -> pd.DataFrame:
-    logger.info(f"--- Predicting ML Candidates for Sample: {current_sample_id} (Source Illum: {global_source_illumination}) ---")
-    # ... (rest of the function mostly unchanged, but pass illumination to extract_ml_features) ...
-
+    logger.info(f"--- Predicting ML Candidates for Sample: {current_sample_id} ---")
+    
     if not os.path.isdir(input_sharp_objects_dir):
         logger.error(f"Input directory for prediction '{input_sharp_objects_dir}' not found.")
         return pd.DataFrame()
 
-    ml_feature_params_base = config_s3.get('feature_extraction_params', {})
-    # Add global source illumination to the feature extraction params for prediction
-    ml_params_for_prediction = ml_feature_params_base.copy()
-    ml_params_for_prediction['source_image_illumination_type'] = global_source_illumination
+    # Base S3 feature extraction params (without illumination/thresholding)
+    s3_feature_extraction_params_base = config_s3.get('feature_extraction_params', {})
+    
+    # Prepare the full parameter set for feature extraction during prediction
+    ml_params_for_prediction = s3_feature_extraction_params_base.copy()
+    ml_params_for_prediction['source_image_illumination_type'] = global_system_config.get('source_image_illumination_type', 'darkfield')
+    
+    global_thresh_cfg = global_system_config.get('thresholding', {})
+    ml_params_for_prediction['thresholding_mode'] = global_thresh_cfg.get('mode', 'otsu')
+    ml_params_for_prediction['otsu_threshold_multiplier'] = global_thresh_cfg.get('otsu_threshold_multiplier', 0.45)
+    ml_params_for_prediction['fixed_threshold_value'] = global_thresh_cfg.get('fixed_threshold_value', 70)
+    
+    logger.debug(f"Using ML params for prediction in Stage 3 for sample {current_sample_id}: {ml_params_for_prediction}")
 
     image_exts = config_s3.get('image_extensions', ['.png', '.jpg'])
     candidate_data_list = []
@@ -368,7 +380,6 @@ def _apply_boundary_recheck(candidates_df: pd.DataFrame, boundary_config: Dict[s
         if img_gray is None:
             logger.warning(f"Could not convert image {image_path} to grayscale for boundary check. Excluding it."); continue
         
-        # Pass the global_source_illumination to the boundary check function
         is_on_boundary = detect_cropped_particle_on_boundary(img_gray, image_path, illumination_mode_of_crop=global_source_illumination)
         
         if not is_on_boundary: indices_to_keep.append(index)
@@ -384,10 +395,9 @@ def _save_final_s3_outputs(
     final_df: pd.DataFrame,
     output_classified_dir: str,
     current_sample_id: str, 
-    ml_feature_extraction_params_with_illum: Dict[str, Any], # Expects illum type included
+    ml_processing_params_for_vis: Dict[str, Any], # S3 feature params + global illum + global thresh
     feature_names_for_csv: List[str] 
 ) -> Tuple[Optional[str], pd.DataFrame]: 
-    # ... (unchanged, but ml_feature_extraction_params_with_illum now correctly includes source_image_illumination_type for visualize_ml_features)
     output_csv_filename = f"{current_sample_id}_stage3_accepted_fem_features.csv"
     cols_for_df_schema = ['sample_id', 'filename', 'predicted_label'] + feature_names_for_csv
     if 'combined_sharpness' not in cols_for_df_schema: cols_for_df_schema.append('combined_sharpness')
@@ -413,7 +423,7 @@ def _save_final_s3_outputs(
         if main_props:
             vis_filename = f"{os.path.splitext(filename)[0]}_vis.png"
             vis_output_path = os.path.join(output_visualizations_dir, vis_filename)
-            try: visualize_ml_features(original_image_path, main_props, egg_area_props, vis_output_path, ml_feature_params=ml_feature_extraction_params_with_illum)
+            try: visualize_ml_features(original_image_path, main_props, egg_area_props, vis_output_path, ml_feature_params=ml_processing_params_for_vis)
             except Exception as e: logger.error(f"Failed to create visualization for {filename}: {e}")
         else: logger.warning(f"Skipping visualization for {filename} due to missing main_props.")
     
@@ -439,9 +449,12 @@ def run_stage_03_ml_classification(
     if not config_s3:
         raise ConfigError("Configuration for 'stage_03_ml_classification' not found.")
 
-    system_config = config.get('system', {})
-    global_source_illumination = system_config.get('source_image_illumination_type', 'darkfield')
-    logger.info(f"Stage 3 using global source image illumination: {global_source_illumination}")
+    # Get global system settings (illumination and thresholding)
+    global_system_config = config.get('system', {})
+    if not global_system_config.get('thresholding'):
+        raise ConfigError("System-wide thresholding configuration ('system.thresholding') not found.")
+    
+    logger.info(f"Stage 3 using global system config: Illum='{global_system_config.get('source_image_illumination_type')}', Thresh='{global_system_config.get('thresholding')}'")
 
     trained_model: Optional[RandomForestClassifier] = None
     fitted_scaler: Optional[StandardScaler] = None
@@ -455,7 +468,7 @@ def run_stage_03_ml_classification(
         logger.info(f"Starting model training (force_retrain={force_model_retrain})...")
         trained_model, fitted_scaler, feature_names_for_model = train_ml_model(
             config_s3, 
-            global_source_illumination, # Pass global illumination
+            global_system_config, 
             force_model_retrain
         )
         if not trained_model or not fitted_scaler or not feature_names_for_model:
@@ -468,7 +481,6 @@ def run_stage_03_ml_classification(
 
     if mode in ["predict", "train_and_predict"]:
         if not trained_model or not fitted_scaler or not feature_names_for_model: 
-            # ... (loading existing model - unchanged) ...
             logger.info("Loading existing model, scaler, and feature names for prediction...")
             models_output_dir = get_models_dir()
             model_filename = config_s3.get('model_filename', 'rf_fem_classifier.joblib')
@@ -497,20 +509,26 @@ def run_stage_03_ml_classification(
             input_sharp_objects_dir=sharp_objects_image_dir,
             model=trained_model, scaler=fitted_scaler,
             feature_names_for_prediction=feature_names_for_model,
-            config_s3=config_s3,
-            global_source_illumination=global_source_illumination, # Pass global illumination
+            config_s3=config_s3, # Contains S3 specific feature_extraction_params (without illum/thresh)
+            global_system_config=global_system_config, # Contains global illum/thresh
             current_sample_id=sample_id 
         )
         
         stage3_final_output_dir = os.path.join(output_dir_stage3, "ideal_fems_ML_classified")
         os.makedirs(stage3_final_output_dir, exist_ok=True)
 
+        # Prepare params for visualization by merging S3 base feature params with global settings
+        ml_feat_params_base_s3 = config_s3.get('feature_extraction_params', {}).copy()
+        ml_feat_params_base_s3['source_image_illumination_type'] = global_system_config.get('source_image_illumination_type')
+        global_thresh_cfg_s3_vis = global_system_config.get('thresholding', {})
+        ml_feat_params_base_s3['thresholding_mode'] = global_thresh_cfg_s3_vis.get('mode')
+        ml_feat_params_base_s3['otsu_threshold_multiplier'] = global_thresh_cfg_s3_vis.get('otsu_threshold_multiplier')
+        ml_feat_params_base_s3['fixed_threshold_value'] = global_thresh_cfg_s3_vis.get('fixed_threshold_value')
+
         if ml_candidates_df.empty:
             logger.info(f"No ML positive candidates found or prediction failed for sample {sample_id}.")
-            ml_feat_params_with_illum = config_s3.get('feature_extraction_params', {}).copy()
-            ml_feat_params_with_illum['source_image_illumination_type'] = global_source_illumination
             fnames_for_empty_save = feature_names_for_model if feature_names_for_model else DEFAULT_FEATURE_NAMES
-            saved_csv_path, df_to_return = _save_final_s3_outputs(pd.DataFrame(), stage3_final_output_dir, sample_id, ml_feat_params_with_illum, fnames_for_empty_save)
+            saved_csv_path, df_to_return = _save_final_s3_outputs(pd.DataFrame(), stage3_final_output_dir, sample_id, ml_feat_params_base_s3, fnames_for_empty_save)
             return saved_csv_path, df_to_return
 
         post_ml_filter_configs = config_s3.get('post_ml_filters', {})
@@ -520,12 +538,11 @@ def run_stage_03_ml_classification(
                  logger.warning(f"Deduplication relies on 'combined_sharpness', which is missing or all NaN for sample {sample_id}. Deduplication may not be effective.")
         dedup_config = post_ml_filter_configs.get('deduplication', {'enabled': False})
         df_after_dedup = _apply_temporal_spatial_deduplication(df_with_sharpness, dedup_config)
+        
         boundary_config = post_ml_filter_configs.get('boundary_recheck', {'enabled': False})
-        # Pass global_source_illumination to boundary recheck
-        final_filtered_df = _apply_boundary_recheck(df_after_dedup, boundary_config, global_source_illumination)
+        final_filtered_df = _apply_boundary_recheck(df_after_dedup, boundary_config, global_system_config.get('source_image_illumination_type', 'darkfield'))
         
         if os.path.exists(stage3_final_output_dir):
-            # ... (clearing existing content - unchanged) ...
             target_subdir_for_sample_output = os.path.join(output_dir_stage3, "ideal_fems_ML_classified")
             if os.path.exists(target_subdir_for_sample_output) and os.listdir(target_subdir_for_sample_output): 
                 logger.info(f"Clearing existing content from Stage 3 output subdir: {target_subdir_for_sample_output} for sample {sample_id}")
@@ -534,10 +551,8 @@ def run_stage_03_ml_classification(
                     if os.path.isdir(item_path): shutil.rmtree(item_path)
                     else: os.remove(item_path)
 
-        ml_feat_params_with_illum = config_s3.get('feature_extraction_params', {}).copy()
-        ml_feat_params_with_illum['source_image_illumination_type'] = global_source_illumination
         fnames_for_final_save = feature_names_for_model if feature_names_for_model else DEFAULT_FEATURE_NAMES
-        saved_csv_path, df_to_return = _save_final_s3_outputs(final_filtered_df, stage3_final_output_dir, sample_id, ml_feat_params_with_illum, fnames_for_final_save)
+        saved_csv_path, df_to_return = _save_final_s3_outputs(final_filtered_df, stage3_final_output_dir, sample_id, ml_feat_params_base_s3, fnames_for_final_save)
         
         logger.info(f"--- Stage 3: ML Classification for Sample ID: {sample_id} COMPLETED ---")
         return saved_csv_path, df_to_return

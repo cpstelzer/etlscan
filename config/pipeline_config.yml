@@ -18,8 +18,13 @@ logging:
 system:
   image_width_px: 4504 # Example, used if auto_center_mask is False
   image_height_px: 4504 # Example, used if auto_center_mask is False
-  source_image_illumination_type: "collimated" # << NEW GLOBAL SETTING, taking "collimated" as the consistent value from your original S1/S3
-
+  source_image_illumination_type: "collimated" #  "collimated" or "darkfield"
+  # Global Thresholding Settings for main object segmentation
+  thresholding:
+    mode: "otsu"  # "otsu" or "fixed"
+    otsu_threshold_multiplier: 0.45 # Multiplier for Otsu threshold value
+    fixed_threshold_value: 70  # Fixed threshold value if mode is "fixed" (0-255)
+  
 # Stage 1: Initial Detection (derived from ws_background_subtraction & wellcounter_imaging_module)
 stage_01_initial_detection:
   bg_offset_val: 180 # Frame offset for background selection
@@ -28,10 +33,9 @@ stage_01_initial_detection:
     create_mask: True
     auto_center_mask: True
     radius_px: 2000 # Effective radius for masking, relative to well size
-    radius_fraction: 0.77 # Factor to shrink auto-detected or fixed radius
+    radius_fraction: 0.75 # Factor to shrink auto-detected or fixed radius
   # Parameters for wellcounter_imaging_module.analyze_microorganisms (SUBTRACTED IMAGE ANALYSIS)
   particle_analysis: # This section is for the SUBTRACTED images
-    # illumination: "collimated" # << REMOVED - Uses system.source_image_illumination_type to prepare inputs
     apply_convolution: False
     convolution_kernel: # Standard 5x5 sharpening-like kernel
       - [0,  0,  0,  0,  0]
@@ -39,17 +43,17 @@ stage_01_initial_detection:
       - [0, -1, 10, -1,  0]
       - [0, -1, -1, -1,  0]
       - [0,  0,  0,  0,  0]
-    microorganism_threshold: 25 # For subtracted image
+    microorganism_threshold: 25 # For subtracted image (REMAINS STAGE-SPECIFIC)
     min_microorganism_area: 500 # For subtracted image
     microorganism_blur_kernel: 5 # For subtracted image, must be odd, 0 to disable
     filter_by_shape: False # If True, uses hardcoded quantiles from original wim
   # Parameters for UNSUBTRACTED (original FG) image analysis
   unsubtracted_particle_analysis:
-    # illumination: "collimated" # << REMOVED - Uses system.source_image_illumination_type
+    # thresholding_mode: "otsu"  # << REMOVED - Uses system.thresholding.mode
+    # fixed_threshold_value: 70  # << REMOVED - Uses system.thresholding.fixed_threshold_value
+    # Otsu multiplier will come from system.thresholding.otsu_threshold_multiplier
     blur_kernel_size: 3        # Blur kernel size (e.g., 3, 5, 0 to disable). Must be odd if > 0.
-    thresholding_mode: "otsu"  # "otsu" or "fixed"
-    fixed_threshold_value: 70  # Threshold value if mode is "fixed" (0-255)
-    min_particle_area: 300     # Min area for particles in unsubtracted FG image
+    min_particle_area: 1000     # Min area for particles in unsubtracted FG image
   # Parameters for compare_detected_particles (used to match subtracted and unsubtracted particles)
   particle_comparison:
     search_radius_factor: 2.0
@@ -93,13 +97,12 @@ stage_03_ml_classification:
   model_filename: "rf_fem_classifier.joblib"
   scaler_filename: "rf_fem_scaler.joblib"
   image_extensions: [".png", ".tif", ".tiff", ".jpg", ".jpeg"] 
-  feature_extraction_params:
-    # illumination: "collimated" # << REMOVED - Uses system.source_image_illumination_type
+  feature_extraction_params: # These params are passed to core.ml_feature_extractor
+    # thresholding_mode: "otsu" # << REMOVED - Uses system.thresholding
+    # otsu_threshold_multiplier: 0.45 # << REMOVED - Uses system.thresholding
+    # fixed_threshold_value: 100 # << REMOVED - Uses system.thresholding
     gaussian_sigma: 1.0
-    thresholding_mode: "otsu" 
-    otsu_threshold_multiplier: 0.7
-    fixed_threshold_value: 80 
-    closing_selem_size: 3
+    closing_selem_size: 1
     min_noise_size: 50
     min_significant_area: 300
     egg_posterior_pixel_fraction: 0.4 

@@ -124,29 +124,34 @@ def _analyze_single_subtracted_image(
 
 def _analyze_unsubtracted_fg_image(
     original_fg_image_gray: np.ndarray, 
-    config_s1_unsubtracted_analysis: Dict[str, Any],
+    config_s1_unsubtracted_analysis: Dict[str, Any], # Contains blur_kernel_size, min_particle_area
+    global_threshold_config: Dict[str, Any], # Contains mode, otsu_multiplier, fixed_value
     source_image_illumination: str 
-) -> Tuple[Optional[pd.DataFrame], int, Optional[np.ndarray], Optional[np.ndarray]]: # Added img_proc_after_inversion for debug
+) -> Tuple[Optional[pd.DataFrame], int, Optional[np.ndarray], Optional[np.ndarray]]:
     """
     Analyzes a single original (unsubtracted) grayscale foreground image.
+    Uses global thresholding configuration.
     Returns: particles_df, count, final_binary_mask, image_after_potential_inversion (for debug)
     """
     blur_ksize = config_s1_unsubtracted_analysis.get('blur_kernel_size', 0)
-    threshold_mode = config_s1_unsubtracted_analysis.get('thresholding_mode', 'otsu')
-    fixed_thresh_val = config_s1_unsubtracted_analysis.get('fixed_threshold_value', 128)
     min_area = config_s1_unsubtracted_analysis.get('min_particle_area', 50)
+
+    # Get thresholding parameters from global_threshold_config
+    threshold_mode = global_threshold_config.get('mode', 'otsu')
+    fixed_thresh_val = global_threshold_config.get('fixed_threshold_value', 70) # Integer 0-255
+    otsu_multiplier = global_threshold_config.get('otsu_threshold_multiplier', 0.45) # Float
 
     if original_fg_image_gray is None or original_fg_image_gray.dtype != np.uint8:
         logger.error("Unsubtracted FG image is None or not uint8.")
         return None, 0, None, None
 
     img_proc = original_fg_image_gray.copy()
-    img_proc_after_inversion_for_debug = None # Initialize
+    img_proc_after_inversion_for_debug = None 
 
     if source_image_illumination == 'collimated':
         logger.debug("Unsubtracted analysis: Source illumination is 'collimated'. Inverting image.")
         img_proc = cv2.bitwise_not(img_proc)
-        img_proc_after_inversion_for_debug = img_proc.copy() # Save state after inversion for debug
+        img_proc_after_inversion_for_debug = img_proc.copy()
     
     if blur_ksize > 0 and blur_ksize % 2 == 1:
         blurred_img_proc = apply_blur(img_proc, blur_ksize, "gaussian") 
@@ -161,9 +166,25 @@ def _analyze_unsubtracted_fg_image(
     if threshold_mode == 'otsu':
         if img_proc.min() == img_proc.max(): 
             logger.warning("Image for unsubtracted Otsu is uniform. Thresholding may fail or be meaningless.")
-        _, binary_img = cv2.threshold(img_proc, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+            # If uniform, Otsu might return 0 or max. If it's 0, and particles are bright, mask will be all white.
+            # If particles are dark (after inversion), mask will be all black.
+            # This behavior of cv2.threshold with THRESH_OTSU on uniform image needs to be considered.
+            # For now, proceed, but log this state.
+        
+        # Convert float image_proc (0-1) to uint8 (0-255) for cv2.threshold with THRESH_OTSU
+        # This was a previous bug where Otsu was applied to float. Now img_proc is already uint8.
+        # No, img_proc can become float if original_fg_image_gray was float and source_image_illumination was darkfield.
+        # Ensure img_proc is uint8 before Otsu.
+        # However, original_fg_image_gray is asserted to be uint8 at the start.
+        # Bitwise_not preserves uint8. GaussianBlur preserves dtype. So img_proc should be uint8.
+        
+        otsu_thresh_val_raw_cv, _ = cv2.threshold(img_proc, 0, 255, cv2.THRESH_OTSU) # Get Otsu value
+        final_threshold_for_binary = otsu_thresh_val_raw_cv * otsu_multiplier
+        logger.debug(f"Unsub Otsu: Raw CV Otsu val={otsu_thresh_val_raw_cv}, mult={otsu_multiplier}, final_thresh={final_threshold_for_binary}")
+        _, binary_img = cv2.threshold(img_proc, int(final_threshold_for_binary), 255, cv2.THRESH_BINARY)
+
     elif threshold_mode == 'fixed':
-        binary_img = apply_threshold(img_proc, fixed_thresh_val, "binary")
+        binary_img = apply_threshold(img_proc, int(fixed_thresh_val), "binary")
     else:
         logger.error(f"Invalid thresholding_mode '{threshold_mode}' for unsubtracted analysis.")
         return None, 0, None, img_proc_after_inversion_for_debug
@@ -242,22 +263,26 @@ def run_stage_01_initial_detection(
     sample_id: str 
     ) -> Optional[str]:
     
-    s1_unsub_debug_images_saved_this_run = False # Local flag for this run_stage_01 call
+    s1_unsub_debug_images_saved_this_run = False 
 
     logger.info(f"--- Stage 1: Initial Detection for Sample ID: {sample_id} ---")
     config = get_config()
     config_s1 = config.get('stage_01_initial_detection', {})
     if not config_s1: raise ConfigError("Configuration for 'stage_01_initial_detection' not found.")
+    
     system_cfg = config.get('system', {})
     source_image_illumination = system_cfg.get('source_image_illumination_type', 'darkfield')
-    if source_image_illumination not in ['darkfield', 'collimated']:
-        logger.warning(f"Invalid system.source_image_illumination_type: {source_image_illumination}. Defaulting to 'darkfield'.")
-        source_image_illumination = 'darkfield'
+    global_threshold_config = system_cfg.get('thresholding', {})
+    if not global_threshold_config:
+        raise ConfigError("System-wide thresholding configuration ('system.thresholding') not found.")
+    
     logger.info(f"Stage 1 processing with source_image_illumination_type: {source_image_illumination}")
+    logger.info(f"Stage 1 using global thresholding config: {global_threshold_config}")
     
     particle_analysis_subtracted_config = config_s1.get('particle_analysis', {})
-    unsubtracted_analysis_config = config_s1.get('unsubtracted_particle_analysis', {})
+    unsubtracted_analysis_config = config_s1.get('unsubtracted_particle_analysis', {}) # Still contains blur_kernel_size, min_particle_area
     if not unsubtracted_analysis_config: raise ConfigError("Missing 'unsubtracted_particle_analysis' config in Stage 1.")
+    
     particle_comparison_config = config_s1.get('particle_comparison', {})
     if not particle_comparison_config: raise ConfigError("Missing 'particle_comparison' config in Stage 1.")
     bg_offset = config_s1.get('bg_offset_val', 110)
@@ -290,7 +315,6 @@ def run_stage_01_initial_detection(
                 _, well_mask_uint8 = mask_well_area(img_a_gray_orig.copy(), mask_cfg, system_cfg)
                 if well_mask_uint8 is None: logger.warning(f"Well masking failed for {fg_row['filename']}.")
             
-            # 1. Subtracted Analysis Path
             img_a_for_sub = img_a_gray_orig.copy(); img_b_for_sub = img_b_gray_orig.copy()
             if source_image_illumination == 'collimated': 
                 img_a_for_sub = cv2.bitwise_not(img_a_for_sub); img_b_for_sub = cv2.bitwise_not(img_b_for_sub)
@@ -302,7 +326,6 @@ def run_stage_01_initial_detection(
                 sub_particles_df['SAMPLE_ID'] = sample_id; sub_particles_df['source_image_filename'] = fg_row['filename']
                 all_subtracted_particle_dfs.append(sub_particles_df); logger.debug(f"  FG '{fg_row['filename']}' (Subtracted): Found {p_count_sub} particles.")
 
-            # 2. Unsubtracted Analysis Path
             img_for_unsub_analysis_input = img_a_gray_orig.copy()
             if well_mask_uint8 is not None:
                 if source_image_illumination == 'collimated':
@@ -312,14 +335,13 @@ def run_stage_01_initial_detection(
                 else: 
                     img_for_unsub_analysis_input = apply_mask(img_a_gray_orig.copy(), well_mask_uint8)
             
-            # Pass source_image_illumination to _analyze_unsubtracted_fg_image
             unsub_particles_df, p_count_unsub, unsub_binary_debug, unsub_inverted_debug = _analyze_unsubtracted_fg_image(
                 img_for_unsub_analysis_input, 
-                unsubtracted_analysis_config, 
+                unsubtracted_analysis_config, # Contains blur, min_area
+                global_threshold_config,      # Contains mode, otsu_mult, fixed_val
                 source_image_illumination
             )
             
-            # Save debug images for the first processed frame only
             if not s1_unsub_debug_images_saved_this_run and idx == 0: 
                 if source_image_illumination == 'collimated' and unsub_inverted_debug is not None:
                     cv2.imwrite(os.path.join(output_dir_stage1, f"{sample_id}_DEBUG_s1_unsub_inverted_input.png"), unsub_inverted_debug)
@@ -330,9 +352,7 @@ def run_stage_01_initial_detection(
                 if well_mask_uint8 is not None and source_image_illumination == 'collimated':
                      cv2.imwrite(os.path.join(output_dir_stage1, f"{sample_id}_DEBUG_s1_unsub_prepped_masked_input.png"), img_for_unsub_analysis_input)
                      logger.info(f"DEBUG: Saved {sample_id}_DEBUG_s1_unsub_prepped_masked_input.png")
-
                 s1_unsub_debug_images_saved_this_run = True
-
 
             if unsub_particles_df is not None and not unsub_particles_df.empty:
                 unsub_particles_df['SAMPLE_ID'] = sample_id; unsub_particles_df['source_image_filename'] = fg_row['filename']
@@ -363,18 +383,23 @@ def run_stage_01_initial_detection(
 
 
 if __name__ == '__main__':
-    # ... (test setup unchanged) ...
     from src.utils.logging_setup import setup_logging
     setup_logging() 
     try:
         cfg_main = get_config() 
         system_cfg_test = cfg_main.setdefault('system', {})
         system_cfg_test.setdefault('source_image_illumination_type', 'collimated') 
-        TEST_SAMPLE_ID = "test_sample_s1_global_illum_v3" 
+        # For testing, ensure global thresholding config is present if not already by full config load
+        thresh_cfg_test = system_cfg_test.setdefault('thresholding', {})
+        thresh_cfg_test.setdefault('mode', 'otsu')
+        thresh_cfg_test.setdefault('otsu_threshold_multiplier', 0.45)
+        thresh_cfg_test.setdefault('fixed_threshold_value', 70)
+        
+        TEST_SAMPLE_ID = "test_sample_s1_central_thresh_v1" 
         base_project_dir = cfg_main.get('project_base_dir')
         if not base_project_dir: raise ValueError("project_base_dir not set in config for testing.")
         test_image_input_dir = os.path.join(base_project_dir, "data", "input", TEST_SAMPLE_ID)
-        test_stage1_output_dir = os.path.join(base_project_dir, "data", "output", TEST_SAMPLE_ID, "stage1_output_global_illum_v3")
+        test_stage1_output_dir = os.path.join(base_project_dir, "data", "output", TEST_SAMPLE_ID, "stage1_output_central_thresh_v1")
         os.makedirs(test_stage1_output_dir, exist_ok=True); os.makedirs(test_image_input_dir, exist_ok=True) 
         logger.info(f"Test Input Dir: {test_image_input_dir}"); logger.info(f"Test Output Dir: {test_stage1_output_dir}")
         if not os.listdir(test_image_input_dir) or len(os.listdir(test_image_input_dir)) < 5 : 
@@ -389,22 +414,30 @@ if __name__ == '__main__':
                 if i % 2 == 0: cv2.circle(dummy_img_content, (150,150), 10, 40, -1) 
                 cv2.imwrite(dummy_fpath, dummy_img_content)
             logger.info(f"Created {num_frames_total} dummy 'collimated-like' images in {test_image_input_dir}")
-        logger.info("\n--- Running S1 Test with global illumination setting (v3 - mask fix) ---")
+        
+        logger.info("\n--- Running S1 Test with centralized thresholding config ---")
         s1_cfg = cfg_main.setdefault('stage_01_initial_detection', {})
-        s1_cfg.get('particle_analysis', {}).pop('illumination', None)
-        s1_cfg.get('unsubtracted_particle_analysis', {}).pop('illumination', None)
+        # Remove old thresholding params from s1_cfg if they exist (they shouldn't after config change)
+        s1_cfg.get('unsubtracted_particle_analysis', {}).pop('thresholding_mode', None)
+        s1_cfg.get('unsubtracted_particle_analysis', {}).pop('fixed_threshold_value', None)
+        
+        # Ensure other necessary params for unsubtracted_particle_analysis are there
+        s1_unsub_cfg = s1_cfg.setdefault('unsubtracted_particle_analysis', {})
+        s1_unsub_cfg.setdefault('min_particle_area', 30)
+        s1_unsub_cfg.setdefault('blur_kernel_size',3)
+
         s1_cfg.setdefault('particle_analysis', {'microorganism_threshold': 25, 'min_microorganism_area': 50, 'apply_convolution':False}) 
-        s1_cfg.setdefault('unsubtracted_particle_analysis', {'thresholding_mode': 'otsu', 'min_particle_area': 30, 'blur_kernel_size':3})
         s1_cfg.setdefault('particle_comparison', {'search_radius_factor': 2.0, 'default_particle_area': 100})
         s1_cfg.setdefault('well_masking', {'create_mask': True, 'radius_px':80, 'radius_fraction':0.9}) 
+        
         result_csv_path = run_stage_01_initial_detection(image_dir_path=test_image_input_dir, output_dir_stage1=test_stage1_output_dir, sample_id=TEST_SAMPLE_ID)
         if result_csv_path: 
-            logger.info(f"S1 test with global illumination completed. CSV: {result_csv_path}")
+            logger.info(f"S1 test with centralized thresholding completed. CSV: {result_csv_path}")
             df_out = pd.read_csv(result_csv_path)
             logger.info(f"Output DataFrame head:\n{df_out.head()}")
             logger.info(f"Number of particles in output: {len(df_out)}")
             assert len(df_out) > 0, "Expected some fused particles for this test case with collimated source and masking fix."
-        else: logger.error("S1 test with global illumination FAILED.")
+        else: logger.error("S1 test with centralized thresholding FAILED.")
     except ConfigError as ce: logger.error(f"Configuration error during test: {ce}")
     except FileNotFoundError as fnfe: logger.error(f"File not found during test setup (check config paths and test data): {fnfe}")
     except Exception as e: logger.exception(f"An unexpected error occurred during the Stage 1 test: {e}")

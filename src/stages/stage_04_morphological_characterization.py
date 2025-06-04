@@ -29,17 +29,29 @@ def run_stage_04_morphological_characterization(
     logger.info(f"--- Stage 4: Detailed Morpho Characterization for Sample ID: {sample_id} ---")
     config = get_config() 
     
-    system_config = config.get('system', {})
-    global_source_illumination = system_config.get('source_image_illumination_type', 'darkfield')
+    # Get global system settings (illumination and thresholding)
+    global_system_config = config.get('system', {})
+    if not global_system_config.get('thresholding'):
+        raise ConfigError("System-wide thresholding configuration ('system.thresholding') not found.")
+    
+    global_source_illumination = global_system_config.get('source_image_illumination_type', 'darkfield')
     logger.info(f"Stage 4 using global source image illumination: {global_source_illumination}")
+    logger.info(f"Stage 4 using global thresholding config: {global_system_config.get('thresholding')}")
 
-    config_s3_for_s4 = config.get('stage_03_ml_classification', {}) # S4 uses S3's feature extraction params
+    # S4 uses S3's feature_extraction_params (base, without illum/thresh) and combines them with global settings
+    config_s3_for_s4 = config.get('stage_03_ml_classification', {}) 
     s3_feature_extraction_params_base = config_s3_for_s4.get('feature_extraction_params', {})
     
-    # Add global illumination to S3 feature params for use in S4
+    # Prepare params for S4 processing by combining S3 base params with global settings
     s3_params_for_s4_processing = s3_feature_extraction_params_base.copy()
     s3_params_for_s4_processing['source_image_illumination_type'] = global_source_illumination
+    
+    global_thresh_cfg = global_system_config.get('thresholding', {})
+    s3_params_for_s4_processing['thresholding_mode'] = global_thresh_cfg.get('mode', 'otsu')
+    s3_params_for_s4_processing['otsu_threshold_multiplier'] = global_thresh_cfg.get('otsu_threshold_multiplier', 0.45)
+    s3_params_for_s4_processing['fixed_threshold_value'] = global_thresh_cfg.get('fixed_threshold_value', 70)
 
+    logger.debug(f"Effective S3 feature params used in Stage 4: {s3_params_for_s4_processing}")
 
     logger.info(f"Stage 4: Attempting to load S3 results from: {input_s3_csv_path}")
     s3_results_df = load_dataframe_from_csv(input_s3_csv_path)
@@ -54,7 +66,7 @@ def run_stage_04_morphological_characterization(
         'compactness_factor_ni_s4'
     ]
     base_cols_for_empty_s4_df = ['sample_id', 'filename', 'predicted_label'] + \
-                                DEFAULT_FEATURE_NAMES + ['combined_sharpness'] # Use updated DEFAULT_FEATURE_NAMES
+                                DEFAULT_FEATURE_NAMES + ['combined_sharpness'] 
     final_expected_cols_for_empty_s4_df = list(dict.fromkeys(base_cols_for_empty_s4_df + s4_morph_feature_keys))
 
 
@@ -96,20 +108,15 @@ def run_stage_04_morphological_characterization(
             detailed_results_list.append(current_row_data_dict); continue
         original_img_gray_float = skimage.util.img_as_float(img_loaded_for_s4)
 
-        # Get S3 main_props for visualization (orientation, posterior end)
-        # extract_ml_features uses s3_params_for_s4_processing (which includes global_source_illumination)
         _, main_props_from_s3_logic, _ = extract_ml_features(
             full_image_path, s3_params_for_s4_processing, image_array_gray=original_img_gray_float.copy()
         )
 
-        # Reconstruct masks. reconstruct_main_body_masks also uses s3_params_for_s4_processing for illumination.
-        # It expects the *original un-inverted* float image as input.
         raw_mask, filled_mask, main_props_filled_s4_recalc = reconstruct_main_body_masks(
             original_img_gray_float.copy(), 
             s3_params_for_s4_processing
         )
         
-        # For calculate_detailed_body_morphology, prepare the intensity image based on global illumination
         img_for_s4_intensity_props = original_img_gray_float.copy()
         if global_source_illumination == 'collimated':
             img_for_s4_intensity_props = 1.0 - img_for_s4_intensity_props
@@ -125,7 +132,7 @@ def run_stage_04_morphological_characterization(
 
         try:
             visualize_detailed_morphology(
-                original_img_gray_float, # Pass original non-inverted for display
+                original_img_gray_float, 
                 main_props_for_vis, 
                 raw_mask, 
                 filled_mask, 
@@ -166,11 +173,15 @@ if __name__ == '__main__':
 
     try:
         cfg_main = get_config()
-        # Ensure system config for illumination type is present for testing
         system_cfg_test = cfg_main.setdefault('system', {})
-        system_cfg_test.setdefault('source_image_illumination_type', 'collimated') # Example for testing
+        system_cfg_test.setdefault('source_image_illumination_type', 'collimated')
+        # Ensure global thresholding config is present for testing
+        thresh_cfg_test = system_cfg_test.setdefault('thresholding', {})
+        thresh_cfg_test.setdefault('mode', 'otsu')
+        thresh_cfg_test.setdefault('otsu_threshold_multiplier', 0.45)
+        thresh_cfg_test.setdefault('fixed_threshold_value', 70)
 
-        TEST_SAMPLE_ID_S4 = "test_sample_s4_global_illum" 
+        TEST_SAMPLE_ID_S4 = "test_sample_s4_central_thresh" 
         base_project_dir = cfg_main.get('project_base_dir')
         if not base_project_dir: raise ValueError("project_base_dir not set in config for S4 testing.")
 
@@ -178,27 +189,32 @@ if __name__ == '__main__':
         s3_csv_path = os.path.join(s3_output_base_dir, "ideal_fems_ML_classified", f"{TEST_SAMPLE_ID_S4}_stage3_accepted_fem_features.csv")
         s3_images_dir = os.path.join(s3_output_base_dir, "ideal_fems_ML_classified", "accepted_images")
         
-        s4_output_dir = os.path.join(base_project_dir, "data", "output", TEST_SAMPLE_ID_S4, "stage4_morph_global_illum")
+        s4_output_dir = os.path.join(base_project_dir, "data", "output", TEST_SAMPLE_ID_S4, "stage4_morph_central_thresh")
         os.makedirs(s4_output_dir, exist_ok=True)
         os.makedirs(s3_images_dir, exist_ok=True) 
 
-        # ... (dummy S3 data creation - ensure ml_params used by extract_ml_features includes source_image_illumination_type) ...
         if not os.path.exists(s3_csv_path) or not any(os.path.isfile(os.path.join(s3_images_dir, f)) for f in os.listdir(s3_images_dir)):
-            logger.info(f"Creating dummy S3 CSV and images for S4 test (global illumination aware)...")
+            logger.info(f"Creating dummy S3 CSV and images for S4 test (centralized thresholding)...")
             dummy_s3_data = []
             num_dummy_images = 2 
+            
+            # Params for dummy S3 feature extraction
             temp_ml_params_for_s3_dummy = cfg_main.get('stage_03_ml_classification', {}).get('feature_extraction_params',{}).copy()
             temp_ml_params_for_s3_dummy['source_image_illumination_type'] = system_cfg_test['source_image_illumination_type']
+            temp_ml_params_for_s3_dummy['thresholding_mode'] = thresh_cfg_test['mode']
+            temp_ml_params_for_s3_dummy['otsu_threshold_multiplier'] = thresh_cfg_test['otsu_threshold_multiplier']
+            temp_ml_params_for_s3_dummy['fixed_threshold_value'] = thresh_cfg_test['fixed_threshold_value']
+
 
             for i in range(num_dummy_images):
-                dummy_img_name = f"dummy_fem_img_global_illum_s4test_{i}.png"
+                dummy_img_name = f"dummy_fem_img_central_thresh_s4test_{i}.png"
                 dummy_img_path = os.path.join(s3_images_dir, dummy_img_name)
-                dummy_cv_img_uint8 = np.zeros((200, 200), dtype=np.uint8) # Dark BG
-                if system_cfg_test['source_image_illumination_type'] == 'collimated': # Create dark particles on bright BG
+                dummy_cv_img_uint8 = np.zeros((200, 200), dtype=np.uint8) 
+                if system_cfg_test['source_image_illumination_type'] == 'collimated': 
                     dummy_cv_img_uint8 = np.full((200,200), 220, dtype=np.uint8)
                     cv2.ellipse(dummy_cv_img_uint8, (100,100), (70,35), angle=20, startAngle=0, endAngle=360, color=50, thickness=-1)
                     cv2.ellipse(dummy_cv_img_uint8, (90,90), (10,5), angle=20, startAngle=0, endAngle=360, color=220, thickness=-1) 
-                else: # Darkfield: bright particles on dark BG
+                else: 
                     cv2.ellipse(dummy_cv_img_uint8, (100,100), (70,35), angle=20, startAngle=0, endAngle=360, color=150, thickness=-1)
                     cv2.ellipse(dummy_cv_img_uint8, (90,90), (10,5), angle=20, startAngle=0, endAngle=360, color=0, thickness=-1) 
                 cv2.imwrite(dummy_img_path, dummy_cv_img_uint8)
