@@ -99,15 +99,24 @@ stage_03_ml_classification:
   scaler_filename: "rf_fem_scaler.joblib"
   image_extensions: [".png", ".tif", ".tiff", ".jpg", ".jpeg"] 
   feature_extraction_params: # These params are passed to core.ml_feature_extractor
-    # thresholding_mode: "otsu" # << REMOVED - Uses system.thresholding
-    # otsu_threshold_multiplier: 0.45 # << REMOVED - Uses system.thresholding
-    # fixed_threshold_value: 100 # << REMOVED - Uses system.thresholding
-    gaussian_sigma: 1.0
-    closing_selem_size: 1
+                             # which in turn passes them to core.segmentation.segment_main_body
+    # Global thresholding (mode, otsu_multiplier, fixed_threshold_value) and 
+    # global illumination (source_image_illumination_type) are added from system_config at runtime.
+    
+    # Unsharp Masking Parameters (NEW - for main body segmentation)
+    enable_unsharp_masking: true # Set to true to enable unsharp masking before thresholding
+    unsharp_mask_sigma: 1.8       # Sigma for Gaussian blur in unsharp masking (e.g., 0.5 to 2.0)
+    unsharp_mask_amount: 1.6      # Strength of sharpening (e.g., 0.5 to 2.0)
+
+    # Segmentation cleaning/closing parameters (used by core.segmentation.segment_main_body)
     min_noise_size: 50
-    min_significant_area: 300
+    closing_selem_size: 3 # Radius of disk for binary closing. 0 to disable.
+
+    # Egg-specific parameters (used by core.ml_feature_extractor after main body seg)
+    gaussian_sigma: 1.0          # Sigma for Gaussian blur specifically for EGG detection
+    min_significant_area: 300    # Min area of main body to proceed with egg detection
     egg_posterior_pixel_fraction: 0.4 
-    egg_threshold_quantile: 0.8 # This quantile is now applied to the image *after* it has been potentially inverted based on source_image_illumination_type. So, if particles (and eggs) are bright in that domain, use a high quantile.
+    egg_threshold_quantile: 0.8 
     egg_min_area: 50             
     egg_max_area: 5000           
     egg_min_solidity: 0.60       

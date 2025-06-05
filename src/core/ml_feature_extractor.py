@@ -9,10 +9,11 @@ import numpy as np
 import os
 import logging
 import cv2 
-from scipy import ndimage as ndi
+from scipy import ndimage as ndi # Should be removed if not used elsewhere, fill_holes is now in segmentation.py
 from typing import Optional, Dict, Any, Tuple, List
 
-from src.utils.common_exceptions import ConfigError 
+from src.utils.common_exceptions import ConfigError
+from src.core.segmentation import segment_main_body_from_image_float # MODIFIED: Import new function
 
 logger = logging.getLogger(__name__)
 
@@ -25,124 +26,67 @@ DEFAULT_FEATURE_NAMES = [
 
 def extract_ml_features(
     image_path: str,
-    params: Dict[str, Any], 
+    params: Dict[str, Any], # This should now contain all segmentation params including unsharp
     image_array_gray: Optional[np.ndarray] = None
 ) -> Tuple[Optional[Dict[str, Any]], Optional[Any], Optional[Any]]:
     features: Dict[str, Any] = {key: 0.0 for key in DEFAULT_FEATURE_NAMES} 
     features['posterior_area_ratio'] = 0.5 
     features['egg_ecc'] = 0.0 
     features['total_egg_area'] = 0.0
-    features['num_components'] = 0 
+    features['num_components'] = 0 # This will be set by the segmentation function based on filled mask
 
     main_props_obj = None
     egg_area_props_obj = None
     
     try:
+        # Load and prepare original image (float, [0,1])
+        img_float_original: np.ndarray
         if image_array_gray is None:
             img_loaded_gray = skimage.io.imread(image_path, as_gray=True)
             if not np.issubdtype(img_loaded_gray.dtype, np.floating):
-                 image_gray = skimage.util.img_as_float(img_loaded_gray)
+                 img_float_original = skimage.util.img_as_float(img_loaded_gray)
             else:
-                 image_gray = img_loaded_gray 
+                 img_float_original = img_loaded_gray 
         else:
-            # Ensure it's float if coming from array
             if not np.issubdtype(image_array_gray.dtype, np.floating):
-                image_gray = skimage.util.img_as_float(image_array_gray)
+                img_float_original = skimage.util.img_as_float(image_array_gray)
             else:
-                image_gray = image_array_gray.copy()
+                img_float_original = image_array_gray.copy()
 
+        img_gray_input_shape = img_float_original.shape 
 
-        img_gray_input_shape = image_gray.shape 
-
-        source_illumination_type = params.get('source_image_illumination_type', 'darkfield')
-        if source_illumination_type not in ['darkfield', 'collimated']:
-            logger.warning(f"Invalid source_image_illumination_type '{source_illumination_type}' in params. Defaulting to 'darkfield'.")
-            source_illumination_type = 'darkfield'
-
-        image_gray_for_processing = image_gray.copy() 
-        if source_illumination_type == 'collimated':
-            logger.debug(f"ML Feature Extraction: Source illumination '{source_illumination_type}'. Inverting image for {os.path.basename(image_path)}.")
-            image_gray_for_processing = 1.0 - image_gray_for_processing
+        # --- MODIFICATION: Call shared segmentation function ---
+        # The 'params' dict passed to extract_ml_features should already contain:
+        # source_image_illumination_type, thresholding_mode, otsu_threshold_multiplier,
+        # fixed_threshold_value, enable_unsharp_masking, unsharp_mask_sigma, unsharp_mask_amount,
+        # min_noise_size, closing_selem_size.
+        # It will also contain S3-specific egg params, which are fine.
         
-        if image_gray_for_processing.max() < 1e-9: 
-            logger.debug(f"Image {os.path.basename(image_path)} is empty or near-empty after potential inversion. No features extracted.")
-            return None, None, None
+        raw_body_mask, filled_body_mask, main_props_obj = segment_main_body_from_image_float(
+            img_float_original,
+            params # Pass the comprehensive params dict
+        )
 
-        # --- MODIFICATION: Pre-thresholding blur REMOVED for main body segmentation ---
-        # blurred_image = skimage.filters.gaussian(image_gray_for_processing, sigma=params.get('gaussian_sigma', 1.0))
-        # Use image_gray_for_processing directly for thresholding
-        image_to_threshold = image_gray_for_processing
+        if main_props_obj is None or filled_body_mask is None: # main_props_obj comes from filled mask
+            logger.debug(f"Main body segmentation failed or found no object for {os.path.basename(image_path)}.")
+            # num_components would be 0 if main_props_obj is None
+            # Update: We need to determine num_components based on the segmentation output if possible
+            if filled_body_mask is not None: # even if main_props_obj is None (e.g. area too small)
+                 _, num_labels_temp = skimage.measure.label(filled_body_mask > 0, return_num=True, connectivity=2)
+                 features['num_components'] = int(num_labels_temp)
+            return features, None, None # Return default features with num_components updated
+        
+        # Update num_components from the main object's mask
+        # (segment_main_body should ideally return number of components, or we relabel here)
+        # For now, assuming main_props_obj means one main component.
+        # If segment_main_body handles multi-label, main_props_obj is the largest.
+        # A more robust num_components would be from the labeled_filled_mask inside segment_main_body
+        # For now, if main_props_obj exists, we consider it 1 significant component for this feature.
+        # Let's relabel the filled_body_mask to get a robust num_components for the features dict.
+        _, num_labels_final = skimage.measure.label(filled_body_mask > 0, return_num=True, connectivity=2)
+        features['num_components'] = int(num_labels_final)
         # --- END MODIFICATION ---
         
-        if image_to_threshold.min() == image_to_threshold.max(): 
-            logger.debug(f"Image {os.path.basename(image_path)} became blank or uniform before thresholding. No features.")
-            return None, None, None
-        
-        thresholding_mode = params.get('thresholding_mode', 'otsu') 
-        final_threshold_value_float: Optional[float] = None 
-
-        if thresholding_mode == 'otsu':
-            # image_to_threshold is already float [0,1]
-            try:
-                otsu_thresh_val_raw_sk = skimage.filters.threshold_otsu(image_to_threshold)
-            except ValueError: 
-                logger.warning(f"Skimage Otsu threshold failed for {os.path.basename(image_path)}. Skipping feature extraction.")
-                return None, None, None
-            
-            otsu_multiplier = params.get('otsu_threshold_multiplier', 0.45)
-            final_threshold_value_float = otsu_thresh_val_raw_sk * otsu_multiplier
-            logger.debug(f"Using Skimage Otsu thresholding for {os.path.basename(image_path)}. Raw Skimage Otsu: {otsu_thresh_val_raw_sk:.4f}, Multiplier: {otsu_multiplier}, Final threshold (0-1): {final_threshold_value_float:.4f}")
-
-        elif thresholding_mode == 'fixed':
-            fixed_thresh_val_config_int = params.get('fixed_threshold_value')
-            if fixed_thresh_val_config_int is None:
-                logger.error(f"Thresholding mode is 'fixed' but 'fixed_threshold_value' not provided in params for {os.path.basename(image_path)}. Cannot proceed.")
-                raise ConfigError("thresholding_mode is 'fixed' but 'fixed_threshold_value' is missing from params.")
-            
-            try:
-                fixed_thresh_int = int(fixed_thresh_val_config_int)
-            except ValueError:
-                logger.error(f"'fixed_threshold_value' ({fixed_thresh_val_config_int}) must be an integer (0-255).")
-                raise ConfigError(f"'fixed_threshold_value' ({fixed_thresh_val_config_int}) is not a valid integer.")
-
-            final_threshold_value_float = fixed_thresh_int / 255.0 
-            logger.debug(f"Using fixed thresholding for {os.path.basename(image_path)}. Config value (0-255): {fixed_thresh_int}, Converted threshold (0-1): {final_threshold_value_float:.4f}")
-        
-        else:
-            logger.error(f"Invalid thresholding_mode: '{thresholding_mode}' for {os.path.basename(image_path)}. Supported modes: 'otsu', 'fixed'.")
-            raise ConfigError(f"Invalid thresholding_mode: '{thresholding_mode}' in params.")
-
-        if final_threshold_value_float is None: 
-             logger.error(f"Final threshold value (float) not set for {os.path.basename(image_path)}. Aborting feature extraction for this image.")
-             return None, None, None
-        
-        main_binary_mask_initial_bool = image_to_threshold > final_threshold_value_float # Result is boolean array
-        
-        main_cleaned_mask_bool = skimage.morphology.remove_small_objects(
-            main_binary_mask_initial_bool, min_size=params.get('min_noise_size', 50)
-        )
-        
-        selem_closing_size = params.get('closing_selem_size', 3)
-        if selem_closing_size > 0:
-            selem_closing = skimage.morphology.disk(selem_closing_size)
-            main_closed_mask_bool = skimage.morphology.binary_closing(main_cleaned_mask_bool, selem_closing)
-        else:
-            main_closed_mask_bool = main_cleaned_mask_bool
-            
-        main_filled_mask_bool = ndi.binary_fill_holes(main_closed_mask_bool)
-
-        labeled_main_mask, num_labels = skimage.measure.label(main_filled_mask_bool, return_num=True, connectivity=2)
-        features['num_components'] = int(num_labels)
-
-        if num_labels == 0:
-            logger.debug(f"No components found in main body mask for {os.path.basename(image_path)}.")
-            return features, None, None 
-        
-        # Intensity image for regionprops should be the one used for segmentation (potentially inverted)
-        main_props_all = skimage.measure.regionprops(labeled_main_mask, intensity_image=image_gray_for_processing, cache=False)
-        main_props_all = sorted(main_props_all, key=lambda x: x.area, reverse=True)
-        main_props_obj = main_props_all[0] 
-
         features['main_area'] = float(main_props_obj.area)
         minor_axis_len = main_props_obj.minor_axis_length if hasattr(main_props_obj, 'minor_axis_length') else 0.0
         major_axis_len = main_props_obj.major_axis_length if hasattr(main_props_obj, 'major_axis_length') else 0.0
@@ -154,9 +98,11 @@ def extract_ml_features(
         
         features['solidity'] = getattr(main_props_obj, 'solidity', 0.0)
         features['extent'] = getattr(main_props_obj, 'extent', 0.0)
-        features['mean_intensity'] = getattr(main_props_obj, 'mean_intensity', 0.0)
+        # mean_intensity is now calculated on the (potentially inverted) pre-enhancement image by segment_main_body
+        features['mean_intensity'] = getattr(main_props_obj, 'mean_intensity', 0.0) 
         main_orientation = getattr(main_props_obj, 'orientation', 0.0) 
 
+        # Posterior area ratio and egg detection logic (largely unchanged, but uses main_props_obj from new seg)
         main_props_obj._axis_vector_pointing_posterior = np.array([np.cos(main_orientation), np.sin(main_orientation)]) 
 
         if main_props_obj.area > 0 and hasattr(main_props_obj, 'coords') and hasattr(main_props_obj, 'centroid'):
@@ -173,24 +119,34 @@ def extract_ml_features(
             else:
                 main_props_obj._axis_vector_pointing_posterior = axis_vector_rc_unit
 
-        if features['main_area'] < params.get('min_significant_area', 300):
+        if features['main_area'] < params.get('min_significant_area', 300): # This threshold is from S3 params
             logger.debug(f"Main object area {features['main_area']} is less than min_significant_area. "
                          f"Skipping egg detection for {os.path.basename(image_path)}.")
             return features, main_props_obj, None
 
-        # Egg detection uses its own blurring based on 'gaussian_sigma' in params
-        # It uses the original image_gray_for_processing, which might have been inverted
-        egg_blurred_image = skimage.filters.gaussian(image_gray_for_processing, sigma=params.get('gaussian_sigma', 1.0))
-        actual_egg_quantile = params.get('egg_threshold_quantile', 0.92) 
+        # Egg detection logic
+        # It needs the image *after* potential inversion but *before* unsharp masking for consistency with main body's intensity context
+        # The segment_main_body function uses image_intensity_for_props for props, which is correct.
+        # For egg thresholding, we need the version of the image that's been inverted (if collimated)
+        # but not unsharp masked, because unsharp masking might alter egg intensities unpredictably.
         
+        image_for_egg_detection_float = img_float_original.copy()
+        source_illumination_type_egg = params.get('source_image_illumination_type', 'darkfield')
+        if source_illumination_type_egg == 'collimated':
+            image_for_egg_detection_float = 1.0 - image_for_egg_detection_float
+
+        # Egg detection blurring (uses 'gaussian_sigma' from S3 params, distinct from unsharp_mask_sigma)
+        egg_gaussian_sigma = params.get('gaussian_sigma', 1.0) # This is the S3 param for egg blurring
+        egg_blurred_image = skimage.filters.gaussian(image_for_egg_detection_float, sigma=egg_gaussian_sigma)
+        
+        actual_egg_quantile = params.get('egg_threshold_quantile', 0.92) 
         non_zero_pixels_in_egg_blurred = egg_blurred_image[egg_blurred_image > 1e-6] 
         if non_zero_pixels_in_egg_blurred.size == 0:
             egg_binary_mask_initial_bool = np.zeros_like(egg_blurred_image, dtype=bool)
         else:
             egg_thresh_val = np.quantile(non_zero_pixels_in_egg_blurred, actual_egg_quantile)
             egg_binary_mask_initial_bool = egg_blurred_image > egg_thresh_val 
-            logger.debug(f"Egg detection: quantile={actual_egg_quantile}, thresh_val={egg_thresh_val:.4f} (applied to blurred, potentially inverted image)")
-
+            logger.debug(f"Egg detection: quantile={actual_egg_quantile}, thresh_val={egg_thresh_val:.4f} (applied to blurred, potentially inverted, pre-unsharped image)")
 
         posterior_pixel_mask_bool = np.zeros(img_gray_input_shape, dtype=bool)
         egg_posterior_fraction = params.get('egg_posterior_pixel_fraction', 0.45)
@@ -201,7 +157,7 @@ def extract_ml_features(
         percentile_to_cut = (1.0 - egg_posterior_fraction) * 100.0 
 
         if main_props_obj and main_props_obj.area > 0 and hasattr(main_props_obj, 'coords'):
-            coords_main_body = main_props_obj.coords
+            coords_main_body = main_props_obj.coords # From new segmentation
             centroid_main_body = np.array(main_props_obj.centroid)
             relative_coords_for_slice = coords_main_body - centroid_main_body
             projections_for_slice = np.dot(relative_coords_for_slice, main_props_obj._axis_vector_pointing_posterior)
@@ -227,7 +183,8 @@ def extract_ml_features(
 
         if egg_num_labels_cand > 0 and main_props_obj is not None:
             # Intensity image for egg regionprops should be the same as for main body props
-            egg_props_candidates = skimage.measure.regionprops(egg_labeled_mask, intensity_image=image_gray_for_processing, cache=False)
+            # (i.e., potentially inverted, but pre-enhancement)
+            egg_props_candidates = skimage.measure.regionprops(egg_labeled_mask, intensity_image=image_for_egg_detection_float, cache=False)
             
             valid_egg_candidates = []
             for p_egg_candidate in egg_props_candidates:
@@ -287,11 +244,17 @@ if __name__ == '__main__':
         source_illum_from_config = system_cfg.get('source_image_illumination_type', 'darkfield')
         global_thresh_cfg = system_cfg.get('thresholding', {})
         
+        # These are the comprehensive params needed by segment_main_body and then by egg logic
         ml_params_for_test = feature_extraction_params_from_s3_cfg.copy()
         ml_params_for_test['source_image_illumination_type'] = source_illum_from_config
         ml_params_for_test['thresholding_mode'] = global_thresh_cfg.get('mode', 'otsu')
         ml_params_for_test['otsu_threshold_multiplier'] = global_thresh_cfg.get('otsu_threshold_multiplier', 0.45)
         ml_params_for_test['fixed_threshold_value'] = global_thresh_cfg.get('fixed_threshold_value', 70)
+        # Add unsharp masking params (assuming they might be in s3_feature_extraction_params or we add defaults)
+        ml_params_for_test.setdefault('enable_unsharp_masking', False) # Default to False for test if not in config
+        ml_params_for_test.setdefault('unsharp_mask_sigma', 1.0)
+        ml_params_for_test.setdefault('unsharp_mask_amount', 1.0)
+
 
         if not feature_extraction_params_from_s3_cfg or 'egg_posterior_pixel_fraction' not in feature_extraction_params_from_s3_cfg: 
             print("ML feature extraction parameters not found/complete in config. Using hardcoded defaults for test.")
@@ -300,7 +263,10 @@ if __name__ == '__main__':
                 'thresholding_mode': 'otsu', 
                 'otsu_threshold_multiplier': 0.5, 
                 'fixed_threshold_value': 70, 
-                'gaussian_sigma': 1.0, # Still used for egg detection blurring
+                'enable_unsharp_masking': False,
+                'unsharp_mask_sigma': 1.0,
+                'unsharp_mask_amount': 1.0,
+                'gaussian_sigma': 1.0, # Used for egg detection blurring
                 'closing_selem_size': 3, 'min_noise_size': 50, 
                 'min_significant_area': 100, 'egg_posterior_pixel_fraction': 0.45, 
                 'egg_threshold_quantile': 0.90, 'egg_min_area': 50, 'egg_max_area': 5000,
@@ -314,7 +280,10 @@ if __name__ == '__main__':
             'thresholding_mode': 'otsu', 
             'otsu_threshold_multiplier': 0.5, 
             'fixed_threshold_value': 70,
-            'gaussian_sigma': 1.0, # Still used for egg detection blurring
+            'enable_unsharp_masking': False,
+            'unsharp_mask_sigma': 1.0,
+            'unsharp_mask_amount': 1.0,
+            'gaussian_sigma': 1.0, # Used for egg detection blurring
             'closing_selem_size': 3, 'min_noise_size': 50, 'min_significant_area': 100, 
             'egg_posterior_pixel_fraction': 0.45, 'egg_threshold_quantile': 0.90, 'egg_min_area': 50, 
             'egg_max_area': 5000, 'egg_min_solidity': 0.60, 'egg_max_solidity': 0.99, 
@@ -334,23 +303,42 @@ if __name__ == '__main__':
     test_image_v[rr_egg_v, cc_egg_v] = 220 
 
     test_image_v_float = skimage.util.img_as_float(test_image_v) 
-    temp_img_filename = "temp_ml_feature_test_no_blur_main_body.png"
+    temp_img_filename = "temp_ml_feature_test_unified_seg.png" # New name
     skimage.io.imsave(temp_img_filename, skimage.util.img_as_ubyte(test_image_v_float))
     
-    logger.info(f"\n--- Testing ML feature extraction (main body NO BLUR, egg detection blurs) ---")
+    logger.info(f"\n--- Testing ML feature extraction (Unified Segmentation) ---")
     logger.info(f"Runtime params for extract_ml_features: {ml_params_for_test}")
     
-    features_test, _, _ = extract_ml_features(
+    # Test with unsharp masking disabled
+    ml_params_for_test['enable_unsharp_masking'] = False
+    logger.info("Testing with Unsharp Masking DISABLED:")
+    features_test_no_unsharp, main_props_no_unsharp, _ = extract_ml_features(
         temp_img_filename, ml_params_for_test, image_array_gray=test_image_v_float 
     )
-    if features_test:
-        print(f"Source Illum: {ml_params_for_test['source_image_illumination_type']}, "
-              f"Thresh Mode: {ml_params_for_test['thresholding_mode']} - "
-              f"Main Area: {features_test.get('main_area')}, Egg Area: {features_test.get('total_egg_area')}")
-        assert features_test.get('total_egg_area', 0) > 0, f"Expected egg detection for {ml_params_for_test['source_image_illumination_type']} source."
+    if features_test_no_unsharp:
+        print(f"  Main Area: {features_test_no_unsharp.get('main_area')}, Egg Area: {features_test_no_unsharp.get('total_egg_area')}, Num Comp: {features_test_no_unsharp.get('num_components')}")
+        assert features_test_no_unsharp.get('total_egg_area', 0) > 0, "Expected egg detection (no unsharp)."
+        if main_props_no_unsharp:
+            print(f"  Main props object eccentricity: {main_props_no_unsharp.eccentricity if hasattr(main_props_no_unsharp, 'eccentricity') else 'N/A'}")
     else:
-        print(f"Source Illum: {ml_params_for_test['source_image_illumination_type']}, "
-              f"Thresh Mode: {ml_params_for_test['thresholding_mode']} - Feature extraction failed.")
+        print(f"  Feature extraction failed (no unsharp).")
+
+    # Test with unsharp masking enabled
+    ml_params_for_test['enable_unsharp_masking'] = True
+    ml_params_for_test['unsharp_mask_sigma'] = 0.5 # A mild sigma
+    ml_params_for_test['unsharp_mask_amount'] = 1.2
+    logger.info(f"Testing with Unsharp Masking ENABLED (sigma={ml_params_for_test['unsharp_mask_sigma']}, amount={ml_params_for_test['unsharp_mask_amount']}):")
+    features_test_unsharp, main_props_unsharp, _ = extract_ml_features(
+        temp_img_filename, ml_params_for_test, image_array_gray=test_image_v_float
+    )
+    if features_test_unsharp:
+        print(f"  Main Area: {features_test_unsharp.get('main_area')}, Egg Area: {features_test_unsharp.get('total_egg_area')}, Num Comp: {features_test_unsharp.get('num_components')}")
+        # Note: area might change with unsharp masking
+        if main_props_unsharp:
+             print(f"  Main props object eccentricity: {main_props_unsharp.eccentricity if hasattr(main_props_unsharp, 'eccentricity') else 'N/A'}")
+
+    else:
+        print(f"  Feature extraction failed (unsharp enabled).")
 
 
     if os.path.exists(temp_img_filename):

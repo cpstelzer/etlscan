@@ -2,121 +2,66 @@
 import cv2
 import numpy as np
 import skimage.measure
-import skimage.morphology
+import skimage.morphology # Still needed for regionprops related mask operations if any
 import skimage.filters 
 import skimage.util 
-from scipy import ndimage as ndi 
+from scipy import ndimage as ndi # Should be removed if fill_holes not directly used
 import logging
 from typing import Dict, Any, Optional, Tuple
 from skimage.measure._regionprops import RegionProperties
 
-from src.utils.common_exceptions import ConfigError 
+from src.utils.common_exceptions import ConfigError
+from src.core.segmentation import segment_main_body_from_image_float # MODIFIED: Import new function
 
 logger = logging.getLogger(__name__)
 
 def reconstruct_main_body_masks(
     image_gray_original_float: np.ndarray, # Expected to be float [0,1], UNPROCESSED (not yet inverted)
-    s3_feature_extraction_params: Dict[str, Any] # This will now contain source_image_illumination_type and global thresholding params
+    s3_feature_extraction_params: Dict[str, Any] # This will now contain ALL params for segment_main_body_from_image_float
 ) -> Tuple[Optional[np.ndarray], Optional[np.ndarray], Optional[RegionProperties]]:
     """
-    Reconstructs the raw (unfilled) and filled main body masks using Stage 3 parameters
-    (which now include global illumination and thresholding settings).
-    Handles illumination mode for consistent processing.
+    Reconstructs the raw (unfilled) and filled main body masks using the shared segmentation function.
+    The s3_feature_extraction_params must contain all necessary parameters for
+    segment_main_body_from_image_float (illumination, thresholding, unsharp masking, etc.).
     """
     try:
-        if not np.issubdtype(image_gray_original_float.dtype, np.floating):
-            logger.warning("reconstruct_main_body_masks received non-float image. Converting.")
-            image_gray_proc = skimage.util.img_as_float(image_gray_original_float) 
-        else:
-            image_gray_proc = image_gray_original_float.copy()
-
-        # Get global source illumination type from S3 params (passed by Stage 4)
-        source_illumination_type = s3_feature_extraction_params.get('source_image_illumination_type', 'darkfield')
-        if source_illumination_type not in ['darkfield', 'collimated']:
-            logger.warning(f"Invalid source_image_illumination_type '{source_illumination_type}' in s3_feature_extraction_params. Defaulting to 'darkfield'.")
-            source_illumination_type = 'darkfield'
+        # The s3_feature_extraction_params are directly passed as segmentation_params
+        # to the new shared function. It handles float conversion, inversion,
+        # unsharp masking, thresholding, and post-processing.
         
-        if source_illumination_type == 'collimated':
-            logger.debug(f"MaskRecon: Source Illumination '{source_illumination_type}'. Inverting image.")
-            image_gray_proc = 1.0 - image_gray_proc 
+        logger.debug(f"DetailedMorpho: Calling shared segment_main_body with params: {s3_feature_extraction_params}")
 
-        image_gray_for_props = image_gray_proc # Use the (potentially inverted) image for regionprops
+        raw_body_mask_uint8, filled_body_mask_uint8, main_props_object = \
+            segment_main_body_from_image_float(
+                image_gray_original_float,
+                s3_feature_extraction_params # Pass the comprehensive S3 params
+            )
 
-        blurred_image = skimage.filters.gaussian(
-            image_gray_proc, sigma=s3_feature_extraction_params.get('gaussian_sigma', 1.0)
-        )
+        if raw_body_mask_uint8 is None or filled_body_mask_uint8 is None:
+            logger.warning("DetailedMorpho: Shared segmentation function returned None for masks.")
+            # main_props_object might also be None here
+            return None, None, main_props_object # Return what we got
 
-        if blurred_image.min() == blurred_image.max():
-            logger.warning("Image became blank after blurring during mask reconstruction.")
-            return None, None, None
+        if main_props_object is None:
+            logger.warning("DetailedMorpho: Shared segmentation found no main properties object, though masks might exist.")
+            # This can happen if the largest object is too small as per min_significant_area,
+            # or if no objects were found at all.
 
-        # Use thresholding parameters from s3_feature_extraction_params
-        thresholding_mode = s3_feature_extraction_params.get('thresholding_mode', 'otsu')
-        final_threshold_value_float: Optional[float] = None 
+        return raw_body_mask_uint8, filled_body_mask_uint8, main_props_object
 
-        if thresholding_mode == 'otsu':
-            if blurred_image.min() == blurred_image.max():
-                logger.warning("Image is uniform after blurring. Otsu thresholding cannot be applied robustly in mask reconstruction.")
-                return None, None, None
-            try:
-                otsu_thresh_val_raw = skimage.filters.threshold_otsu(blurred_image)
-            except ValueError:
-                logger.warning("Otsu threshold failed during mask reconstruction.")
-                return None, None, None
-            otsu_multiplier = s3_feature_extraction_params.get('otsu_threshold_multiplier', 0.45) # Default from centralized config idea
-            final_threshold_value_float = otsu_thresh_val_raw * otsu_multiplier
-        elif thresholding_mode == 'fixed':
-            fixed_thresh_val_config_int = s3_feature_extraction_params.get('fixed_threshold_value')
-            if fixed_thresh_val_config_int is None:
-                raise ConfigError("thresholding_mode is 'fixed' but 'fixed_threshold_value' is missing from s3_feature_extraction_params.")
-            try:
-                fixed_thresh_int = int(fixed_thresh_val_config_int)
-            except ValueError:
-                raise ConfigError(f"'fixed_threshold_value' ({fixed_thresh_val_config_int}) from s3_feature_extraction_params is not a valid int.")
-            final_threshold_value_float = fixed_thresh_int / 255.0
-        else:
-            raise ConfigError(f"Invalid thresholding_mode: '{thresholding_mode}' in s3_feature_extraction_params.")
-
-        if final_threshold_value_float is None:
-             logger.error("MaskRecon: Final threshold value (float) not set.")
-             return None, None, None
-
-        main_binary_mask_initial = blurred_image > final_threshold_value_float
-        main_cleaned_mask = skimage.morphology.remove_small_objects(
-            main_binary_mask_initial, min_size=s3_feature_extraction_params.get('min_noise_size', 50)
-        )
-        selem_closing_size = s3_feature_extraction_params.get('closing_selem_size', 3)
-        if selem_closing_size > 0:
-            selem_closing = skimage.morphology.disk(selem_closing_size)
-            raw_body_mask_for_props = skimage.morphology.binary_closing(main_cleaned_mask, selem_closing)
-        else:
-            raw_body_mask_for_props = main_cleaned_mask
-        filled_body_mask = ndi.binary_fill_holes(raw_body_mask_for_props)
-        labeled_filled_mask = skimage.measure.label(filled_body_mask, connectivity=2)
-        
-        props_filled_all = skimage.measure.regionprops(labeled_filled_mask, intensity_image=image_gray_for_props, cache=False)
-
-        if not props_filled_all:
-            logger.warning("No regions found in the reconstructed filled body mask.")
-            return raw_body_mask_for_props.astype(np.uint8) * 255, \
-                   filled_body_mask.astype(np.uint8) * 255, \
-                   None
-        main_props_filled = sorted(props_filled_all, key=lambda x: x.area, reverse=True)[0]
-        return raw_body_mask_for_props.astype(np.uint8) * 255, \
-               filled_body_mask.astype(np.uint8) * 255, \
-               main_props_filled
     except ConfigError as ce:
-        logger.error(f"Configuration error during mask reconstruction: {ce}")
+        logger.error(f"Configuration error during mask reconstruction via shared function: {ce}")
         raise
     except Exception as e:
-        logger.exception(f"Error reconstructing main body masks: {e}")
+        logger.exception(f"Error reconstructing main body masks via shared function: {e}")
         return None, None, None
 
 
 def calculate_detailed_body_morphology(
-    raw_body_mask: Optional[np.ndarray],      
-    filled_body_mask: Optional[np.ndarray],   
+    raw_body_mask: Optional[np.ndarray],      # uint8 mask
+    filled_body_mask: Optional[np.ndarray],   # uint8 mask
     intensity_image_for_props: Optional[np.ndarray] = None # float [0,1], ALREADY INVERTED by caller if source was collimated
+                                                          # AND PRE-ENHANCEMENT if props need original intensities
 ) -> Dict[str, Any]:
     features: Dict[str, Any] = {}
     keys_to_init = [
@@ -135,78 +80,117 @@ def calculate_detailed_body_morphology(
         logger.warning("Raw or filled body mask is None. Cannot calculate detailed morphology.")
         return features
 
-    raw_body_mask_bool = raw_body_mask > 0
+    # Ensure masks are boolean for skimage.measure.regionprops if they are not already
+    # The masks from segment_main_body_from_image_float are uint8, so convert.
+    raw_body_mask_bool = raw_body_mask > 0 
+    
+    # Note: The intensity_image_for_props passed here should be the one
+    # that segment_main_body_from_image_float used for its props calculation
+    # (i.e., potentially inverted, but *before* unsharp masking if unsharp masking was applied).
+    # This ensures consistency if any intensity-based props are re-calculated or are crucial.
+    # The RegionProperties object returned by segment_main_body already has props calculated
+    # with the correct intensity image. This function primarily re-calculates or derives
+    # additional morphology metrics from the *masks*.
     
     props_raw_list = skimage.measure.regionprops(
-        skimage.measure.label(raw_body_mask_bool),
-        intensity_image=intensity_image_for_props, 
+        skimage.measure.label(raw_body_mask_bool), # Label the raw mask to get its specific props
+        intensity_image=intensity_image_for_props, # This image should be inverted if collimated, pre-unsharp
         cache=False
     )
+
     if props_raw_list:
-        props_raw = props_raw_list[0] 
+        # Assuming the raw_body_mask_bool (after being filtered by main object in segment_main_body)
+        # should predominantly contain the main object of interest.
+        # If multiple regions still exist in raw_mask, take the largest.
+        props_raw = sorted(props_raw_list, key=lambda p: p.area, reverse=True)[0]
+        
         features['main_area_raw_s4'] = float(props_raw.area)
         features['solidity_s4'] = float(props_raw.solidity) if hasattr(props_raw, 'solidity') else np.nan
+        
+        # Use area_oriented_bbox if available, else area_bbox for compactness_rect_s4
         if hasattr(props_raw, 'area_oriented_bbox'):
              oriented_bbox_area = props_raw.area_oriented_bbox
-        elif hasattr(props_raw, 'area_bbox'): 
+        elif hasattr(props_raw, 'bbox_area'): # skimage < 0.19 uses bbox_area
+            oriented_bbox_area = props_raw.bbox_area
+        elif hasattr(props_raw, 'area_bbox'): # skimage >= 0.19 might use area_bbox
             oriented_bbox_area = props_raw.area_bbox
-        else:
-            oriented_bbox_area = 0.0
+        else: # Fallback if specific bbox area attributes are missing
+            minr, minc, maxr, maxc = props_raw.bbox
+            oriented_bbox_area = (maxr - minr) * (maxc - minc)
+
         if oriented_bbox_area > 1e-6:
             features['compactness_rect_s4'] = float(props_raw.area / oriented_bbox_area)
         else:
             features['compactness_rect_s4'] = np.nan
+            
         features['extent_raw_s4'] = float(props_raw.extent) if hasattr(props_raw, 'extent') else np.nan
-        features['compactness_factor_ni_s4'] = features['extent_raw_s4'] 
+        features['compactness_factor_ni_s4'] = features['extent_raw_s4'] # Alias for consistency if needed
+        
         features['eccentricity_raw_s4'] = float(props_raw.eccentricity) if hasattr(props_raw, 'eccentricity') else np.nan
-        features['equivalent_diameter_raw_s4'] = float(props_raw.equivalent_diameter) if hasattr(props_raw, 'equivalent_diameter') else np.nan
+        features['equivalent_diameter_raw_s4'] = float(props_raw.equivalent_diameter_approx) if hasattr(props_raw, 'equivalent_diameter_approx') else (float(props_raw.equivalent_diameter) if hasattr(props_raw, 'equivalent_diameter') else np.nan)
         features['major_axis_length_raw_s4'] = float(props_raw.major_axis_length) if hasattr(props_raw, 'major_axis_length') else np.nan
         features['minor_axis_length_raw_s4'] = float(props_raw.minor_axis_length) if hasattr(props_raw, 'minor_axis_length') else np.nan
+        
         if hasattr(props_raw, 'moments_central'):
-            Ixx = float(props_raw.moments_central[2,0]) 
-            Iyy = float(props_raw.moments_central[0,2]) 
-            Ixy = float(props_raw.moments_central[1,1])
+            # Ensure moments are finite, some can be very small leading to issues
+            mc = props_raw.moments_central
+            Ixx = float(mc[2,0]) if np.isfinite(mc[2,0]) else 0.0
+            Iyy = float(mc[0,2]) if np.isfinite(mc[0,2]) else 0.0
+            Ixy = float(mc[1,1]) if np.isfinite(mc[1,1]) else 0.0
+            
             features['moment_of_inertia_xx_s4'] = Ixx
             features['moment_of_inertia_yy_s4'] = Iyy
-            features['moment_of_inertia_xy_s4'] = Ixy
+            features['moment_of_inertia_xy_s4'] = Ixy # Note: this is mu_11, not Ixy for rotation
+
             if Ixx > 1e-9 and Iyy > 1e-9 : 
                 denominator_tf = 4 * np.pi * np.sqrt(Ixx * Iyy)
                 if denominator_tf > 1e-9:
                     features['type_factor_s4'] = (props_raw.area**2) / denominator_tf
                 else: features['type_factor_s4'] = np.nan
             else: features['type_factor_s4'] = np.nan
+        
         if hasattr(props_raw, 'perimeter') and props_raw.perimeter > 1e-9 and props_raw.area > 1e-9:
+            # perimeter_crofton is often more robust if available
+            perimeter_val = props_raw.perimeter_crofton if hasattr(props_raw, 'perimeter_crofton') else props_raw.perimeter
             denominator_hcf = 2 * np.sqrt(np.pi * props_raw.area)
             if denominator_hcf > 1e-9:
-                features['heywood_circularity_factor_s4'] = props_raw.perimeter / denominator_hcf
+                features['heywood_circularity_factor_s4'] = perimeter_val / denominator_hcf
             else: features['heywood_circularity_factor_s4'] = np.nan
         else: features['heywood_circularity_factor_s4'] = np.nan
-        if hasattr(props_raw, 'feret_diameter_max') and \
-           hasattr(props_raw, 'minor_axis_length') and props_raw.minor_axis_length > 1e-9:
-            features['elongation_factor_s4'] = props_raw.feret_diameter_max / props_raw.minor_axis_length
+        
+        # Elongation factor: Feret diameter / min_axis_length or equivalent
+        # Using major_axis_length / minor_axis_length if feret_diameter_max is not directly available or problematic
+        if features['minor_axis_length_raw_s4'] > 1e-9 and features['major_axis_length_raw_s4'] > 1e-9 :
+            features['elongation_factor_s4'] = features['major_axis_length_raw_s4'] / features['minor_axis_length_raw_s4']
+        elif hasattr(props_raw, 'feret_diameter_max') and features['minor_axis_length_raw_s4'] > 1e-9:
+             features['elongation_factor_s4'] = props_raw.feret_diameter_max / features['minor_axis_length_raw_s4']
         else: features['elongation_factor_s4'] = np.nan
     else:
-        logger.warning("No regionprops found for raw_body_mask.")
+        logger.warning("No regionprops found for raw_body_mask in detailed morphology calculation.")
 
-    moments_raw_cv = cv2.moments(raw_body_mask.astype(np.uint8)) 
+    # Hu moments from raw mask (as before)
+    moments_raw_cv = cv2.moments(raw_body_mask.astype(np.uint8)) # raw_body_mask is already uint8
     hu_moments_cv = cv2.HuMoments(moments_raw_cv).flatten()
     if len(hu_moments_cv) >= 1:
         val_hu1 = float(hu_moments_cv[0])
         features['hu_moment1_s4'] = val_hu1 if np.isfinite(val_hu1) else np.nan
     else: features['hu_moment1_s4'] = np.nan
 
-    filled_area = np.sum(filled_body_mask > 0)
+    # Filled area and Porosity (as before)
+    filled_area = np.sum(filled_body_mask > 0) # filled_body_mask is uint8
     features['main_area_filled_s4'] = float(filled_area)
+    
     raw_area_val_for_porosity = features.get('main_area_raw_s4')
     if isinstance(raw_area_val_for_porosity, (int, float)) and \
        np.isfinite(raw_area_val_for_porosity) and filled_area > 1e-6:
          features['porosity_s4'] = 1.0 - (raw_area_val_for_porosity / filled_area)
     else: features['porosity_s4'] = np.nan
 
+    # Final type cleanup
     for key, value in features.items():
         if isinstance(value, (np.float32, np.float64)): features[key] = float(value)
         elif isinstance(value, (np.int32, np.int64)): features[key] = int(value)
-        elif isinstance(value, float) and not np.isfinite(value): features[key] = None 
+        elif isinstance(value, float) and not np.isfinite(value): features[key] = None # Use None for JSON/CSV friendliness
     return features
 
 
@@ -214,48 +198,59 @@ if __name__ == '__main__':
     logging.basicConfig(level=logging.DEBUG)
     test_img_gray_uint8 = np.zeros((200, 200), dtype=np.uint8)
     cv2.ellipse(test_img_gray_uint8, (100,100), (80,40), angle=30, startAngle=0, endAngle=360, color=150, thickness=-1)
-    cv2.ellipse(test_img_gray_uint8, (90,90), (15,10), angle=30, startAngle=0, endAngle=360, color=0, thickness=-1)
+    cv2.ellipse(test_img_gray_uint8, (90,90), (15,10), angle=30, startAngle=0, endAngle=360, color=0, thickness=-1) # A hole
     test_img_gray_float_orig = skimage.util.img_as_float(test_img_gray_uint8) 
 
     # Test with source_image_illumination_type = 'darkfield'
-    # And using centralized thresholding params
+    # These params will be passed to segment_main_body_from_image_float
     dummy_s3_params_darkfield = {
-        'source_image_illumination_type': 'darkfield', # Explicitly set for test
-        'thresholding_mode': 'otsu', # From centralized config
-        'otsu_threshold_multiplier': 0.4, # From centralized config
-        'fixed_threshold_value': 70, # From centralized config (though not used if mode is otsu)
-        'gaussian_sigma': 1.0,
+        'source_image_illumination_type': 'darkfield',
+        'thresholding_mode': 'otsu', 
+        'otsu_threshold_multiplier': 0.4, 
+        'fixed_threshold_value': 70, 
+        'enable_unsharp_masking': False, # Test without unsharp
+        'unsharp_mask_sigma': 1.0,
+        'unsharp_mask_amount': 1.0,
         'min_noise_size': 10,
-        'closing_selem_size': 0
-        # Other S3 feature params for egg detection, etc., are not relevant for mask reconstruction test itself
+        'closing_selem_size': 0 
     }
-    print("\n--- Testing Mask Reconstruction (Otsu, Darkfield Source, Centralized Thresh) ---")
-    raw_mask_df, filled_mask_df, _ = reconstruct_main_body_masks(test_img_gray_float_orig.copy(), dummy_s3_params_darkfield)
-    if raw_mask_df is not None:
+    print("\n--- Testing Mask Reconstruction (Darkfield Source, No Unsharp, via Shared Seg) ---")
+    raw_mask_df, filled_mask_df, props_df_recalc = reconstruct_main_body_masks(test_img_gray_float_orig.copy(), dummy_s3_params_darkfield)
+    
+    if raw_mask_df is not None and filled_mask_df is not None:
         print(f"Darkfield source - Reconstructed Raw mask area: {np.sum(raw_mask_df > 0)}")
+        # For detailed morphology, intensity image should be what props were based on in segment_main_body
+        # which is image_gray_float_orig (since darkfield, no inversion) and pre-unsharp.
         detailed_features_df = calculate_detailed_body_morphology(raw_mask_df, filled_mask_df, test_img_gray_float_orig)
         print("Darkfield source - Detailed Body Morphology Features:")
         for k, v in detailed_features_df.items(): print(f"  {k}: {v}")
+        if props_df_recalc: print(f"  Area from main_props_object (S4 recalc): {props_df_recalc.area}")
     else:
         print("Darkfield source - Mask reconstruction failed.")
 
-    # Test with source_image_illumination_type = 'collimated'
-    dummy_s3_params_collimated = {
-        'source_image_illumination_type': 'collimated', # Explicitly set for test
-        'thresholding_mode': 'otsu', # From centralized config
-        'otsu_threshold_multiplier': 0.4, # From centralized config
-        'fixed_threshold_value': 70, # From centralized config
-        'gaussian_sigma': 1.0, 
+    # Test with source_image_illumination_type = 'collimated' and unsharp masking
+    dummy_s3_params_collimated_unsharp = {
+        'source_image_illumination_type': 'collimated', 
+        'thresholding_mode': 'otsu', 
+        'otsu_threshold_multiplier': 0.4, 
+        'fixed_threshold_value': 70,
+        'enable_unsharp_masking': True, 
+        'unsharp_mask_sigma': 0.5,
+        'unsharp_mask_amount': 1.2,
         'min_noise_size': 10,
         'closing_selem_size': 0
     }
-    print("\n--- Testing Mask Reconstruction (Otsu, Collimated Source, Centralized Thresh) ---")
-    raw_mask_coll, filled_mask_coll, _ = reconstruct_main_body_masks(test_img_gray_float_orig.copy(), dummy_s3_params_collimated)
-    if raw_mask_coll is not None:
-        print(f"Collimated source - Reconstructed Raw mask area: {np.sum(raw_mask_coll > 0)}")
-        test_img_gray_float_inverted = 1.0 - test_img_gray_float_orig
-        detailed_features_coll = calculate_detailed_body_morphology(raw_mask_coll, filled_mask_coll, test_img_gray_float_inverted)
-        print("Collimated source - Detailed Body Morphology Features:")
-        for k, v in detailed_features_coll.items(): print(f"  {k}: {v}")
+    print("\n--- Testing Mask Reconstruction (Collimated Source, Unsharp Enabled, via Shared Seg) ---")
+    raw_mask_coll_us, filled_mask_coll_us, props_coll_us_recalc = reconstruct_main_body_masks(test_img_gray_float_orig.copy(), dummy_s3_params_collimated_unsharp)
+    
+    if raw_mask_coll_us is not None and filled_mask_coll_us is not None:
+        print(f"Collimated source (unsharp) - Reconstructed Raw mask area: {np.sum(raw_mask_coll_us > 0)}")
+        # Intensity image for detailed_morphology_calculator: original image inverted, but PRE-unsharp
+        test_img_gray_float_inverted_pre_unsharp = 1.0 - test_img_gray_float_orig 
+        detailed_features_coll_us = calculate_detailed_body_morphology(raw_mask_coll_us, filled_mask_coll_us, test_img_gray_float_inverted_pre_unsharp)
+        print("Collimated source (unsharp) - Detailed Body Morphology Features:")
+        for k, v in detailed_features_coll_us.items(): print(f"  {k}: {v}")
+        if props_coll_us_recalc: print(f"  Area from main_props_object (S4 recalc, unsharp): {props_coll_us_recalc.area}")
+
     else:
-        print("Collimated source - Mask reconstruction failed.")
+        print("Collimated source (unsharp) - Mask reconstruction failed.")
