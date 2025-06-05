@@ -22,7 +22,7 @@ system:
   # Global Thresholding Settings for main object segmentation
   thresholding:
     mode: "otsu"  # "otsu" or "fixed"
-    otsu_threshold_multiplier: 0.45 # Multiplier for Otsu threshold value
+    otsu_threshold_multiplier: 1 # Multiplier for Otsu threshold value
     fixed_threshold_value: 70  # Fixed threshold value if mode is "fixed" (0-255)
   
 # Stage 1: Initial Detection (derived from ws_background_subtraction & wellcounter_imaging_module)
@@ -43,7 +43,7 @@ stage_01_initial_detection:
       - [0, -1, 10, -1,  0]
       - [0, -1, -1, -1,  0]
       - [0,  0,  0,  0,  0]
-    microorganism_threshold: 25 # For subtracted image (REMAINS STAGE-SPECIFIC)
+    # microorganism_threshold: 25 # OBSOLETE for thresholding; S1 subtracted path now uses system.thresholding
     min_microorganism_area: 500 # For subtracted image
     microorganism_blur_kernel: 5 # For subtracted image, must be odd, 0 to disable
     filter_by_shape: False # If True, uses hardcoded quantiles from original wim
@@ -52,8 +52,9 @@ stage_01_initial_detection:
     # thresholding_mode: "otsu"  # << REMOVED - Uses system.thresholding.mode
     # fixed_threshold_value: 70  # << REMOVED - Uses system.thresholding.fixed_threshold_value
     # Otsu multiplier will come from system.thresholding.otsu_threshold_multiplier
-    blur_kernel_size: 3        # Blur kernel size (e.g., 3, 5, 0 to disable). Must be odd if > 0.
-    min_particle_area: 1000     # Min area for particles in unsubtracted FG image
+    blur_kernel_size: 3        # Blur kernel size (e.g., 3, 5, 0 to disable). Must be odd if > 0. Currently not used for local ROI segmentation.
+    min_particle_area: 1000     # Min area for particles in unsubtracted FG image (applied locally in ROIs)
+    local_otsu_roi_size: 150   # Size of the square ROI for local Otsu on unsubtracted image
   # Parameters for compare_detected_particles (used to match subtracted and unsubtracted particles)
   particle_comparison:
     search_radius_factor: 2.0
