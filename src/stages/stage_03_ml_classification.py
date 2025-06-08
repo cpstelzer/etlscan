@@ -18,6 +18,7 @@ from src.utils import (
     get_config, load_dataframe_from_csv, save_dataframe_to_csv,
     get_models_dir, get_training_data_dir
 )
+from src.utils.config_loader import get_unified_segmentation_params 
 from src.utils.common_exceptions import ProcessingError, ConfigError, DataValidationError, MLModelError
 from src.core.ml_feature_extractor import extract_ml_features, DEFAULT_FEATURE_NAMES
 from src.visualization.feature_visualization import visualize_ml_features
@@ -34,7 +35,7 @@ _learned_feature_names_during_training: Optional[List[str]] = None
 def _load_and_extract_features_for_training(
     image_directory: str,
     label: int,
-    ml_processing_params: Dict[str, Any], # Contains S3 feature params + global illum + global thresh
+    ml_processing_params: Dict[str, Any], 
     image_extensions: List[str]
 ) -> Tuple[List[List[Any]], List[int], Optional[List[str]]]:
     global _learned_feature_names_during_training
@@ -59,7 +60,6 @@ def _load_and_extract_features_for_training(
     for i, filename in enumerate(filenames):
         count_processed += 1
         image_path = os.path.join(image_directory, filename)
-        # Pass ml_processing_params which now include source_image_illumination_type and thresholding settings
         features_dict, _, _ = extract_ml_features(image_path, ml_processing_params)
 
         if features_dict:
@@ -84,8 +84,8 @@ def _load_and_extract_features_for_training(
 
 
 def train_ml_model(
-    config_s3: Dict[str, Any],
-    global_system_config: Dict[str, Any], # Contains global illum and global thresh
+    config_s3: Dict[str, Any], 
+    global_system_config: Dict[str, Any], 
     force_retrain: bool = False
     ) -> Tuple[Optional[RandomForestClassifier], Optional[StandardScaler], Optional[List[str]]]:
     global _learned_feature_names_during_training
@@ -94,17 +94,9 @@ def train_ml_model(
     logger.info("--- Initiating ML Model Training ---")
     
     training_params_cfg = config_s3.get('training_params', {})
-    # Base S3 feature extraction params (without illumination/thresholding)
-    s3_feature_extraction_params_base = config_s3.get('feature_extraction_params', {})
     
-    # Prepare the full parameter set for feature extraction during training
-    ml_params_for_training = s3_feature_extraction_params_base.copy()
-    ml_params_for_training['source_image_illumination_type'] = global_system_config.get('source_image_illumination_type', 'darkfield')
-    
-    global_thresh_cfg = global_system_config.get('thresholding', {})
-    ml_params_for_training['thresholding_mode'] = global_thresh_cfg.get('mode', 'otsu')
-    ml_params_for_training['otsu_threshold_multiplier'] = global_thresh_cfg.get('otsu_threshold_multiplier', 0.45)
-    ml_params_for_training['fixed_threshold_value'] = global_thresh_cfg.get('fixed_threshold_value', 70)
+    main_config_for_helper = get_config() 
+    ml_params_for_training = get_unified_segmentation_params(main_config_for_helper)
     
     image_exts = config_s3.get('image_extensions', ['.png', '.jpg'])
     
@@ -129,11 +121,11 @@ def train_ml_model(
         except Exception as e:
             logger.error(f"Error loading existing model/scaler/feature_names: {e}. Proceeding to retrain.")
 
-
     base_training_data_dir = get_training_data_dir()
     good_dir = os.path.join(base_training_data_dir, training_params_cfg.get('good_data_subdir', 'good'))
     bad_dir = os.path.join(base_training_data_dir, training_params_cfg.get('bad_data_subdir', 'bad'))
 
+    logger.debug(f"Training parameters for feature extraction (unified): {ml_params_for_training}")
     features_good, labels_good, learned_names_good = _load_and_extract_features_for_training(
         good_dir, 1, ml_params_for_training, image_exts
     )
@@ -214,7 +206,7 @@ def _predict_ml_candidates(
     scaler: StandardScaler,
     feature_names_for_prediction: List[str],
     config_s3: Dict[str, Any], 
-    global_system_config: Dict[str, Any], # Contains global illum and global thresh
+    global_system_config: Dict[str, Any], 
     current_sample_id: str 
 ) -> pd.DataFrame:
     logger.info(f"--- Predicting ML Candidates for Sample: {current_sample_id} ---")
@@ -223,19 +215,10 @@ def _predict_ml_candidates(
         logger.error(f"Input directory for prediction '{input_sharp_objects_dir}' not found.")
         return pd.DataFrame()
 
-    # Base S3 feature extraction params (without illumination/thresholding)
-    s3_feature_extraction_params_base = config_s3.get('feature_extraction_params', {})
+    main_config_for_helper = get_config() 
+    ml_params_for_prediction = get_unified_segmentation_params(main_config_for_helper)
     
-    # Prepare the full parameter set for feature extraction during prediction
-    ml_params_for_prediction = s3_feature_extraction_params_base.copy()
-    ml_params_for_prediction['source_image_illumination_type'] = global_system_config.get('source_image_illumination_type', 'darkfield')
-    
-    global_thresh_cfg = global_system_config.get('thresholding', {})
-    ml_params_for_prediction['thresholding_mode'] = global_thresh_cfg.get('mode', 'otsu')
-    ml_params_for_prediction['otsu_threshold_multiplier'] = global_thresh_cfg.get('otsu_threshold_multiplier', 0.45)
-    ml_params_for_prediction['fixed_threshold_value'] = global_thresh_cfg.get('fixed_threshold_value', 70)
-    
-    logger.debug(f"Using ML params for prediction in Stage 3 for sample {current_sample_id}: {ml_params_for_prediction}")
+    logger.debug(f"Using ML params for prediction in Stage 3 (unified) for sample {current_sample_id}: {ml_params_for_prediction}")
 
     image_exts = config_s3.get('image_extensions', ['.png', '.jpg'])
     candidate_data_list = []
@@ -273,7 +256,6 @@ def _predict_ml_candidates(
     return pd.DataFrame(candidate_data_list) if candidate_data_list else pd.DataFrame()
 
 def _merge_with_stage2_data(ml_candidates_df: pd.DataFrame, stage2_analyzed_csv_path: Optional[str], sample_id: str ) -> pd.DataFrame:
-    # ... (unchanged) ...
     if ml_candidates_df.empty: return ml_candidates_df
     if not stage2_analyzed_csv_path or not os.path.exists(stage2_analyzed_csv_path):
         logger.warning(f"Stage 2 analyzed CSV path not provided or not found: {stage2_analyzed_csv_path}. 'combined_sharpness' will be missing for sample {sample_id}.")
@@ -314,7 +296,6 @@ def _merge_with_stage2_data(ml_candidates_df: pd.DataFrame, stage2_analyzed_csv_
     return merged_df
 
 def _apply_temporal_spatial_deduplication(candidates_df: pd.DataFrame, dedup_config: Dict[str, Any]) -> pd.DataFrame:
-    # ... (unchanged) ...
     if not dedup_config.get('enabled', False) or candidates_df.empty:
         logger.info("Deduplication filter is disabled or no candidates to filter.")
         return candidates_df
@@ -364,15 +345,14 @@ def _apply_boundary_recheck(
     candidates_df: pd.DataFrame, 
     boundary_config: Dict[str, Any], 
     global_source_illumination: str,
-    global_threshold_mode: str, # Added
-    global_otsu_multiplier: float,
-    global_fixed_threshold_value: int # Added
+    # MODIFIED: Accept threshold_params dictionary
+    threshold_params_for_boundary: Dict[str, Any]
     ) -> pd.DataFrame:
     if not boundary_config.get('enabled', False) or candidates_df.empty:
         logger.info("Boundary re-check filter is disabled or no candidates to filter.")
         return candidates_df
 
-    logger.info(f"Applying boundary re-check filter (Source Illum for check: {global_source_illumination}, ThreshMode: {global_threshold_mode})...")
+    logger.info(f"Applying boundary re-check filter (Source Illum for check: {global_source_illumination}, ThreshMode: {threshold_params_for_boundary.get('thresholding_mode','N/A')})...")
     if 'image_path' not in candidates_df.columns:
         logger.error("Missing 'image_path' column for boundary re-check. Skipping.")
         return candidates_df
@@ -380,18 +360,16 @@ def _apply_boundary_recheck(
     indices_to_keep = []
     for index, row in candidates_df.iterrows():
         image_path = row['image_path']
-        # Load as uint8 gray, as expected by detect_cropped_particle_on_boundary
         img_gray_uint8 = load_image(image_path, mode='gray') 
         if img_gray_uint8 is None:
             logger.warning(f"Could not load image {image_path} for boundary check. Excluding it."); continue
         
+        # MODIFIED: Pass the threshold_params dictionary
         is_on_boundary = detect_cropped_particle_on_boundary(
             img_gray_uint8, 
             image_path, 
             illumination_mode_of_crop=global_source_illumination,
-            thresholding_mode=global_threshold_mode, # Pass new param
-            otsu_threshold_multiplier=global_otsu_multiplier,
-            fixed_threshold_value_int=global_fixed_threshold_value # Pass new param
+            threshold_params=threshold_params_for_boundary 
         )
         
         if not is_on_boundary: indices_to_keep.append(index)
@@ -407,7 +385,7 @@ def _save_final_s3_outputs(
     final_df: pd.DataFrame,
     output_classified_dir: str,
     current_sample_id: str, 
-    ml_processing_params_for_vis: Dict[str, Any], # S3 feature params + global illum + global thresh
+    ml_processing_params_for_vis: Dict[str, Any], 
     feature_names_for_csv: List[str] 
 ) -> Tuple[Optional[str], pd.DataFrame]: 
     output_csv_filename = f"{current_sample_id}_stage3_accepted_fem_features.csv"
@@ -418,29 +396,23 @@ def _save_final_s3_outputs(
 
     if final_df.empty:
         logger.info(f"No ideal FEMs accepted for {current_sample_id}. No final outputs saved.")
-        empty_df_with_schema = pd.DataFrame(columns=final_csv_columns)
-        saved_path = save_dataframe_to_csv(empty_df_with_schema, output_classified_dir, output_csv_filename)
+        empty_df_with_schema = pd.DataFrame(columns=final_csv_columns); saved_path = save_dataframe_to_csv(empty_df_with_schema, output_classified_dir, output_csv_filename)
         return saved_path, empty_df_with_schema
 
     logger.info(f"Saving final {len(final_df)} accepted FEMs for {current_sample_id} and outputs...")
-    output_accepted_images_dir = os.path.join(output_classified_dir, "accepted_images")
-    output_visualizations_dir = os.path.join(output_classified_dir, "visualizations")
+    output_accepted_images_dir = os.path.join(output_classified_dir, "accepted_images"); output_visualizations_dir = os.path.join(output_classified_dir, "visualizations")
     os.makedirs(output_accepted_images_dir, exist_ok=True); os.makedirs(output_visualizations_dir, exist_ok=True)
-
     for _, row in final_df.iterrows():
         original_image_path = row['image_path']; filename = row['filename']
         try: shutil.copy2(original_image_path, os.path.join(output_accepted_images_dir, filename))
         except Exception as e: logger.error(f"Failed to copy accepted image {filename}: {e}")
         main_props = row.get('main_props'); egg_area_props = row.get('egg_area_props')
         if main_props:
-            vis_filename = f"{os.path.splitext(filename)[0]}_vis.png"
-            vis_output_path = os.path.join(output_visualizations_dir, vis_filename)
+            vis_filename = f"{os.path.splitext(filename)[0]}_vis.png"; vis_output_path = os.path.join(output_visualizations_dir, vis_filename)
             try: visualize_ml_features(original_image_path, main_props, egg_area_props, vis_output_path, ml_feature_params=ml_processing_params_for_vis)
             except Exception as e: logger.error(f"Failed to create visualization for {filename}: {e}")
         else: logger.warning(f"Skipping visualization for {filename} due to missing main_props.")
-    
-    final_output_df_for_csv = final_df[final_csv_columns].copy()
-    saved_csv_path = save_dataframe_to_csv(final_output_df_for_csv, output_classified_dir, output_csv_filename)
+    final_output_df_for_csv = final_df[final_csv_columns].copy(); saved_csv_path = save_dataframe_to_csv(final_output_df_for_csv, output_classified_dir, output_csv_filename)
     logger.info(f"Final outputs for {current_sample_id} saved. CSV: {saved_csv_path}")
     return saved_csv_path, final_output_df_for_csv
 
@@ -456,22 +428,27 @@ def run_stage_03_ml_classification(
     
     logger.info(f"--- Stage 3: ML Classification for Sample ID: {sample_id} (Mode: {mode}) ---")
     
-    config = get_config()
+    config = get_config() 
     config_s3 = config.get('stage_03_ml_classification', {})
     if not config_s3:
         raise ConfigError("Configuration for 'stage_03_ml_classification' not found.")
 
-    global_system_config = config.get('system', {})
-    global_threshold_cfg = global_system_config.get('thresholding', {})
-    if not global_threshold_cfg:
-        raise ConfigError("System-wide thresholding configuration ('system.thresholding') not found.")
+    global_system_config = config.get('system', {}) 
     
-    global_illumination_type = global_system_config.get('source_image_illumination_type', 'darkfield')
-    global_thresh_mode = global_threshold_cfg.get('mode', 'otsu')
-    global_otsu_multiplier = global_threshold_cfg.get('otsu_threshold_multiplier', 0.45)
-    global_fixed_thresh_val = global_threshold_cfg.get('fixed_threshold_value', 70)
-
-    logger.info(f"Stage 3 using global system config: Illum='{global_illumination_type}', ThreshMode='{global_thresh_mode}'")
+    unified_seg_and_feature_params = get_unified_segmentation_params(config)
+    
+    logger.info(f"Stage 3 using unified segmentation parameters derived from global and S3 config.")
+    
+    # These specific global values are used for _apply_boundary_recheck
+    # They are sourced from the unified_params for consistency
+    global_illumination_type = unified_seg_and_feature_params.get('source_image_illumination_type')
+    
+    # Construct the threshold_params dictionary for _apply_boundary_recheck
+    boundary_recheck_threshold_params = {
+        'thresholding_mode': unified_seg_and_feature_params.get('thresholding_mode'),
+        'otsu_threshold_multiplier': unified_seg_and_feature_params.get('otsu_threshold_multiplier'),
+        'fixed_threshold_value': unified_seg_and_feature_params.get('fixed_threshold_value')
+    }
 
     trained_model: Optional[RandomForestClassifier] = None
     fitted_scaler: Optional[StandardScaler] = None
@@ -499,11 +476,8 @@ def run_stage_03_ml_classification(
     if mode in ["predict", "train_and_predict"]:
         if not trained_model or not fitted_scaler or not feature_names_for_model: 
             logger.info("Loading existing model, scaler, and feature names for prediction...")
-            models_output_dir = get_models_dir()
-            model_filename = config_s3.get('model_filename', 'rf_fem_classifier.joblib')
-            scaler_filename = config_s3.get('scaler_filename', 'rf_fem_scaler.joblib')
-            model_path = os.path.join(models_output_dir, model_filename)
-            scaler_path = os.path.join(models_output_dir, scaler_filename)
+            models_output_dir = get_models_dir(); model_filename = config_s3.get('model_filename', 'rf_fem_classifier.joblib'); scaler_filename = config_s3.get('scaler_filename', 'rf_fem_scaler.joblib')
+            model_path = os.path.join(models_output_dir, model_filename); scaler_path = os.path.join(models_output_dir, scaler_filename)
             feature_names_path = model_path.replace(".joblib", "_feature_names.txt")
             if not all(os.path.exists(p) for p in [model_path, scaler_path, feature_names_path]):
                 msg = f"Model ('{model_path}'), scaler ('{scaler_path}'), or feature names ('{feature_names_path}') not found. Train model first."
@@ -534,16 +508,11 @@ def run_stage_03_ml_classification(
         stage3_final_output_dir = os.path.join(output_dir_stage3, "ideal_fems_ML_classified")
         os.makedirs(stage3_final_output_dir, exist_ok=True)
 
-        ml_feat_params_base_s3 = config_s3.get('feature_extraction_params', {}).copy()
-        ml_feat_params_base_s3['source_image_illumination_type'] = global_illumination_type
-        ml_feat_params_base_s3['thresholding_mode'] = global_thresh_mode
-        ml_feat_params_base_s3['otsu_threshold_multiplier'] = global_otsu_multiplier
-        ml_feat_params_base_s3['fixed_threshold_value'] = global_fixed_thresh_val
-
         if ml_candidates_df.empty:
             logger.info(f"No ML positive candidates found or prediction failed for sample {sample_id}.")
             fnames_for_empty_save = feature_names_for_model if feature_names_for_model else DEFAULT_FEATURE_NAMES
-            saved_csv_path, df_to_return = _save_final_s3_outputs(pd.DataFrame(), stage3_final_output_dir, sample_id, ml_feat_params_base_s3, fnames_for_empty_save)
+            # Pass unified_seg_and_feature_params for visualization consistency even if empty
+            saved_csv_path, df_to_return = _save_final_s3_outputs(pd.DataFrame(), stage3_final_output_dir, sample_id, unified_seg_and_feature_params, fnames_for_empty_save)
             return saved_csv_path, df_to_return
 
         post_ml_filter_configs = config_s3.get('post_ml_filters', {})
@@ -555,16 +524,15 @@ def run_stage_03_ml_classification(
         df_after_dedup = _apply_temporal_spatial_deduplication(df_with_sharpness, dedup_config)
         
         boundary_config = post_ml_filter_configs.get('boundary_recheck', {'enabled': False})
+        # MODIFIED: Pass the assembled threshold_params dictionary
         final_filtered_df = _apply_boundary_recheck(
             df_after_dedup, 
             boundary_config, 
             global_illumination_type,
-            global_thresh_mode,
-            global_otsu_multiplier,
-            global_fixed_thresh_val
+            boundary_recheck_threshold_params # Pass the dict here
         )
         
-        if os.path.exists(stage3_final_output_dir):
+        if os.path.exists(stage3_final_output_dir): 
             target_subdir_for_sample_output = os.path.join(output_dir_stage3, "ideal_fems_ML_classified")
             if os.path.exists(target_subdir_for_sample_output) and os.listdir(target_subdir_for_sample_output): 
                 logger.info(f"Clearing existing content from Stage 3 output subdir: {target_subdir_for_sample_output} for sample {sample_id}")
@@ -574,7 +542,7 @@ def run_stage_03_ml_classification(
                     else: os.remove(item_path)
 
         fnames_for_final_save = feature_names_for_model if feature_names_for_model else DEFAULT_FEATURE_NAMES
-        saved_csv_path, df_to_return = _save_final_s3_outputs(final_filtered_df, stage3_final_output_dir, sample_id, ml_feat_params_base_s3, fnames_for_final_save)
+        saved_csv_path, df_to_return = _save_final_s3_outputs(final_filtered_df, stage3_final_output_dir, sample_id, unified_seg_and_feature_params, fnames_for_final_save)
         
         logger.info(f"--- Stage 3: ML Classification for Sample ID: {sample_id} COMPLETED ---")
         return saved_csv_path, df_to_return
@@ -582,6 +550,13 @@ def run_stage_03_ml_classification(
     elif mode == "train":
         logger.info(f"--- Stage 3: ML Model Training for Sample ID (context): {sample_id} COMPLETED (no prediction) ---")
         model_filename = config_s3.get('model_filename', 'rf_fem_classifier.joblib')
+        if _learned_feature_names_during_training:
+            models_output_dir = get_models_dir(); feature_names_path = os.path.join(models_output_dir, model_filename.replace(".joblib", "_feature_names.txt"))
+            try:
+                with open(feature_names_path, "w") as f:
+                    for name in _learned_feature_names_during_training: f.write(f"{name}\n")
+                logger.info(f"Feature names used for training saved to: {feature_names_path} (train-only mode)")
+            except Exception as e: logger.exception(f"Error saving feature names in train-only mode: {e}")
         return os.path.join(get_models_dir(), model_filename), empty_return_df 
     
     logger.error(f"Invalid mode '{mode}' for Stage 3.")

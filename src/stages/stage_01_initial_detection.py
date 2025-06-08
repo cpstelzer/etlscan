@@ -18,14 +18,15 @@ from src.utils import (
 from src.utils.common_exceptions import ProcessingError, ConfigError, DataValidationError
 from src.core.image_io_operations import load_image 
 from src.core.image_enhancement import subtract_images, apply_blur 
-# apply_threshold is no longer directly used here as logic is embedded
 from src.core.masking_operations import mask_well_area, apply_mask 
 from src.core.region_props_calculator import find_contours, calculate_contour_measurements, filter_contours_by_area
+# MODIFIED: Import the new thresholding helper
+from src.core.segmentation import generate_binary_mask_from_float_image 
 
 logger = logging.getLogger(__name__)
 
 
-def _parse_image_filenames(image_dir_path: str) -> Optional[pd.DataFrame]:
+def _parse_image_filenames(image_dir_path: str) -> Optional[pd.DataFrame]: # Unchanged
     if not image_dir_path or not isinstance(image_dir_path, str):
         logger.error(f"Invalid image_dir_path: {image_dir_path}"); return None 
     if not os.path.isdir(image_dir_path):
@@ -50,7 +51,7 @@ def _parse_image_filenames(image_dir_path: str) -> Optional[pd.DataFrame]:
     logger.info(f"Parsed {len(df)} images from {image_dir_path}.")
     return df
 
-def _filter_image_df(df: pd.DataFrame) -> pd.DataFrame:
+def _filter_image_df(df: pd.DataFrame) -> pd.DataFrame: # Unchanged
     if df.empty: return df
     initial_len = len(df)
     if df.iloc[0]["frame"] == 0:
@@ -67,12 +68,12 @@ def _filter_image_df(df: pd.DataFrame) -> pd.DataFrame:
 def _analyze_single_subtracted_image_global_thresh( 
     image_to_analyze_gray_uint8: np.ndarray, 
     config_stage1_particle_analysis: Dict[str, Any], 
-    global_threshold_config: Dict[str, Any] 
+    global_threshold_config: Dict[str, Any] # This contains mode, otsu_multiplier, fixed_value
 ) -> Tuple[List[Dict[str, Any]], Optional[np.ndarray]]: 
     
     particles_data = []
-    binary_mask_display = None
-    if image_to_analyze_gray_uint8 is None: return particles_data, binary_mask_display
+    binary_mask_display_uint8 = None # For visualization
+    if image_to_analyze_gray_uint8 is None: return particles_data, binary_mask_display_uint8
     
     processed_img_uint8 = image_to_analyze_gray_uint8.copy()
     apply_conv = config_stage1_particle_analysis.get('apply_convolution', False)
@@ -82,57 +83,52 @@ def _analyze_single_subtracted_image_global_thresh(
             conv_kernel = np.array(kernel_list, dtype=np.float32)
             if conv_kernel.ndim == 2 and conv_kernel.shape[0] > 0:
                 processed_img_uint8 = cv2.filter2D(processed_img_uint8, -1, conv_kernel)
+                logger.debug("S1 Subtracted: Applied convolution.")
         except Exception as e: logger.error(f"S1 Sub Conv Error: {e}")
 
     img_float_for_segment = skimage.util.img_as_float(processed_img_uint8)
-    binary_mask_bool: Optional[np.ndarray] = None
-    threshold_mode = global_threshold_config.get('mode', 'otsu')
-
-    if threshold_mode == 'otsu':
-        otsu_multiplier = global_threshold_config.get('otsu_threshold_multiplier', 0.45)
-        if img_float_for_segment.min() == img_float_for_segment.max():
-            binary_mask_bool = np.zeros_like(img_float_for_segment, dtype=bool)
-        else:
-            try:
-                otsu_thresh_raw_sk = skimage.filters.threshold_otsu(img_float_for_segment)
-                final_thresh = otsu_thresh_raw_sk * otsu_multiplier
-                binary_mask_bool = img_float_for_segment > final_thresh
-            except ValueError: binary_mask_bool = np.zeros_like(img_float_for_segment, dtype=bool)
-    elif threshold_mode == 'fixed':
-        fixed_thresh_val_int = global_threshold_config.get('fixed_threshold_value', 70)
-        final_thresh = fixed_thresh_val_int / 255.0
-        binary_mask_bool = img_float_for_segment > final_thresh
-    else: return particles_data, binary_mask_display
     
-    if binary_mask_bool is None: return particles_data, binary_mask_display
+    # MODIFIED: Use the new helper function for thresholding
+    binary_mask_bool = generate_binary_mask_from_float_image(
+        img_float_for_segment,
+        global_threshold_config # Pass the global thresholding parameters
+    )
+    
+    if binary_mask_bool is None: # Helper function indicated an error
+        logger.error("S1 Subtracted: Failed to generate binary mask via helper.")
+        return particles_data, binary_mask_display_uint8
+    
     binary_mask_uint8 = binary_mask_bool.astype(np.uint8) * 255
-    binary_mask_display = binary_mask_uint8.copy() 
+    binary_mask_display_uint8 = binary_mask_uint8.copy() 
 
     img_for_contours = binary_mask_uint8
     blur_kernel_size_sub_binary = config_stage1_particle_analysis.get('microorganism_blur_kernel', 0)
     if blur_kernel_size_sub_binary > 0 and blur_kernel_size_sub_binary % 2 == 1:
         blurred_binary = apply_blur(binary_mask_uint8, blur_kernel_size_sub_binary, "median")
-        if blurred_binary is not None: img_for_contours = blurred_binary
+        if blurred_binary is not None: 
+            img_for_contours = blurred_binary
+            logger.debug(f"S1 Subtracted: Applied blur (kernel {blur_kernel_size_sub_binary}) to binary mask.")
     
     contours = find_contours(img_for_contours, mode="external", method="simple")
-    if not contours: return particles_data, binary_mask_display
+    if not contours: 
+        logger.debug("S1 Subtracted: No contours found after thresholding/blur.")
+        return particles_data, binary_mask_display_uint8
     
     min_area = config_stage1_particle_analysis.get('min_microorganism_area', 50)
     valid_contours = filter_contours_by_area(contours, min_area)
     particles_data = [m for cnt in valid_contours if (m := calculate_contour_measurements(cnt))]
-    return particles_data, binary_mask_display
+    logger.debug(f"S1 Subtracted: Found {len(particles_data)} particles after area filter.")
+    return particles_data, binary_mask_display_uint8
 
 
 def _analyze_unsubtracted_locally(
     full_unsub_prepped_uint8: np.ndarray, 
     candidate_particles_subtracted: List[Dict[str, Any]], 
     roi_crop_size: int,
-    analysis_config: Dict[str, Any], 
-    threshold_config: Dict[str, Any], 
+    analysis_config: Dict[str, Any], # S1 unsubtracted_particle_analysis config
+    global_threshold_config: Dict[str, Any], # System-level thresholding config
     source_illumination: str
 ) -> Tuple[List[Dict[str, Any]], Optional[np.ndarray], Tuple[Optional[np.ndarray], Optional[np.ndarray], Optional[float]]]:
-    # Returns: list of particle_data dicts, composite_binary_mask_uint8, 
-    #          (example_roi_img_2d_for_display, example_roi_hist_data_ravel, example_roi_otsu_thresh_raw)
     
     if full_unsub_prepped_uint8 is None: 
         return [], None, (None, None, None)
@@ -142,7 +138,7 @@ def _analyze_unsubtracted_locally(
     
     first_roi_img_2d_for_display = None 
     first_roi_hist_data_ravel = None 
-    first_roi_otsu_thresh_raw = None 
+    first_roi_effective_thresh_val_float = None # Store the actual threshold value used
 
     min_area_unsub = analysis_config.get('min_particle_area', 50)
     h_full, w_full = full_unsub_prepped_uint8.shape
@@ -162,45 +158,58 @@ def _analyze_unsubtracted_locally(
         if roi_img_uint8.size == 0 or roi_img_uint8.shape[0] < 3 or roi_img_uint8.shape[1] < 3:
             continue
 
-        roi_float_for_segment_2d = skimage.util.img_as_float(roi_img_uint8)
+        roi_float_original_2d = skimage.util.img_as_float(roi_img_uint8)
+        roi_float_for_segment_2d = roi_float_original_2d.copy()
         if source_illumination == 'collimated':
             roi_float_for_segment_2d = 1.0 - roi_float_for_segment_2d
         
         current_roi_hist_data_ravel = roi_float_for_segment_2d.ravel()
 
-        if i == 0: 
-            first_roi_img_2d_for_display = roi_float_for_segment_2d.copy() 
-            first_roi_hist_data_ravel = current_roi_hist_data_ravel
+        # MODIFIED: Use the new helper function for thresholding the ROI
+        # Note: This uses GLOBAL threshold config for each LOCAL ROI, which was the implicit behavior.
+        # If truly local Otsu per ROI (ignoring global config) was intended, this needs more thought.
+        # The current `global_threshold_config` is passed to the helper.
+        local_binary_mask_roi_bool = generate_binary_mask_from_float_image(
+            roi_float_for_segment_2d, # Pass the processed (e.g., inverted) ROI
+            global_threshold_config
+        )
 
-        local_binary_mask_roi_bool = None
-        local_otsu_raw = None
-        threshold_mode = threshold_config.get('mode', 'otsu')
-
-        if threshold_mode == 'otsu':
-            otsu_multiplier = threshold_config.get('otsu_threshold_multiplier', 0.45)
-            if roi_float_for_segment_2d.min() == roi_float_for_segment_2d.max():
-                local_binary_mask_roi_bool = np.zeros_like(roi_float_for_segment_2d, dtype=bool)
-                local_otsu_raw = roi_float_for_segment_2d.min() if roi_float_for_segment_2d.size > 0 else 0
-            else:
-                try:
-                    local_otsu_raw = skimage.filters.threshold_otsu(roi_float_for_segment_2d) 
-                    local_final_thresh = local_otsu_raw * otsu_multiplier
-                    local_binary_mask_roi_bool = roi_float_for_segment_2d > local_final_thresh
-                except ValueError:
-                    local_binary_mask_roi_bool = np.zeros_like(roi_float_for_segment_2d, dtype=bool)
-            if i == 0: first_roi_otsu_thresh_raw = local_otsu_raw
-
-        elif threshold_mode == 'fixed':
-            fixed_val = threshold_config.get('fixed_threshold_value', 70)
-            local_final_thresh = fixed_val / 255.0
-            local_binary_mask_roi_bool = roi_float_for_segment_2d > local_final_thresh
-            local_otsu_raw = local_final_thresh 
-            if i == 0: first_roi_otsu_thresh_raw = local_otsu_raw
-        else:
-            logger.error(f"Error: Invalid local threshold mode '{threshold_mode}' for ROI {i+1}")
+        if local_binary_mask_roi_bool is None:
+            logger.error(f"S1 Local Unsub: Failed to generate binary mask for ROI {i+1}.")
             continue
         
-        if local_binary_mask_roi_bool is None: continue # Should not happen if logic above is correct
+        # For display/debugging, capture the threshold value if Otsu was used in the helper
+        # This part is a bit indirect as the helper doesn't return the threshold value directly.
+        # We can re-calculate it for the first ROI if mode is Otsu for display purposes.
+        local_threshold_value_for_data = np.nan
+        if i == 0:
+            first_roi_img_2d_for_display = roi_float_for_segment_2d.copy()
+            first_roi_hist_data_ravel = current_roi_hist_data_ravel
+            if global_threshold_config.get('mode') == 'otsu':
+                if roi_float_for_segment_2d.min() != roi_float_for_segment_2d.max():
+                    try:
+                        otsu_val_disp = skimage.filters.threshold_otsu(roi_float_for_segment_2d)
+                        otsu_mult_disp = global_threshold_config.get('otsu_threshold_multiplier', 0.45)
+                        first_roi_effective_thresh_val_float = otsu_val_disp * otsu_mult_disp
+                        local_threshold_value_for_data = first_roi_effective_thresh_val_float
+                    except ValueError: pass
+            elif global_threshold_config.get('mode') == 'fixed':
+                fixed_val_disp = global_threshold_config.get('fixed_threshold_value', 70)
+                first_roi_effective_thresh_val_float = fixed_val_disp / 255.0
+                local_threshold_value_for_data = first_roi_effective_thresh_val_float
+        else: # For subsequent ROIs, calculate their specific threshold if needed for data
+            if global_threshold_config.get('mode') == 'otsu':
+                 if roi_float_for_segment_2d.min() != roi_float_for_segment_2d.max():
+                    try:
+                        otsu_val_data = skimage.filters.threshold_otsu(roi_float_for_segment_2d)
+                        otsu_mult_data = global_threshold_config.get('otsu_threshold_multiplier', 0.45)
+                        local_threshold_value_for_data = otsu_val_data * otsu_mult_data
+                    except ValueError: pass
+            elif global_threshold_config.get('mode') == 'fixed':
+                fixed_val_data = global_threshold_config.get('fixed_threshold_value', 70)
+                local_threshold_value_for_data = fixed_val_data / 255.0
+
+
         local_binary_mask_roi_uint8 = local_binary_mask_roi_bool.astype(np.uint8) * 255
         
         composite_binary_mask_full_image[y1:y2, x1:x2] = np.maximum(
@@ -208,7 +217,7 @@ def _analyze_unsubtracted_locally(
             local_binary_mask_roi_uint8 
         )
 
-        contours_in_roi = find_contours(local_binary_mask_roi_uint8, mode="external", method="simple") # Use full find_contours
+        contours_in_roi = find_contours(local_binary_mask_roi_uint8, mode="external", method="simple")
         if not contours_in_roi: continue
         
         valid_contours_in_roi = filter_contours_by_area(contours_in_roi, min_area_unsub)
@@ -229,14 +238,14 @@ def _analyze_unsubtracted_locally(
             if particle_measure_roi:
                 particle_measure_roi['X'] += x1; particle_measure_roi['Y'] += y1
                 particle_measure_roi['bounding_x'] += x1; particle_measure_roi['bounding_y'] += y1
-                particle_measure_roi['local_threshold_value'] = local_otsu_raw if local_otsu_raw is not None else np.nan
+                particle_measure_roi['local_threshold_value'] = local_threshold_value_for_data # Store the calculated threshold
                 all_local_particle_data.append(particle_measure_roi)
     
     return all_local_particle_data, composite_binary_mask_full_image, \
-           (first_roi_img_2d_for_display, first_roi_hist_data_ravel, first_roi_otsu_thresh_raw)
+           (first_roi_img_2d_for_display, first_roi_hist_data_ravel, first_roi_effective_thresh_val_float)
 
 
-def _compare_and_fuse_particle_dfs(df_ref: pd.DataFrame, df_query: pd.DataFrame, config_s1_comparison: Dict[str, Any]) -> pd.DataFrame:
+def _compare_and_fuse_particle_dfs(df_ref: pd.DataFrame, df_query: pd.DataFrame, config_s1_comparison: Dict[str, Any]) -> pd.DataFrame: # Unchanged
     if df_ref.empty or df_query.empty: return pd.DataFrame()
     if not all(k in df_ref.columns and k in df_query.columns for k in ['X', 'Y']):
         raise DataValidationError("X, Y columns missing for fusion.")
@@ -288,7 +297,7 @@ def _compare_and_fuse_particle_dfs(df_ref: pd.DataFrame, df_query: pd.DataFrame,
     return final_matched_df
 
 
-def run_stage_01_initial_detection(
+def run_stage_01_initial_detection( # Unchanged, as internal functions now use the helper
     image_dir_path: str,
     output_dir_stage1: str,
     sample_id: str 
@@ -296,12 +305,15 @@ def run_stage_01_initial_detection(
     
     s1_unsub_debug_images_saved_this_run = False
 
-    logger.info(f"--- Stage 1: Initial Detection for Sample ID: {sample_id} (Local Unsub Thresh) ---")
+    logger.info(f"--- Stage 1: Initial Detection for Sample ID: {sample_id} (Local Unsub Thresh, Consolidated Thresh) ---")
     config = get_config()
     config_s1 = config.get('stage_01_initial_detection', {})
     system_cfg = config.get('system', {})
     source_image_illumination = system_cfg.get('source_image_illumination_type', 'darkfield')
-    global_threshold_config = system_cfg.get('thresholding', {})
+    # global_threshold_config is passed directly to helper functions
+    global_threshold_config = system_cfg.get('thresholding', {}) 
+    if not global_threshold_config:
+        raise ConfigError("Stage 1: System-level thresholding configuration not found or empty.")
     
     particle_analysis_subtracted_config = config_s1.get('particle_analysis', {})
     unsubtracted_analysis_config = config_s1.get('unsubtracted_particle_analysis', {}) 
@@ -343,7 +355,7 @@ def run_stage_01_initial_detection(
         particles_subtracted_list_dicts, _ = _analyze_single_subtracted_image_global_thresh(
             img_for_sub_analysis_uint8, 
             particle_analysis_subtracted_config, 
-            global_threshold_config
+            global_threshold_config # Pass the global config here
         )
         df_subtracted_particles = pd.DataFrame(particles_subtracted_list_dicts)
         if not df_subtracted_particles.empty:
@@ -371,7 +383,7 @@ def run_stage_01_initial_detection(
                 particles_subtracted_list_dicts, 
                 local_otsu_roi_size,
                 unsubtracted_analysis_config,
-                global_threshold_config,
+                global_threshold_config, # Pass the global config here
                 source_image_illumination
             )
             df_unsubtracted_particles = pd.DataFrame(particles_unsubtracted_list_dicts)
@@ -402,7 +414,7 @@ def run_stage_01_initial_detection(
     other_measurement_cols = [col for col in final_sample_df.columns if col not in cols_order and col not in ['original_query_idx']]
     final_cols_ordered = cols_order + other_measurement_cols
     
-    for col in cols_order: # Ensure all primary columns exist
+    for col in cols_order: 
         if col not in final_sample_df.columns:
             final_sample_df[col] = np.nan
             
@@ -414,7 +426,7 @@ def run_stage_01_initial_detection(
     else: logger.error(f"--- Stage 1: Failed to save results for Sample ID: {sample_id} ---")
     return saved_csv_path
 
-if __name__ == '__main__':
+if __name__ == '__main__': # Unchanged
     from src.utils.logging_setup import setup_logging
     setup_logging() 
     try:
@@ -426,11 +438,11 @@ if __name__ == '__main__':
         thresh_cfg_test.setdefault('otsu_threshold_multiplier', 1.0) 
         thresh_cfg_test.setdefault('fixed_threshold_value', 70)
         
-        TEST_SAMPLE_ID = "test_s1_local_otsu_final" 
+        TEST_SAMPLE_ID = "test_s1_consolidated_thresh" 
         base_project_dir = cfg_main.get('project_base_dir')
         if not base_project_dir: raise ValueError("project_base_dir not set in config for testing.")
         test_image_input_dir = os.path.join(base_project_dir, "data", "input", TEST_SAMPLE_ID)
-        test_stage1_output_dir = os.path.join(base_project_dir, "data", "output", TEST_SAMPLE_ID, "stage1_local_otsu_final_test")
+        test_stage1_output_dir = os.path.join(base_project_dir, "data", "output", TEST_SAMPLE_ID, "stage1_consolidated_thresh_test")
         os.makedirs(test_stage1_output_dir, exist_ok=True); os.makedirs(test_image_input_dir, exist_ok=True) 
         
         if not os.listdir(test_image_input_dir) or len(os.listdir(test_image_input_dir)) < 200 : 
@@ -446,24 +458,23 @@ if __name__ == '__main__':
                 cv2.imwrite(dummy_fpath, dummy_img_content_uint8)
             logger.info(f"Created dummy images.")
         
-        logger.info("\n--- Running S1 Test (Local Otsu for Unsubtracted) ---")
+        logger.info("\n--- Running S1 Test (Consolidated Thresholding) ---")
         s1_cfg = cfg_main.setdefault('stage_01_initial_detection', {})
         s1_unsub_cfg = s1_cfg.setdefault('unsubtracted_particle_analysis', {})
         s1_unsub_cfg.setdefault('min_particle_area', 30)
         s1_unsub_cfg.setdefault('local_otsu_roi_size', 100) 
-
         s1_particle_cfg = s1_cfg.setdefault('particle_analysis', {'min_microorganism_area': 50, 'apply_convolution':False}) 
         s1_cfg.setdefault('particle_comparison', {'search_radius_factor': 2.0, 'default_particle_area': 100})
         s1_cfg.setdefault('well_masking', {'create_mask': True, 'radius_px':120, 'radius_fraction':0.9}) 
         
         result_csv_path = run_stage_01_initial_detection(image_dir_path=test_image_input_dir, output_dir_stage1=test_stage1_output_dir, sample_id=TEST_SAMPLE_ID)
         if result_csv_path: 
-            logger.info(f"S1 local unsub test completed. CSV: {result_csv_path}")
+            logger.info(f"S1 consolidated thresh test completed. CSV: {result_csv_path}")
             df_out = pd.read_csv(result_csv_path)
             logger.info(f"Output DataFrame head:\n{df_out.head()}")
             logger.info(f"Number of particles in output: {len(df_out)}")
             if not df_out.empty:
                 assert 'local_threshold_value' in df_out.columns, "local_threshold_value column missing!"
                 logger.info(f"Example local thresholds: {df_out['local_threshold_value'].unique()[:5]}")
-        else: logger.error("S1 local unsub test FAILED.")
+        else: logger.error("S1 consolidated thresh test FAILED.")
     except Exception as e: logger.exception(f"An unexpected error occurred during the Stage 1 test: {e}")

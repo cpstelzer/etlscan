@@ -9,78 +9,67 @@ logging:
   console_level: "INFO" # Level for console output (INFO, WARNING, ERROR, CRITICAL)
   format: "%(asctime)s - %(levelname)s - %(name)s - %(module)s.%(funcName)s - %(message)s"
   date_format: "%Y-%m-%d %H:%M:%S"
-  log_file: "pipeline_run.log" # Set to null for console-only detailed logging
+  log_file: "pipeline_run.log" 
   # Example: "logs/pipeline_run.log" 
   # If null or not present, logs go to console.
   # Default filemode is 'a' (append).
 
-# System and Image Parameters (from original wellcounter_config.yml thinking)
+# System and Image Parameters
 system:
-  image_width_px: 4504 # Example, used if auto_center_mask is False
-  image_height_px: 4504 # Example, used if auto_center_mask is False
+  image_width_px: 4504 
+  image_height_px: 4504 
   source_image_illumination_type: "collimated" #  "collimated" or "darkfield"
-  # Global Thresholding Settings for main object segmentation
   thresholding:
-    mode: "otsu"  # "otsu" or "fixed"
-    otsu_threshold_multiplier: 1 # Multiplier for Otsu threshold value
-    fixed_threshold_value: 70  # Fixed threshold value if mode is "fixed" (0-255)
+    mode: "otsu" 
+    otsu_threshold_multiplier: 1 
+    fixed_threshold_value: 70 
   
-# Stage 1: Initial Detection (derived from ws_background_subtraction & wellcounter_imaging_module)
+# Stage 1: Initial Detection
 stage_01_initial_detection:
-  bg_offset_val: 180 # Frame offset for background selection
-  # Parameters for wellcounter_imaging_module.mask_well_area
+  bg_offset_val: 180 
   well_masking:
     create_mask: True
     auto_center_mask: True
-    radius_px: 2000 # Effective radius for masking, relative to well size
-    radius_fraction: 0.75 # Factor to shrink auto-detected or fixed radius
-  # Parameters for wellcounter_imaging_module.analyze_microorganisms (SUBTRACTED IMAGE ANALYSIS)
-  particle_analysis: # This section is for the SUBTRACTED images
+    radius_px: 2000 
+    radius_fraction: 0.75 
+  particle_analysis: 
     apply_convolution: False
-    convolution_kernel: # Standard 5x5 sharpening-like kernel
+    convolution_kernel: 
       - [0,  0,  0,  0,  0]
       - [0, -1, -1, -1,  0]
       - [0, -1, 10, -1,  0]
       - [0, -1, -1, -1,  0]
       - [0,  0,  0,  0,  0]
-    # microorganism_threshold: 25 # OBSOLETE for thresholding; S1 subtracted path now uses system.thresholding
-    min_microorganism_area: 500 # For subtracted image
-    microorganism_blur_kernel: 5 # For subtracted image, must be odd, 0 to disable
-    filter_by_shape: False # If True, uses hardcoded quantiles from original wim
-  # Parameters for UNSUBTRACTED (original FG) image analysis
+    min_microorganism_area: 500 
+    microorganism_blur_kernel: 5 
+    filter_by_shape: False 
   unsubtracted_particle_analysis:
-    # thresholding_mode: "otsu"  # << REMOVED - Uses system.thresholding.mode
-    # fixed_threshold_value: 70  # << REMOVED - Uses system.thresholding.fixed_threshold_value
-    # Otsu multiplier will come from system.thresholding.otsu_threshold_multiplier
-    blur_kernel_size: 3        # Blur kernel size (e.g., 3, 5, 0 to disable). Must be odd if > 0. Currently not used for local ROI segmentation.
-    min_particle_area: 1000     # Min area for particles in unsubtracted FG image (applied locally in ROIs)
-    local_otsu_roi_size: 150   # Size of the square ROI for local Otsu on unsubtracted image
-  # Parameters for compare_detected_particles (used to match subtracted and unsubtracted particles)
+    min_particle_area: 1000     
+    local_otsu_roi_size: 150   
   particle_comparison:
     search_radius_factor: 2.0
-    default_particle_area: 2000 # Typical particle area in pixels (used to derive search_radius)
-  # Parameters for image_analysis_of_sample logic (frames for wim method) - kept for reference
+    default_particle_area: 2000 
   wim_image_analysis_frames:
     frame1_delay: 0
     frame2_delay: 2
     frame3_delay: 5
-  # Output settings from original wim if particle_detection=True in outputs
   debug_outputs_wim_style:
-    enabled: False # Set to true to save intermediate images like original wim
+    enabled: False 
     output_subdir_suffix: "_wim_particle_detection_debug"
 
+# Stage 2: Quality Filter
 stage_02_quality_filter:
   intermediate_crop:
-    mode: "centroid_square" # "bounding_box" or "centroid_square"
-    square_size: 150 # For 'centroid_square' mode
-    bbox_column_mapping: # For 'bounding_box' mode, maps to S1 CSV columns
+    mode: "centroid_square" 
+    square_size: 150 
+    bbox_column_mapping: 
       x: "bounding_x"
       y: "bounding_y"
       w: "bounding_w"
       h: "bounding_h"
   black_mask_check:
-    min_area_ratio: 0.05 # Min area of black component to total for it to be a mask
-  sharpness_metrics: # List of raw sharpness metrics to normalize and combine
+    min_area_ratio: 0.05 
+  sharpness_metrics: 
     - "variance_laplacian"
     - "tenengrad_variance"
     - "energy_laplacian" 
@@ -93,36 +82,39 @@ stage_02_quality_filter:
     on_crop_boundary: true    
     final_sharpness: true     
 
-# Stage 3: ML Classification (derived from ws_identify_ideal_fems)
+# Stage 3: ML Classification
 stage_03_ml_classification:
   model_filename: "rf_fem_classifier.joblib"
   scaler_filename: "rf_fem_scaler.joblib"
   image_extensions: [".png", ".tif", ".tiff", ".jpg", ".jpeg"] 
-  feature_extraction_params: # These params are passed to core.ml_feature_extractor
-                             # which in turn passes them to core.segmentation.segment_main_body
-    # Global thresholding (mode, otsu_multiplier, fixed_threshold_value) and 
-    # global illumination (source_image_illumination_type) are added from system_config at runtime.
-    
-    # Unsharp Masking Parameters (NEW - for main body segmentation)
-    enable_unsharp_masking: true # Set to true to enable unsharp masking before thresholding
-    unsharp_mask_sigma: 1.8       # Sigma for Gaussian blur in unsharp masking (e.g., 0.5 to 2.0)
-    unsharp_mask_amount: 1.6      # Strength of sharpening (e.g., 0.5 to 2.0)
+  
+  # MODIFIED: Restructured feature_extraction_params
+  feature_extraction_params:
+    main_body_segmentation: # Parameters for segment_main_body_from_image_float
+      enable_unsharp_masking: true 
+      unsharp_mask_sigma: 1.8       
+      unsharp_mask_amount: 1.6      
+      min_noise_size: 50
+      closing_selem_size: 3 # Radius of disk for binary closing. 0 to disable.
+      # Note: min_significant_area is applied *after* segmentation in extract_ml_features
+      # to decide if egg detection proceeds. It's not a direct segmentation param for segment_main_body.
+      # However, segment_main_body_from_image_float does accept it to potentially filter its props.
+      # Keeping it here for now as part of the "main body context".
+      min_significant_area: 300 
 
-    # Segmentation cleaning/closing parameters (used by core.segmentation.segment_main_body)
-    min_noise_size: 50
-    closing_selem_size: 3 # Radius of disk for binary closing. 0 to disable.
+    egg_detection: # Parameters specific to egg finding logic within extract_ml_features
+      gaussian_sigma: 1.0          # Sigma for Gaussian blur specifically for EGG detection
+      egg_posterior_pixel_fraction: 0.4 
+      egg_threshold_quantile: 0.8 
+      egg_min_area: 50             
+      egg_max_area: 5000           
+      egg_min_solidity: 0.60       
+      egg_max_solidity: 0.99       
+      egg_min_eccentricity: 0.2    
+      orientation_diff_tolerance_deg: 85
+      # min_significant_area from main_body_segmentation is used by extract_ml_features 
+      # to decide whether to proceed with egg detection logic.
 
-    # Egg-specific parameters (used by core.ml_feature_extractor after main body seg)
-    gaussian_sigma: 1.0          # Sigma for Gaussian blur specifically for EGG detection
-    min_significant_area: 300    # Min area of main body to proceed with egg detection
-    egg_posterior_pixel_fraction: 0.4 
-    egg_threshold_quantile: 0.8 
-    egg_min_area: 50             
-    egg_max_area: 5000           
-    egg_min_solidity: 0.60       
-    egg_max_solidity: 0.99       
-    egg_min_eccentricity: 0.2    
-    orientation_diff_tolerance_deg: 85 
   training_params:
     good_data_subdir: "good" 
     bad_data_subdir: "bad"   

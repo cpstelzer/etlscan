@@ -8,12 +8,14 @@ import skimage.draw
 import numpy as np
 import os
 import logging
-import cv2 
-from scipy import ndimage as ndi # Should be removed if not used elsewhere, fill_holes is now in segmentation.py
+# cv2 import is no longer needed here if ndi is removed and segment_main_body does all cv2 work
+# import cv2 
+# from scipy import ndimage as ndi # Should be removed as fill_holes is now in segmentation.py
 from typing import Optional, Dict, Any, Tuple, List
+from skimage.measure._regionprops import RegionProperties # For type hinting
 
 from src.utils.common_exceptions import ConfigError
-from src.core.segmentation import segment_main_body_from_image_float # MODIFIED: Import new function
+from src.core.segmentation import segment_main_body_from_image_float 
 
 logger = logging.getLogger(__name__)
 
@@ -24,22 +26,94 @@ DEFAULT_FEATURE_NAMES = [
     'mean_intensity', 'num_components'
 ]
 
+def _calculate_and_attach_posterior_attributes(
+    props_obj: RegionProperties, 
+    base_image_shape: Tuple[int, int], # For posterior_pixel_mask bounds
+    egg_posterior_pixel_fraction_config: float
+) -> Tuple[RegionProperties, float, Optional[np.ndarray]]:
+    """
+    Calculates posterior area ratio and identifies posterior coordinates for egg search.
+    Attaches '_axis_vector_pointing_posterior' and '_posterior_coords_for_egg_search'
+    to the props_obj.
+
+    Args:
+        props_obj (RegionProperties): The main properties object of the segmented body.
+        base_image_shape (Tuple[int, int]): Shape of the original image (height, width).
+        egg_posterior_pixel_fraction_config (float): Fraction of body length to consider posterior.
+
+    Returns:
+        Tuple[RegionProperties, float, Optional[np.ndarray]]:
+        - props_obj: The input props_obj, now with posterior attributes attached.
+        - posterior_area_ratio_calculated: The calculated posterior area ratio.
+        - posterior_coords_for_egg_search: Coordinates of the posterior pixel slice.
+    """
+    posterior_area_ratio = 0.5 # Default
+    posterior_coords_for_egg_search_arr: Optional[np.ndarray] = None
+
+    if not (hasattr(props_obj, 'orientation') and 
+            hasattr(props_obj, 'area') and props_obj.area > 0 and
+            hasattr(props_obj, 'coords') and 
+            hasattr(props_obj, 'centroid')):
+        logger.debug("Props object missing attributes for posterior calculation.")
+        # Attach default posterior vector if orientation is somehow missing but needed by other visualizations
+        if not hasattr(props_obj, '_axis_vector_pointing_posterior'):
+             props_obj._axis_vector_pointing_posterior = np.array([1.0, 0.0]) # Default (e.g. horizontal right)
+        return props_obj, posterior_area_ratio, posterior_coords_for_egg_search_arr
+
+    main_orientation = props_obj.orientation
+    axis_vector_rc_unit = np.array([np.cos(main_orientation), np.sin(main_orientation)])
+    
+    # Determine which side of the major axis is more "posterior" by pixel count
+    coords_main_body = props_obj.coords 
+    centroid_main_body = np.array(props_obj.centroid) 
+    relative_coords_main_body = coords_main_body - centroid_main_body
+    projections_main_body = np.dot(relative_coords_main_body, axis_vector_rc_unit) 
+    
+    positive_projection_pixels = np.sum(projections_main_body > 0)
+    if props_obj.area > 0:
+         posterior_area_ratio = positive_projection_pixels / props_obj.area
+    
+    if not (posterior_area_ratio >= 0.5): 
+        props_obj._axis_vector_pointing_posterior = -axis_vector_rc_unit
+    else:
+        props_obj._axis_vector_pointing_posterior = axis_vector_rc_unit
+
+    # Define posterior pixel area for egg search
+    if not (0 < egg_posterior_pixel_fraction_config < 1):
+        logger.warning(f"egg_posterior_pixel_fraction ({egg_posterior_pixel_fraction_config}) is out of (0,1) range. Defaulting to 0.45 for posterior slice.")
+        egg_posterior_pixel_fraction_config = 0.45
+        
+    percentile_to_cut = (1.0 - egg_posterior_pixel_fraction_config) * 100.0 
+
+    relative_coords_for_slice = coords_main_body - centroid_main_body # Already calculated as relative_coords_main_body
+    projections_for_slice = np.dot(relative_coords_for_slice, props_obj._axis_vector_pointing_posterior)
+    
+    if len(projections_for_slice) > 0:
+        projection_threshold_val = np.percentile(projections_for_slice, percentile_to_cut) 
+        posterior_indices = projections_for_slice > projection_threshold_val
+        posterior_coords_for_egg_search_arr = coords_main_body[posterior_indices]
+    else:
+        logger.debug("No projections calculated for posterior slice.")
+
+    props_obj._posterior_coords_for_egg_search = posterior_coords_for_egg_search_arr
+    return props_obj, posterior_area_ratio, posterior_coords_for_egg_search_arr
+
+
 def extract_ml_features(
     image_path: str,
-    params: Dict[str, Any], # This should now contain all segmentation params including unsharp
+    params: Dict[str, Any], 
     image_array_gray: Optional[np.ndarray] = None
-) -> Tuple[Optional[Dict[str, Any]], Optional[Any], Optional[Any]]:
+) -> Tuple[Optional[Dict[str, Any]], Optional[RegionProperties], Optional[RegionProperties]]:
     features: Dict[str, Any] = {key: 0.0 for key in DEFAULT_FEATURE_NAMES} 
     features['posterior_area_ratio'] = 0.5 
     features['egg_ecc'] = 0.0 
     features['total_egg_area'] = 0.0
-    features['num_components'] = 0 # This will be set by the segmentation function based on filled mask
+    features['num_components'] = 0 
 
-    main_props_obj = None
-    egg_area_props_obj = None
+    main_props_obj: Optional[RegionProperties] = None # Explicitly Optional
+    egg_area_props_obj: Optional[RegionProperties] = None # Explicitly Optional
     
     try:
-        # Load and prepare original image (float, [0,1])
         img_float_original: np.ndarray
         if image_array_gray is None:
             img_loaded_gray = skimage.io.imread(image_path, as_gray=True)
@@ -54,38 +128,23 @@ def extract_ml_features(
                 img_float_original = image_array_gray.copy()
 
         img_gray_input_shape = img_float_original.shape 
-
-        # --- MODIFICATION: Call shared segmentation function ---
-        # The 'params' dict passed to extract_ml_features should already contain:
-        # source_image_illumination_type, thresholding_mode, otsu_threshold_multiplier,
-        # fixed_threshold_value, enable_unsharp_masking, unsharp_mask_sigma, unsharp_mask_amount,
-        # min_noise_size, closing_selem_size.
-        # It will also contain S3-specific egg params, which are fine.
         
-        raw_body_mask, filled_body_mask, main_props_obj = segment_main_body_from_image_float(
+        raw_body_mask, filled_body_mask, main_props_obj_from_seg = segment_main_body_from_image_float(
             img_float_original,
-            params # Pass the comprehensive params dict
+            params 
         )
 
-        if main_props_obj is None or filled_body_mask is None: # main_props_obj comes from filled mask
+        if main_props_obj_from_seg is None or filled_body_mask is None:
             logger.debug(f"Main body segmentation failed or found no object for {os.path.basename(image_path)}.")
-            # num_components would be 0 if main_props_obj is None
-            # Update: We need to determine num_components based on the segmentation output if possible
-            if filled_body_mask is not None: # even if main_props_obj is None (e.g. area too small)
+            if filled_body_mask is not None:
                  _, num_labels_temp = skimage.measure.label(filled_body_mask > 0, return_num=True, connectivity=2)
                  features['num_components'] = int(num_labels_temp)
-            return features, None, None # Return default features with num_components updated
+            return features, None, None
         
-        # Update num_components from the main object's mask
-        # (segment_main_body should ideally return number of components, or we relabel here)
-        # For now, assuming main_props_obj means one main component.
-        # If segment_main_body handles multi-label, main_props_obj is the largest.
-        # A more robust num_components would be from the labeled_filled_mask inside segment_main_body
-        # For now, if main_props_obj exists, we consider it 1 significant component for this feature.
-        # Let's relabel the filled_body_mask to get a robust num_components for the features dict.
+        main_props_obj = main_props_obj_from_seg # Assign to the variable used throughout this function
+        
         _, num_labels_final = skimage.measure.label(filled_body_mask > 0, return_num=True, connectivity=2)
         features['num_components'] = int(num_labels_final)
-        # --- END MODIFICATION ---
         
         features['main_area'] = float(main_props_obj.area)
         minor_axis_len = main_props_obj.minor_axis_length if hasattr(main_props_obj, 'minor_axis_length') else 0.0
@@ -98,45 +157,31 @@ def extract_ml_features(
         
         features['solidity'] = getattr(main_props_obj, 'solidity', 0.0)
         features['extent'] = getattr(main_props_obj, 'extent', 0.0)
-        # mean_intensity is now calculated on the (potentially inverted) pre-enhancement image by segment_main_body
         features['mean_intensity'] = getattr(main_props_obj, 'mean_intensity', 0.0) 
-        main_orientation = getattr(main_props_obj, 'orientation', 0.0) 
+        
+        # MODIFIED: Call utility to calculate posterior attributes
+        egg_posterior_fraction = params.get('egg_posterior_pixel_fraction', 0.45)
+        main_props_obj, posterior_area_ratio_calc, posterior_coords_for_search = \
+            _calculate_and_attach_posterior_attributes(
+                main_props_obj, 
+                img_gray_input_shape,
+                egg_posterior_fraction
+            )
+        features['posterior_area_ratio'] = posterior_area_ratio_calc
+        # main_props_obj now has _axis_vector_pointing_posterior and _posterior_coords_for_egg_search
 
-        # Posterior area ratio and egg detection logic (largely unchanged, but uses main_props_obj from new seg)
-        main_props_obj._axis_vector_pointing_posterior = np.array([np.cos(main_orientation), np.sin(main_orientation)]) 
-
-        if main_props_obj.area > 0 and hasattr(main_props_obj, 'coords') and hasattr(main_props_obj, 'centroid'):
-            coords_main_body = main_props_obj.coords 
-            centroid_main_body = np.array(main_props_obj.centroid) 
-            axis_vector_rc_unit = np.array([np.cos(main_orientation), np.sin(main_orientation)])
-            relative_coords_main_body = coords_main_body - centroid_main_body
-            projections_main_body = np.dot(relative_coords_main_body, axis_vector_rc_unit) 
-            positive_projection_pixels = np.sum(projections_main_body > 0)
-            if main_props_obj.area > 0:
-                 features['posterior_area_ratio'] = positive_projection_pixels / main_props_obj.area
-            if not (features['posterior_area_ratio'] >= 0.5): 
-                main_props_obj._axis_vector_pointing_posterior = -axis_vector_rc_unit
-            else:
-                main_props_obj._axis_vector_pointing_posterior = axis_vector_rc_unit
-
-        if features['main_area'] < params.get('min_significant_area', 300): # This threshold is from S3 params
+        if features['main_area'] < params.get('min_significant_area', 300):
             logger.debug(f"Main object area {features['main_area']} is less than min_significant_area. "
                          f"Skipping egg detection for {os.path.basename(image_path)}.")
-            return features, main_props_obj, None
+            return features, main_props_obj, None # main_props_obj now has posterior vector
 
         # Egg detection logic
-        # It needs the image *after* potential inversion but *before* unsharp masking for consistency with main body's intensity context
-        # The segment_main_body function uses image_intensity_for_props for props, which is correct.
-        # For egg thresholding, we need the version of the image that's been inverted (if collimated)
-        # but not unsharp masked, because unsharp masking might alter egg intensities unpredictably.
-        
         image_for_egg_detection_float = img_float_original.copy()
         source_illumination_type_egg = params.get('source_image_illumination_type', 'darkfield')
         if source_illumination_type_egg == 'collimated':
             image_for_egg_detection_float = 1.0 - image_for_egg_detection_float
 
-        # Egg detection blurring (uses 'gaussian_sigma' from S3 params, distinct from unsharp_mask_sigma)
-        egg_gaussian_sigma = params.get('gaussian_sigma', 1.0) # This is the S3 param for egg blurring
+        egg_gaussian_sigma = params.get('gaussian_sigma', 1.0)
         egg_blurred_image = skimage.filters.gaussian(image_for_egg_detection_float, sigma=egg_gaussian_sigma)
         
         actual_egg_quantile = params.get('egg_threshold_quantile', 0.92) 
@@ -148,45 +193,25 @@ def extract_ml_features(
             egg_binary_mask_initial_bool = egg_blurred_image > egg_thresh_val 
             logger.debug(f"Egg detection: quantile={actual_egg_quantile}, thresh_val={egg_thresh_val:.4f} (applied to blurred, potentially inverted, pre-unsharped image)")
 
+        # Use the posterior_coords_for_search obtained from the utility
         posterior_pixel_mask_bool = np.zeros(img_gray_input_shape, dtype=bool)
-        egg_posterior_fraction = params.get('egg_posterior_pixel_fraction', 0.45)
-        if not (0 < egg_posterior_fraction < 1):
-            logger.warning(f"egg_posterior_pixel_fraction ({egg_posterior_fraction}) is out of (0,1) range. Defaulting to 0.45.")
-            egg_posterior_fraction = 0.45
-            
-        percentile_to_cut = (1.0 - egg_posterior_fraction) * 100.0 
-
-        if main_props_obj and main_props_obj.area > 0 and hasattr(main_props_obj, 'coords'):
-            coords_main_body = main_props_obj.coords # From new segmentation
-            centroid_main_body = np.array(main_props_obj.centroid)
-            relative_coords_for_slice = coords_main_body - centroid_main_body
-            projections_for_slice = np.dot(relative_coords_for_slice, main_props_obj._axis_vector_pointing_posterior)
-            
-            if len(projections_for_slice) > 0:
-                projection_threshold_val = np.percentile(projections_for_slice, percentile_to_cut) 
-                posterior_indices = projections_for_slice > projection_threshold_val
-                posterior_coords = coords_main_body[posterior_indices]
-                if posterior_coords.shape[0] > 0:
-                    valid_rows = np.clip(posterior_coords[:, 0].astype(int), 0, img_gray_input_shape[0] - 1)
-                    valid_cols = np.clip(posterior_coords[:, 1].astype(int), 0, img_gray_input_shape[1] - 1)
-                    posterior_pixel_mask_bool[valid_rows, valid_cols] = True
-                main_props_obj._posterior_coords_for_egg_search = posterior_coords 
-            else:
-                logger.debug(f"No projections calculated for posterior slice for {os.path.basename(image_path)}.")
+        if posterior_coords_for_search is not None and posterior_coords_for_search.shape[0] > 0:
+            valid_rows = np.clip(posterior_coords_for_search[:, 0].astype(int), 0, img_gray_input_shape[0] - 1)
+            valid_cols = np.clip(posterior_coords_for_search[:, 1].astype(int), 0, img_gray_input_shape[1] - 1)
+            posterior_pixel_mask_bool[valid_rows, valid_cols] = True
         else:
-            logger.debug(f"Could not define posterior pixel area for {os.path.basename(image_path)} "
-                         f"(main_props missing, zero area, or no coords).")
+            logger.debug(f"No posterior coordinates available for egg search constraints for {os.path.basename(image_path)}.")
+
 
         egg_binary_mask_constrained_bool = egg_binary_mask_initial_bool & posterior_pixel_mask_bool
         
         egg_labeled_mask, egg_num_labels_cand = skimage.measure.label(egg_binary_mask_constrained_bool, return_num=True, connectivity=2)
 
         if egg_num_labels_cand > 0 and main_props_obj is not None:
-            # Intensity image for egg regionprops should be the same as for main body props
-            # (i.e., potentially inverted, but pre-enhancement)
             egg_props_candidates = skimage.measure.regionprops(egg_labeled_mask, intensity_image=image_for_egg_detection_float, cache=False)
             
             valid_egg_candidates = []
+            main_orientation_for_egg_check = getattr(main_props_obj, 'orientation', 0.0) # Use orientation from unified props
             for p_egg_candidate in egg_props_candidates:
                 is_area_ok = (params.get('egg_min_area', 50) <= p_egg_candidate.area <= params.get('egg_max_area', 5000))
                 if not is_area_ok: continue
@@ -197,7 +222,7 @@ def extract_ml_features(
                 is_shape_ok = (egg_ecc > params.get('egg_min_eccentricity', 0.2))
                 if not is_shape_ok: continue
                 egg_orientation = getattr(p_egg_candidate, 'orientation', 0.0) 
-                delta_angle_abs = abs(main_orientation - egg_orientation)
+                delta_angle_abs = abs(main_orientation_for_egg_check - egg_orientation) # Use main_orientation from unified props
                 acute_delta_angle = min(delta_angle_abs, np.pi - delta_angle_abs) 
                 orientation_diff_rad = abs(acute_delta_angle - (np.pi / 2.0)) 
                 orientation_tolerance_rad = np.deg2rad(params.get('orientation_diff_tolerance_deg', 60.0))
@@ -210,7 +235,7 @@ def extract_ml_features(
                 features['total_egg_area'] = float(egg_area_props_obj.area)
                 features['egg_ecc'] = getattr(egg_area_props_obj, 'eccentricity', 0.0)
         
-        for key in features:
+        for key in features: # Type cleanup
             if isinstance(features[key], float) and not np.isfinite(features[key]):
                 logger.warning(f"Feature '{key}' is non-finite ({features[key]}) for {os.path.basename(image_path)}. Defaulting based on type.")
                 if key == 'num_components': features[key] = 0
@@ -234,60 +259,33 @@ if __name__ == '__main__':
     if not logging.getLogger().hasHandlers():
         logging.basicConfig(level=logging.DEBUG)
     
-    from src.utils.config_loader import get_config 
+    from src.utils.config_loader import get_unified_segmentation_params, get_config
+    
     try:
-        cfg = get_config()
-        s3_ml_cfg = cfg.get('stage_03_ml_classification', {})
-        feature_extraction_params_from_s3_cfg = s3_ml_cfg.get('feature_extraction_params', {})
+        # Get the full unified params for testing
+        main_cfg_test = get_config() # Ensure config is loaded
+        ml_params_for_test = get_unified_segmentation_params(main_cfg_test)
         
-        system_cfg = cfg.get('system', {})
-        source_illum_from_config = system_cfg.get('source_image_illumination_type', 'darkfield')
-        global_thresh_cfg = system_cfg.get('thresholding', {})
-        
-        # These are the comprehensive params needed by segment_main_body and then by egg logic
-        ml_params_for_test = feature_extraction_params_from_s3_cfg.copy()
-        ml_params_for_test['source_image_illumination_type'] = source_illum_from_config
-        ml_params_for_test['thresholding_mode'] = global_thresh_cfg.get('mode', 'otsu')
-        ml_params_for_test['otsu_threshold_multiplier'] = global_thresh_cfg.get('otsu_threshold_multiplier', 0.45)
-        ml_params_for_test['fixed_threshold_value'] = global_thresh_cfg.get('fixed_threshold_value', 70)
-        # Add unsharp masking params (assuming they might be in s3_feature_extraction_params or we add defaults)
-        ml_params_for_test.setdefault('enable_unsharp_masking', False) # Default to False for test if not in config
-        ml_params_for_test.setdefault('unsharp_mask_sigma', 1.0)
-        ml_params_for_test.setdefault('unsharp_mask_amount', 1.0)
+        # Add S3-specific egg params to ml_params_for_test if they are not already there
+        # (get_unified_segmentation_params already includes everything from feature_extraction_params)
+        s3_feat_cfg = main_cfg_test.get('stage_03_ml_classification', {}).get('feature_extraction_params',{})
+        for k, v in s3_feat_cfg.items(): # Ensure all S3 specific params are there
+            ml_params_for_test.setdefault(k, v)
 
 
-        if not feature_extraction_params_from_s3_cfg or 'egg_posterior_pixel_fraction' not in feature_extraction_params_from_s3_cfg: 
-            print("ML feature extraction parameters not found/complete in config. Using hardcoded defaults for test.")
-            ml_params_for_test = { 
-                'source_image_illumination_type': 'darkfield', 
-                'thresholding_mode': 'otsu', 
-                'otsu_threshold_multiplier': 0.5, 
-                'fixed_threshold_value': 70, 
-                'enable_unsharp_masking': False,
-                'unsharp_mask_sigma': 1.0,
-                'unsharp_mask_amount': 1.0,
-                'gaussian_sigma': 1.0, # Used for egg detection blurring
-                'closing_selem_size': 3, 'min_noise_size': 50, 
-                'min_significant_area': 100, 'egg_posterior_pixel_fraction': 0.45, 
-                'egg_threshold_quantile': 0.90, 'egg_min_area': 50, 'egg_max_area': 5000,
-                'egg_min_solidity': 0.60, 'egg_max_solidity': 0.99, 'egg_min_eccentricity': 0.2, 
-                'orientation_diff_tolerance_deg': 60
-            }
     except FileNotFoundError:
-        print("Config file not found. Using hardcoded ML params for test.")
+        print("Config file not found for ml_feature_extractor test. Using hardcoded ML params.")
+        # Define a fallback ml_params_for_test if config loading fails
         ml_params_for_test = { 
-            'source_image_illumination_type': 'darkfield', 
-            'thresholding_mode': 'otsu', 
-            'otsu_threshold_multiplier': 0.5, 
-            'fixed_threshold_value': 70,
-            'enable_unsharp_masking': False,
-            'unsharp_mask_sigma': 1.0,
-            'unsharp_mask_amount': 1.0,
-            'gaussian_sigma': 1.0, # Used for egg detection blurring
-            'closing_selem_size': 3, 'min_noise_size': 50, 'min_significant_area': 100, 
-            'egg_posterior_pixel_fraction': 0.45, 'egg_threshold_quantile': 0.90, 'egg_min_area': 50, 
-            'egg_max_area': 5000, 'egg_min_solidity': 0.60, 'egg_max_solidity': 0.99, 
-            'egg_min_eccentricity': 0.2, 'orientation_diff_tolerance_deg': 60
+            'source_image_illumination_type': 'darkfield', 'thresholding_mode': 'otsu', 
+            'otsu_threshold_multiplier': 0.5, 'fixed_threshold_value': 70,
+            'enable_unsharp_masking': False, 'unsharp_mask_sigma': 1.0, 'unsharp_mask_amount': 1.0,
+            'min_noise_size': 50, 'closing_selem_size': 3, 
+            'gaussian_sigma': 1.0, 'min_significant_area': 100, 
+            'egg_posterior_pixel_fraction': 0.45, 'egg_threshold_quantile': 0.90, 
+            'egg_min_area': 50, 'egg_max_area': 5000, 'egg_min_solidity': 0.60, 
+            'egg_max_solidity': 0.99, 'egg_min_eccentricity': 0.2, 
+            'orientation_diff_tolerance_deg': 60
         }
 
     test_image_v = np.zeros((200, 200), dtype=np.uint8) 
@@ -303,43 +301,27 @@ if __name__ == '__main__':
     test_image_v[rr_egg_v, cc_egg_v] = 220 
 
     test_image_v_float = skimage.util.img_as_float(test_image_v) 
-    temp_img_filename = "temp_ml_feature_test_unified_seg.png" # New name
+    temp_img_filename = "temp_ml_feature_test_posterior_util.png"
     skimage.io.imsave(temp_img_filename, skimage.util.img_as_ubyte(test_image_v_float))
     
-    logger.info(f"\n--- Testing ML feature extraction (Unified Segmentation) ---")
+    logger.info(f"\n--- Testing ML feature extraction (with posterior util) ---")
     logger.info(f"Runtime params for extract_ml_features: {ml_params_for_test}")
     
-    # Test with unsharp masking disabled
-    ml_params_for_test['enable_unsharp_masking'] = False
-    logger.info("Testing with Unsharp Masking DISABLED:")
-    features_test_no_unsharp, main_props_no_unsharp, _ = extract_ml_features(
+    features_test, main_props_out, _ = extract_ml_features(
         temp_img_filename, ml_params_for_test, image_array_gray=test_image_v_float 
     )
-    if features_test_no_unsharp:
-        print(f"  Main Area: {features_test_no_unsharp.get('main_area')}, Egg Area: {features_test_no_unsharp.get('total_egg_area')}, Num Comp: {features_test_no_unsharp.get('num_components')}")
-        assert features_test_no_unsharp.get('total_egg_area', 0) > 0, "Expected egg detection (no unsharp)."
-        if main_props_no_unsharp:
-            print(f"  Main props object eccentricity: {main_props_no_unsharp.eccentricity if hasattr(main_props_no_unsharp, 'eccentricity') else 'N/A'}")
+    if features_test:
+        print(f"  Main Area: {features_test.get('main_area')}, Egg Area: {features_test.get('total_egg_area')}")
+        print(f"  Posterior Area Ratio: {features_test.get('posterior_area_ratio')}")
+        assert features_test.get('total_egg_area', 0) > 0, "Expected egg detection."
+        if main_props_out:
+            assert hasattr(main_props_out, '_axis_vector_pointing_posterior'), "main_props_out missing _axis_vector_pointing_posterior"
+            assert hasattr(main_props_out, '_posterior_coords_for_egg_search'), "main_props_out missing _posterior_coords_for_egg_search"
+            logger.info(f"  Posterior vector: {main_props_out._axis_vector_pointing_posterior}")
+            if main_props_out._posterior_coords_for_egg_search is not None:
+                logger.info(f"  Num posterior coords for search: {main_props_out._posterior_coords_for_egg_search.shape[0]}")
     else:
-        print(f"  Feature extraction failed (no unsharp).")
-
-    # Test with unsharp masking enabled
-    ml_params_for_test['enable_unsharp_masking'] = True
-    ml_params_for_test['unsharp_mask_sigma'] = 0.5 # A mild sigma
-    ml_params_for_test['unsharp_mask_amount'] = 1.2
-    logger.info(f"Testing with Unsharp Masking ENABLED (sigma={ml_params_for_test['unsharp_mask_sigma']}, amount={ml_params_for_test['unsharp_mask_amount']}):")
-    features_test_unsharp, main_props_unsharp, _ = extract_ml_features(
-        temp_img_filename, ml_params_for_test, image_array_gray=test_image_v_float
-    )
-    if features_test_unsharp:
-        print(f"  Main Area: {features_test_unsharp.get('main_area')}, Egg Area: {features_test_unsharp.get('total_egg_area')}, Num Comp: {features_test_unsharp.get('num_components')}")
-        # Note: area might change with unsharp masking
-        if main_props_unsharp:
-             print(f"  Main props object eccentricity: {main_props_unsharp.eccentricity if hasattr(main_props_unsharp, 'eccentricity') else 'N/A'}")
-
-    else:
-        print(f"  Feature extraction failed (unsharp enabled).")
-
+        print(f"  Feature extraction failed.")
 
     if os.path.exists(temp_img_filename):
         os.remove(temp_img_filename)

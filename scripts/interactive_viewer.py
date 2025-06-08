@@ -4,7 +4,6 @@ import sys
 import os
 import pandas as pd
 
-# Add the project root (well_plate_analyzer) to sys.path
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
@@ -12,7 +11,7 @@ if PROJECT_ROOT not in sys.path:
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox, scrolledtext
 import matplotlib
-matplotlib.use('TkAgg') # Must be before importing pyplot
+matplotlib.use('TkAgg') 
 import matplotlib.pyplot as plt
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 import skimage.io
@@ -28,10 +27,10 @@ import shutil
 import re
 
 try:
-    from src.utils.config_loader import get_config, load_config 
-    from src.core.ml_feature_extractor import extract_ml_features # Still used for S3 display and getting S3-style props for S4 vis
+    from src.utils.config_loader import get_config, load_config, get_unified_segmentation_params 
+    from src.core.ml_feature_extractor import extract_ml_features, _calculate_and_attach_posterior_attributes
     from src.visualization.feature_visualization import visualize_ml_features
-    from src.core.detailed_morphology_calculator import reconstruct_main_body_masks, calculate_detailed_body_morphology # reconstruct is used by S4 logic, calc_detailed may be used for display
+    from src.core.detailed_morphology_calculator import reconstruct_main_body_masks, calculate_detailed_body_morphology 
     from src.visualization.stage_04_visualization import visualize_detailed_morphology 
     from src.utils.common_exceptions import ConfigError, DataValidationError 
     from src.stages.stage_01_initial_detection import (
@@ -51,7 +50,7 @@ try:
     from src.core.image_enhancement import subtract_images, apply_blur
     from src.core.masking_operations import mask_well_area, apply_mask 
     from src.core.region_props_calculator import find_contours as core_find_contours, calculate_contour_measurements
-    from src.core.segmentation import segment_main_body_from_image_float # MODIFIED: Import new shared segmentation
+    from src.core.segmentation import segment_main_body_from_image_float 
 
 except ImportError as e:
     print(f"Error importing modules: {e}", file=sys.stderr); sys.exit(1)
@@ -67,14 +66,14 @@ DEFAULT_ROI_SIZE_MIN, DEFAULT_ROI_SIZE_MAX = 30, 500
 class FeatureViewerApp:
     def __init__(self, master):
         self.master = master
-        master.title("Interactive Viewer (Unified Seg & Unsharp Masking)"); master.geometry("1600x950") # Title updated
-        self.image_path = None; self.image_array_gray_float = None # This will store ORIGINAL float image
+        master.title("Interactive Viewer (Config Restructured)"); master.geometry("1600x950") 
+        self.image_path = None; self.image_array_gray_float = None 
         self.default_params = {}; self.current_params = {} 
         self.param_vars = {} 
         self.param_str_vars = {} 
         self.param_specs = {} 
         self.param_widgets = {} 
-        self.update_job_id = None; self.active_visualization_mode = tk.StringVar(value="S3") # Default to S3 to see new params
+        self.update_job_id = None; self.active_visualization_mode = tk.StringVar(value="S3") 
         self.s1_image_directory_path = None; self.s1_image_file_list_df = pd.DataFrame()
         self.s1_selected_fg_filepath_var = tk.StringVar()
         self.s1_convolution_kernel_list = None; self.s1_raw_config = {} 
@@ -99,7 +98,9 @@ class FeatureViewerApp:
                 global_thresh_cfg_default = {'mode': 'otsu', 'otsu_threshold_multiplier': 0.45, 'fixed_threshold_value': 70}
 
             s3_ml_cfg = cfg.get('stage_03_ml_classification', {}); 
-            s3_feat_cfg_base = s3_ml_cfg.get('feature_extraction_params', {}) # This now includes unsharp params
+            s3_feat_params_structured = s3_ml_cfg.get('feature_extraction_params', {})
+            s3_main_body_seg_cfg = s3_feat_params_structured.get('main_body_segmentation', {})
+            s3_egg_detect_cfg = s3_feat_params_structured.get('egg_detection', {})
             
             self.s1_raw_config = cfg.get('stage_01_initial_detection', {})
             s1_particle_cfg = self.s1_raw_config.get('particle_analysis', {}) 
@@ -122,26 +123,19 @@ class FeatureViewerApp:
                 'viewer_otsu_threshold_multiplier': global_thresh_cfg_default.get('otsu_threshold_multiplier', 0.45),
                 'viewer_fixed_threshold_value': global_thresh_cfg_default.get('fixed_threshold_value', 70),
             }
-            # Add S3/S4 core params, including new unsharp masking params from config
-            self.default_params.update({f"s3_s4_core_{k}": v for k, v in s3_feat_cfg_base.items()})
-
+            self.default_params.update({f"main_body_seg_{k}": v for k, v in s3_main_body_seg_cfg.items()})
+            self.default_params.update({f"egg_detect_{k}": v for k, v in s3_egg_detect_cfg.items()})
             self.default_params.update({
                 's1_bg_offset_val': self.s1_raw_config.get('bg_offset_val', 110),
                 's1_sub_apply_convolution': s1_particle_cfg.get('apply_convolution', True),
                 's1_sub_min_microorganism_area': s1_particle_cfg.get('min_microorganism_area', 200),
                 's1_sub_microorganism_blur_kernel': s1_particle_cfg.get('microorganism_blur_kernel', 5),
-            })
-            self.default_params.update({
                 's1_well_mask_create_mask': s1_well_mask_cfg.get('create_mask', True),
                 's1_well_mask_auto_center_mask': s1_well_mask_cfg.get('auto_center_mask', True),
                 's1_well_mask_radius_px': s1_well_mask_cfg.get('radius_px', 2000),
-                's1_well_mask_radius_fraction': s1_well_mask_cfg.get('radius_fraction', 0.67)
-            })
-            self.default_params.update({ 
+                's1_well_mask_radius_fraction': s1_well_mask_cfg.get('radius_fraction', 0.67),
                 's1_unsub_min_particle_area': s1_unsub_particle_cfg.get('min_particle_area', 300),
-                's1_unsub_local_otsu_roi_size': s1_unsub_particle_cfg.get('local_otsu_roi_size', 150) 
-            })
-            self.default_params.update({
+                's1_unsub_local_otsu_roi_size': s1_unsub_particle_cfg.get('local_otsu_roi_size', 150),
                 's1_comp_search_radius_factor': s1_comp_cfg.get('search_radius_factor', 2.0),
                 's1_comp_default_particle_area': s1_comp_cfg.get('default_particle_area', 500),
             })
@@ -166,7 +160,9 @@ class FeatureViewerApp:
     def _initialize_param_vars_and_specs(self):
         all_specs = {
             **self._get_global_param_specs(), **self._get_s1_param_specs(), 
-            **self._get_s2_param_specs(), **self._get_s3_s4_core_param_specs() # MODIFIED
+            **self._get_s2_param_specs(), 
+            **self._get_main_body_seg_param_specs(), 
+            **self._get_egg_detect_param_specs()     
         }
         for name, default_val in self.default_params.items():
             spec = all_specs.get(name)
@@ -178,22 +174,20 @@ class FeatureViewerApp:
                     self.param_vars[name].trace_add("write", lambda n,i,m,var_name=name: self._sync_num_to_str(var_name))
                 elif param_type == 'float':
                     self.param_vars[name] = tk.DoubleVar(value=float(default_val))
-                    res = spec.get('res', 0.1); fmt_str = str(res)
-                    num_decimals = len(fmt_str.split('.')[-1]) if '.' in fmt_str else 0
-                    fmt = f".{max(1,num_decimals)}f"
+                    res = spec.get('res', 0.1); fmt_str = str(res); num_decimals = len(fmt_str.split('.')[-1]) if '.' in fmt_str else 0; fmt = f".{max(1,num_decimals)}f"
                     self.param_str_vars[name] = tk.StringVar(value=f"{float(default_val):{fmt}}")
                     self.param_vars[name].trace_add("write", lambda n,i,m,var_name=name, f=fmt: self._sync_num_to_str(var_name, f))
                 elif param_type == 'choice': self.param_vars[name] = tk.StringVar(value=str(default_val))
                 elif param_type == 'bool': self.param_vars[name] = tk.BooleanVar(value=bool(default_val))
 
-    def _sync_num_to_str(self, param_name, fmt=None): # Unchanged
+    def _sync_num_to_str(self, param_name, fmt=None):
         try:
             num_var, str_var = self.param_vars[param_name], self.param_str_vars[param_name]
             if isinstance(num_var, tk.IntVar): str_var.set(str(num_var.get()))
             elif isinstance(num_var, tk.DoubleVar): str_var.set(f"{num_var.get():{fmt if fmt else '.2f'}}")
         except (tk.TclError, KeyError): pass 
 
-    def on_closing(self): # Unchanged
+    def on_closing(self): 
         if self.update_job_id: self.master.after_cancel(self.update_job_id)
         for canvas_attr in ['canvas_raw', 'canvas_dynamic_vis', 'canvas_s2_single_crop']: 
             if hasattr(self, canvas_attr) and getattr(self, canvas_attr):
@@ -201,7 +195,7 @@ class FeatureViewerApp:
                 except tk.TclError: pass
         plt.close('all'); self.temp_dir.cleanup(); self.master.destroy()
 
-    def setup_gui(self): # Largely unchanged, S3/S4 params frame name updated
+    def setup_gui(self):
         main_frame = ttk.Frame(self.master, padding="10"); main_frame.pack(fill=tk.BOTH, expand=True)
         top_controls_frame = ttk.Frame(main_frame); top_controls_frame.pack(fill=tk.X, pady=5)
         self.load_button = ttk.Button(top_controls_frame, text="Load", command=self.dispatch_load_action); self.load_button.pack(side=tk.LEFT, padx=5)
@@ -226,6 +220,7 @@ class FeatureViewerApp:
         
         self.global_params_frame = ttk.Labelframe(self.controls_frame_inner, text="Global Viewer Settings", padding=5)
         self.create_global_param_controls(self.global_params_frame)
+        
         self.s1_params_frame_main = ttk.Frame(self.controls_frame_inner) 
         self.s1_subtracted_params_frame = ttk.Labelframe(self.s1_params_frame_main, text="S1 Subtracted Analysis Params", padding=5)
         self.create_s1_subtracted_param_controls(self.s1_subtracted_params_frame)
@@ -235,16 +230,15 @@ class FeatureViewerApp:
         self.create_s1_unsubtracted_param_controls(self.s1_unsubtracted_params_frame)
         self.s1_comparison_params_frame = ttk.Labelframe(self.s1_params_frame_main, text="S1 Particle Comparison Params", padding=5)
         self.create_s1_comparison_param_controls(self.s1_comparison_params_frame)
+        
         self.s2_params_frame_main = ttk.Frame(self.controls_frame_inner)
         self.create_s2_param_controls(self.s2_params_frame_main)
         
-        # MODIFIED: Frame for S3/S4 Core Segmentation + S3 Egg Params
-        self.s3_s4_params_main_frame = ttk.Frame(self.controls_frame_inner)
-        self.s3_s4_core_seg_params_frame = ttk.Labelframe(self.s3_s4_params_main_frame, text="S3/S4 Main Body Segmentation", padding=5)
-        self.create_s3_s4_core_param_controls(self.s3_s4_core_seg_params_frame) # This will now include unsharp params
-        self.s3_egg_params_frame = ttk.Labelframe(self.s3_s4_params_main_frame, text="S3 Egg Detection Params", padding=5)
-        self.create_s3_egg_param_controls(self.s3_egg_params_frame) # Separate function for clarity
-
+        self.s3_s4_params_main_frame = ttk.Frame(self.controls_frame_inner) 
+        self.s3_s4_main_body_seg_params_frame = ttk.Labelframe(self.s3_s4_params_main_frame, text="Main Body Segmentation (S3/S4)", padding=5)
+        self.create_main_body_seg_param_controls(self.s3_s4_main_body_seg_params_frame) 
+        self.s3_egg_params_frame = ttk.Labelframe(self.s3_s4_params_main_frame, text="Egg Detection (S3 only)", padding=5)
+        self.create_egg_detect_param_controls(self.s3_egg_params_frame) 
 
         param_buttons = ttk.Frame(self.controls_frame_inner); param_buttons.pack(side=tk.BOTTOM, pady=10, fill=tk.X, padx=5)
         ttk.Button(param_buttons, text="Reset", command=self.reset_parameters).pack(side=tk.LEFT, expand=True, fill=tk.X, padx=(0,2))
@@ -259,7 +253,7 @@ class FeatureViewerApp:
         self.s2_single_crop_tab = ttk.Frame(self.vis_notebook) 
         self.setup_s2_single_crop_tab(self.s2_single_crop_tab)
 
-    def setup_s2_single_crop_tab(self, parent_tab_frame): # Unchanged
+    def setup_s2_single_crop_tab(self, parent_tab_frame):
         s2_crop_selector_frame = ttk.Frame(parent_tab_frame, padding=5); s2_crop_selector_frame.pack(fill=tk.X)
         ttk.Label(s2_crop_selector_frame, text="Select Sharp Particle:").pack(side=tk.LEFT, padx=(0,5))
         self.s2_sharp_particle_selector = ttk.Combobox(s2_crop_selector_frame, textvariable=self.s2_selected_sharp_particle_var, state="disabled", width=60)
@@ -271,14 +265,10 @@ class FeatureViewerApp:
         s2_crop_attrs_frame = ttk.Labelframe(s2_crop_display_paned, text="Particle Attributes", padding=10); s2_crop_display_paned.add(s2_crop_attrs_frame, weight=1)
         self.s2_sharp_particle_attributes_text = scrolledtext.ScrolledText(s2_crop_attrs_frame, wrap=tk.WORD, height=20, width=40, state=tk.DISABLED); self.s2_sharp_particle_attributes_text.pack(fill=tk.BOTH, expand=True)
 
-    def on_mode_change(self): # MODIFIED
+    def on_mode_change(self):
         mode = self.active_visualization_mode.get()
         self.global_params_frame.pack(fill=tk.X, expand=True, pady=5, padx=5)
-        # Hide all stage-specific param frames initially
-        self.s1_params_frame_main.pack_forget()
-        self.s2_params_frame_main.pack_forget()
-        self.s3_s4_params_main_frame.pack_forget() # MODIFIED: Use new main S3/S4 frame
-        
+        self.s1_params_frame_main.pack_forget(); self.s2_params_frame_main.pack_forget(); self.s3_s4_params_main_frame.pack_forget()
         self.s1_fg_image_selector_label.pack_forget(); self.s1_fg_image_selector.pack_forget(); self.s2_status_label.pack_forget()
         try: self.vis_notebook.index(self.s2_single_crop_tab); self.vis_notebook.forget(self.s2_single_crop_tab) 
         except tk.TclError: pass 
@@ -296,44 +286,43 @@ class FeatureViewerApp:
             self.s2_status_label.pack(side=tk.LEFT, padx=(10,0), after=self.s1_fg_image_selector); self.vis_notebook.add(self.s2_single_crop_tab, text=" S2 Crop Inspector ") 
             self.s2_selected_sharp_particle_var.set(""); self.update_s2_single_crop_display() 
         elif mode in ["S3", "S4"]:
-            self.s3_s4_params_main_frame.pack(fill=tk.X, expand=True) # MODIFIED
-            self.s3_s4_core_seg_params_frame.pack(fill=tk.X, expand=True, pady=3)
-            if mode == "S3": # Only show egg params for S3
-                self.s3_egg_params_frame.pack(fill=tk.X, expand=True, pady=3)
-            else:
-                self.s3_egg_params_frame.pack_forget()
+            self.s3_s4_params_main_frame.pack(fill=tk.X, expand=True)
+            self.s3_s4_main_body_seg_params_frame.pack(fill=tk.X, expand=True, pady=3)
+            if mode == "S3": self.s3_egg_params_frame.pack(fill=tk.X, expand=True, pady=3)
+            else: self.s3_egg_params_frame.pack_forget()
             self.load_button.config(text="Load Img (S3/S4)")
         
-        self.update_global_threshold_param_visibility() # Call this AFTER packing/unpacking relevant frames
+        self.update_global_threshold_param_visibility(); 
         if mode != "S1" and mode !="S2": self.s1_image_directory_path = None; self.s1_image_file_list_df = pd.DataFrame(); self.s1_fg_image_selector['values'] = []; self.s1_selected_fg_filepath_var.set("")
         self.update_raw_image_display(); self.schedule_update()
     
-    def on_s1_fg_image_selected(self, event=None): self.update_raw_image_display(); self.schedule_update() # Unchanged
-    def _bind_mousewheel(self, event, canvas): canvas.bind_all("<MouseWheel>", lambda e: self._on_mousewheel(e, canvas)) # Unchanged
-    def _unbind_mousewheel(self, event, canvas): canvas.unbind_all("<MouseWheel>") # Unchanged
-    def _on_mousewheel(self, event, canvas): canvas.yview_scroll(1 if (event.num == 5 or event.delta < 0) else -1, "units") # Unchanged
+    def on_s1_fg_image_selected(self, event=None): self.update_raw_image_display(); self.schedule_update()
+    def _bind_mousewheel(self, event, canvas): canvas.bind_all("<MouseWheel>", lambda e: self._on_mousewheel(e, canvas))
+    def _unbind_mousewheel(self, event, canvas): canvas.unbind_all("<MouseWheel>")
+    def _on_mousewheel(self, event, canvas): canvas.yview_scroll(1 if (event.num == 5 or event.delta < 0) else -1, "units")
     
-    def schedule_update(self): # Unchanged
+    def schedule_update(self): 
         if self.update_job_id: self.master.after_cancel(self.update_job_id)
         self.update_job_id = self.master.after(UPDATE_DEBOUNCE_MS, self.process_and_display_safe)
         if self.active_visualization_mode.get() == "S2":
              self.s2_selected_sharp_particle_var.set("") 
              self.update_s2_single_crop_display()
 
-    def update_global_threshold_param_visibility(self, *args): # Unchanged
+    def update_global_threshold_param_visibility(self, *args):
         mode_var = self.param_vars.get('viewer_thresholding_mode')
         if not mode_var: return
         mode = mode_var.get()
         otsu_widget_name = 'viewer_otsu_threshold_multiplier'; fixed_widget_name = 'viewer_fixed_threshold_value'
-        if otsu_widget_name in self.param_widgets:
+        
+        if otsu_widget_name in self.param_widgets and self.param_widgets[otsu_widget_name]:
             if mode == 'otsu': self.param_widgets[otsu_widget_name].pack(fill=tk.X, pady=2, padx=5)
             else: self.param_widgets[otsu_widget_name].pack_forget()
-        if fixed_widget_name in self.param_widgets:
+        
+        if fixed_widget_name in self.param_widgets and self.param_widgets[fixed_widget_name]:
             if mode == 'fixed': self.param_widgets[fixed_widget_name].pack(fill=tk.X, pady=2, padx=5)
             else: self.param_widgets[fixed_widget_name].pack_forget()
-        self.schedule_update()
-    
-    def _adjust_param_value(self, param_name, delta): # Unchanged
+        
+    def _adjust_param_value(self, param_name, delta):
         num_var, spec = self.param_vars.get(param_name), self.param_specs.get(param_name)
         if not num_var or not spec: return
         current_val, param_type = num_var.get(), spec['type']
@@ -350,7 +339,7 @@ class FeatureViewerApp:
         else: num_var.set(int(new_val))
         self.schedule_update()
 
-    def _on_param_entry_commit(self, param_name, event=None): # Unchanged
+    def _on_param_entry_commit(self, param_name, event=None):
         num_var, str_var, spec = self.param_vars.get(param_name), self.param_str_vars.get(param_name), self.param_specs.get(param_name)
         if not num_var or not str_var or not spec: return
         try:
@@ -366,11 +355,11 @@ class FeatureViewerApp:
         except ValueError: str_var.set(str(num_var.get())) 
         self.master.focus()
 
-    def _create_generic_param_control(self, parent_frame, name, spec, current_val_for_var): # MODIFIED: Label text cleaning logic
+    def _create_generic_param_control(self, parent_frame, name, spec, current_val_for_var):
         param_type = spec['type']; container = ttk.Frame(parent_frame)
         label_text_raw = name.replace('_', ' ').title()
-        # More generic cleaning for S3/S4 core params
-        label_text = re.sub(r"S\d\s*S\d\s*Core\s*", "", label_text_raw) # Remove "S3 S4 Core"
+        label_text = re.sub(r"Main Body Seg\s*", "", label_text_raw, flags=re.IGNORECASE) 
+        label_text = re.sub(r"Egg Detect\s*", "", label_text, flags=re.IGNORECASE) 
         label_text = re.sub(r"S\d\s*(Sub|Unsub|Comp|Well Mask|Enable|Viewer|)\s*", "", label_text, flags=re.IGNORECASE)
         
         ttk.Label(container, text=label_text.strip() + ":", width=25, anchor="w").pack(side=tk.LEFT, padx=(0,5))
@@ -390,7 +379,7 @@ class FeatureViewerApp:
             container.pack(fill=tk.X, pady=2, padx=5)
         self.param_widgets[name] = container 
     
-    def _get_global_param_specs(self): # Unchanged
+    def _get_global_param_specs(self):
         return {
             'viewer_source_illumination_type': {'options': ['darkfield', 'collimated'], 'type': 'choice'},
             'viewer_thresholding_mode': {'options': ['otsu', 'fixed'], 'type': 'choice'},
@@ -398,7 +387,7 @@ class FeatureViewerApp:
             'viewer_fixed_threshold_value': {'min': 0, 'max': 255, 'type': 'int', 'step': 1},
         }
 
-    def _get_s1_param_specs(self): # Unchanged
+    def _get_s1_param_specs(self):
         s1_sub_specs = {
             's1_bg_offset_val': {'min': BG_OFFSET_MIN, 'max': BG_OFFSET_MAX, 'type': 'int', 'step': 1},
             's1_sub_apply_convolution': {'type': 'bool'}, 
@@ -421,7 +410,7 @@ class FeatureViewerApp:
         }
         return {**s1_sub_specs, **s1_wm_specs, **s1_unsub_specs, **s1_comp_specs}
 
-    def _get_s2_param_specs(self): # Unchanged
+    def _get_s2_param_specs(self):
         return {
             's2_intermediate_crop_mode': {'options': ['bounding_box', 'centroid_square'], 'type': 'choice'},
             's2_intermediate_crop_square_size': {'min': 32, 'max': 512, 'type': 'int', 'step': 4},
@@ -434,29 +423,30 @@ class FeatureViewerApp:
             's2_enable_final_sharpness_filter': {'type': 'bool'},
         }
 
-    def _get_s3_s4_core_param_specs(self): # MODIFIED: Renamed and includes unsharp params
-        # These are based on s3_feat_cfg_base from config which now includes unsharp
+    def _get_main_body_seg_param_specs(self): 
         return {
-            's3_s4_core_enable_unsharp_masking': {'type': 'bool'},
-            's3_s4_core_unsharp_mask_sigma': {'min': 0.1, 'max': 5.0, 'type': 'float', 'res': 0.1},
-            's3_s4_core_unsharp_mask_amount': {'min': 0.1, 'max': 5.0, 'type': 'float', 'res': 0.1},
-            's3_s4_core_min_noise_size': {'min': 1, 'max': 1000, 'type': 'int', 'step': 10},
-            's3_s4_core_closing_selem_size': {'min': 0, 'max': 10, 'type': 'int', 'step': 1},
-            # These are S3-specific egg params, but kept under s3_s4_core prefix for simplicity in GUI creation if needed.
-            # Or separate them if S4 truly never uses them. For now, keeping structure.
-            's3_s4_core_gaussian_sigma': {'min': 0.1, 'max': 5.0, 'type': 'float', 'res': 0.1}, # For egg blur
-            's3_s4_core_min_significant_area': {'min': 10, 'max': 2000, 'type': 'int', 'step': 10}, # For main body to trigger egg
-            's3_s4_core_egg_posterior_pixel_fraction': {'min': 0.05, 'max': 0.95, 'type': 'float', 'res': 0.01}, 
-            's3_s4_core_egg_threshold_quantile': {'min': 0.01, 'max': 0.99, 'type': 'float', 'res': 0.01},
-            's3_s4_core_egg_min_area': {'min': 10, 'max': 5000, 'type': 'int', 'step': 10}, 
-            's3_s4_core_egg_max_area': {'min': 50, 'max': 20000, 'type': 'int', 'step': 100},
-            's3_s4_core_egg_min_solidity': {'min': 0.0, 'max': 1.0, 'type': 'float', 'res': 0.01}, 
-            's3_s4_core_egg_max_solidity': {'min': 0.0, 'max': 1.0, 'type': 'float', 'res': 0.01},
-            's3_s4_core_egg_min_eccentricity': {'min': 0.0, 'max': 1.0, 'type': 'float', 'res': 0.01}, 
-            's3_s4_core_orientation_diff_tolerance_deg': {'min': 0, 'max': 90, 'type': 'int', 'step': 1}
+            'main_body_seg_enable_unsharp_masking': {'type': 'bool'},
+            'main_body_seg_unsharp_mask_sigma': {'min': 0.1, 'max': 5.0, 'type': 'float', 'res': 0.1},
+            'main_body_seg_unsharp_mask_amount': {'min': 0.1, 'max': 5.0, 'type': 'float', 'res': 0.1},
+            'main_body_seg_min_noise_size': {'min': 1, 'max': 1000, 'type': 'int', 'step': 10},
+            'main_body_seg_closing_selem_size': {'min': 0, 'max': 10, 'type': 'int', 'step': 1},
+            'main_body_seg_min_significant_area': {'min': 10, 'max': 2000, 'type': 'int', 'step': 10},
         }
 
-    def create_global_param_controls(self, parent_frame): # Unchanged
+    def _get_egg_detect_param_specs(self): 
+        return {
+            'egg_detect_gaussian_sigma': {'min': 0.1, 'max': 5.0, 'type': 'float', 'res': 0.1}, 
+            'egg_detect_egg_posterior_pixel_fraction': {'min': 0.05, 'max': 0.95, 'type': 'float', 'res': 0.01}, 
+            'egg_detect_egg_threshold_quantile': {'min': 0.01, 'max': 0.99, 'type': 'float', 'res': 0.01},
+            'egg_detect_egg_min_area': {'min': 10, 'max': 5000, 'type': 'int', 'step': 10}, 
+            'egg_detect_egg_max_area': {'min': 50, 'max': 20000, 'type': 'int', 'step': 100},
+            'egg_detect_egg_min_solidity': {'min': 0.0, 'max': 1.0, 'type': 'float', 'res': 0.01}, 
+            'egg_detect_egg_max_solidity': {'min': 0.0, 'max': 1.0, 'type': 'float', 'res': 0.01},
+            'egg_detect_egg_min_eccentricity': {'min': 0.0, 'max': 1.0, 'type': 'float', 'res': 0.01}, 
+            'egg_detect_orientation_diff_tolerance_deg': {'min': 0, 'max': 90, 'type': 'int', 'step': 1}
+        }
+
+    def create_global_param_controls(self, parent_frame):
         global_specs = self._get_global_param_specs()
         ordered_global_params = ['viewer_source_illumination_type', 'viewer_thresholding_mode', 
                                  'viewer_otsu_threshold_multiplier', 'viewer_fixed_threshold_value']
@@ -464,34 +454,32 @@ class FeatureViewerApp:
             if name in self.default_params:
                 self._create_generic_param_control(parent_frame, name, global_specs[name], self.current_params.get(name, self.default_params[name]))
 
-    # S1 param control creation functions (create_s1_subtracted_param_controls etc.) remain unchanged
-
-    def create_s1_subtracted_param_controls(self, parent_frame): # Unchanged
+    def create_s1_subtracted_param_controls(self, parent_frame):
         s1_specs = self._get_s1_param_specs()
         ordered_params = ['s1_bg_offset_val', 's1_sub_apply_convolution', 
                           's1_sub_min_microorganism_area', 's1_sub_microorganism_blur_kernel']
         for name in ordered_params:
             if name in self.default_params: self._create_generic_param_control(parent_frame, name, s1_specs[name], self.current_params.get(name, self.default_params[name]))
     
-    def create_s1_wellmask_param_controls(self, parent_frame): # Unchanged
+    def create_s1_wellmask_param_controls(self, parent_frame):
         s1_specs = self._get_s1_param_specs()
         ordered_params = ['s1_well_mask_create_mask', 's1_well_mask_auto_center_mask','s1_well_mask_radius_px', 's1_well_mask_radius_fraction']
         for name in ordered_params:
             if name in self.default_params: self._create_generic_param_control(parent_frame, name, s1_specs[name], self.current_params.get(name, self.default_params[name]))
 
-    def create_s1_unsubtracted_param_controls(self, parent_frame): # Unchanged
+    def create_s1_unsubtracted_param_controls(self, parent_frame):
         s1_specs = self._get_s1_param_specs()
         ordered_params = ['s1_unsub_min_particle_area', 's1_unsub_local_otsu_roi_size'] 
         for name in ordered_params:
             if name in self.default_params: self._create_generic_param_control(parent_frame, name, s1_specs[name], self.current_params.get(name, self.default_params[name]))
                 
-    def create_s1_comparison_param_controls(self, parent_frame): # Unchanged
+    def create_s1_comparison_param_controls(self, parent_frame):
         s1_specs = self._get_s1_param_specs()
         ordered_params = ['s1_comp_search_radius_factor', 's1_comp_default_particle_area']
         for name in ordered_params:
             if name in self.default_params: self._create_generic_param_control(parent_frame, name, s1_specs[name], self.current_params.get(name, self.default_params[name]))
 
-    def create_s2_param_controls(self, parent_frame): # Unchanged
+    def create_s2_param_controls(self, parent_frame):
         ttk.Label(parent_frame, text="S2 Quality Filter Params", font='Helvetica 10 bold').pack(fill=tk.X, pady=(5,2))
         s2_specs = self._get_s2_param_specs()
         filter_toggles_frame = ttk.Labelframe(parent_frame, text="Filter Toggles", padding=5)
@@ -508,47 +496,42 @@ class FeatureViewerApp:
             if name in self.default_params:
                 self._create_generic_param_control(other_params_frame, name, s2_specs[name], self.current_params.get(name, self.default_params[name]))
 
-    def create_s3_s4_core_param_controls(self, parent_frame): # MODIFIED: Creates controls for S3/S4 core params
-        s3_s4_core_specs = self._get_s3_s4_core_param_specs()
-        # Order them logically: unsharp, then general segmentation, then egg (which are S3 only but controlled here)
-        ordered_core_params = [
-            's3_s4_core_enable_unsharp_masking', 's3_s4_core_unsharp_mask_sigma', 's3_s4_core_unsharp_mask_amount',
-            's3_s4_core_min_noise_size', 's3_s4_core_closing_selem_size',
-            # Following are S3 specific but part of the s3_feat_cfg_base, used by extract_ml_features
-            # 's3_s4_core_gaussian_sigma', 's3_s4_core_min_significant_area', 
-            # 's3_s4_core_egg_posterior_pixel_fraction', 's3_s4_core_egg_threshold_quantile',
-            # 's3_s4_core_egg_min_area', 's3_s4_core_egg_max_area', 's3_s4_core_egg_min_solidity', 
-            # 's3_s4_core_egg_max_solidity', 's3_s4_core_egg_min_eccentricity', 
-            # 's3_s4_core_orientation_diff_tolerance_deg'
+    def create_main_body_seg_param_controls(self, parent_frame): 
+        specs = self._get_main_body_seg_param_specs()
+        ordered_params = [
+            'main_body_seg_enable_unsharp_masking', 'main_body_seg_unsharp_mask_sigma', 
+            'main_body_seg_unsharp_mask_amount', 'main_body_seg_min_noise_size', 
+            'main_body_seg_closing_selem_size', 'main_body_seg_min_significant_area',
         ]
-        for name in ordered_core_params:
-            if name in self.default_params and name in s3_s4_core_specs: 
-                self._create_generic_param_control(parent_frame, name, s3_s4_core_specs[name], self.current_params.get(name, self.default_params[name]))
+        for name in ordered_params:
+            if name in self.default_params and name in specs: 
+                self._create_generic_param_control(parent_frame, name, specs[name], self.current_params.get(name, self.default_params[name]))
     
-    def create_s3_egg_param_controls(self, parent_frame): # NEW: Specific for S3 egg params
-        s3_s4_core_specs = self._get_s3_s4_core_param_specs() # Specs are still defined there
-        ordered_egg_params = [
-            's3_s4_core_gaussian_sigma', 's3_s4_core_min_significant_area', 
-            's3_s4_core_egg_posterior_pixel_fraction', 's3_s4_core_egg_threshold_quantile',
-            's3_s4_core_egg_min_area', 's3_s4_core_egg_max_area', 's3_s4_core_egg_min_solidity', 
-            's3_s4_core_egg_max_solidity', 's3_s4_core_egg_min_eccentricity', 
-            's3_s4_core_orientation_diff_tolerance_deg'
+    def create_egg_detect_param_controls(self, parent_frame): 
+        specs = self._get_egg_detect_param_specs()
+        ordered_params = [ 
+            'egg_detect_gaussian_sigma', 
+            'egg_detect_egg_posterior_pixel_fraction', 'egg_detect_egg_threshold_quantile',
+            'egg_detect_egg_min_area', 'egg_detect_egg_max_area', 'egg_detect_egg_min_solidity', 
+            'egg_detect_egg_max_solidity', 'egg_detect_egg_min_eccentricity', 
+            'egg_detect_orientation_diff_tolerance_deg'
         ]
-        for name in ordered_egg_params:
-            if name in self.default_params and name in s3_s4_core_specs: 
-                self._create_generic_param_control(parent_frame, name, s3_s4_core_specs[name], self.current_params.get(name, self.default_params[name]))
+        for name in ordered_params:
+            if name in self.default_params and name in specs:
+                self._create_generic_param_control(parent_frame, name, specs[name], self.current_params.get(name, self.default_params[name]))
     
-    def reset_parameters(self): # Unchanged
+    def reset_parameters(self): 
         if self.update_job_id: self.master.after_cancel(self.update_job_id); self.update_job_id = None
         for name, default_val in self.default_params.items():
             if name in self.param_vars: self.param_vars[name].set(default_val)
-        self.on_mode_change(); self.update_global_threshold_param_visibility()
+        self.on_mode_change() 
+        self.update_global_threshold_param_visibility() 
 
-    def dispatch_load_action(self): # Unchanged
+    def dispatch_load_action(self):
         if self.active_visualization_mode.get() in ["S1", "S2"]: self._load_s1_directory()
         else: self._load_s3_s4_image()
 
-    def _load_s1_directory(self): # Unchanged
+    def _load_s1_directory(self): 
         current_mode = self.active_visualization_mode.get()
         dir_path = filedialog.askdirectory(title=f"Select {current_mode} Image Directory")
         if not dir_path: self.status_label.config(text=f"{current_mode} dir selection cancelled."); self.master.after(10, self.on_mode_change); return
@@ -570,7 +553,7 @@ class FeatureViewerApp:
             self.master.after(10, self.on_mode_change) 
             if self.s1_image_directory_path and not self.s1_image_file_list_df.empty: self.schedule_update()
 
-    def _load_s3_s4_image(self): # Unchanged
+    def _load_s3_s4_image(self): 
         path = filedialog.askopenfilename(title="Select Image (S3/S4)", filetypes=(("Images", "*.png *.tif *.jpg"), ("All", "*.*")))
         if not path: self.status_label.config(text="S3/S4 selection cancelled."); self.master.after(10, self.on_mode_change); return
         self.image_path = path; self.s1_image_directory_path = None; self.s1_image_file_list_df = pd.DataFrame() 
@@ -578,7 +561,7 @@ class FeatureViewerApp:
         try:
             img = skimage.io.imread(path, as_gray=True)
             if img.ndim==3 and img.shape[2] in [3,4]: img = skimage.color.rgb2gray(img[:,:,:3])
-            self.image_array_gray_float = skimage.util.img_as_float(img) # Store original float image
+            self.image_array_gray_float = skimage.util.img_as_float(img) 
             self.status_label.config(text=f"Loaded: {os.path.basename(path)}.")
         except Exception as e:
             messagebox.showerror("Img Load Error", f"{e}")
@@ -587,7 +570,7 @@ class FeatureViewerApp:
             self.master.after(10, self.on_mode_change)
             if self.image_path: self.schedule_update()
 
-    def update_raw_image_display(self): # Unchanged
+    def update_raw_image_display(self): 
         self.ax_raw.clear(); mode = self.active_visualization_mode.get(); title = "Raw Input"; img_show = None
         if mode in ["S1", "S2"] and self.s1_image_directory_path and not self.s1_image_file_list_df.empty:
             fn = self.s1_selected_fg_filepath_var.get()
@@ -601,10 +584,9 @@ class FeatureViewerApp:
         else: self.ax_raw.imshow(np.zeros((100,100)), cmap='gray') 
         self.ax_raw.set_title(title, fontsize=8); self.ax_raw.set_axis_off(); self.canvas_raw.draw()
 
-    def collect_current_params(self): # MODIFIED
+    def collect_current_params(self):
         gui_params = {name: var.get() for name, var in self.param_vars.items()}
         
-        # Global viewer settings (illumination and thresholding)
         viewer_global_illum = gui_params.get('viewer_source_illumination_type')
         viewer_global_thresh_cfg = {
             'mode': gui_params.get('viewer_thresholding_mode'),
@@ -612,50 +594,36 @@ class FeatureViewerApp:
             'fixed_threshold_value': gui_params.get('viewer_fixed_threshold_value'),
         }
 
-        # S1 specific parameters
         self.current_params['s1_subtracted_effective'] = {k.replace('s1_sub_', ''):v for k,v in gui_params.items() if k.startswith('s1_sub_')}
         self.current_params['s1_subtracted_effective']['convolution_kernel'] = self.s1_convolution_kernel_list
-        self.current_params['s1_bg_offset_effective'] = gui_params.get('s1_bg_offset_val', self.default_params['s1_bg_offset_val'])
+        self.current_params['s1_bg_offset_effective'] = gui_params.get('s1_bg_offset_val')
         self.current_params['s1_well_mask_effective'] = {k.replace('s1_well_mask_', ''):v for k,v in gui_params.items() if k.startswith('s1_well_mask_')}
-        self.current_params['s1_unsubtracted_effective'] = { # Params for local unsubtracted analysis in S1
-            'min_particle_area': gui_params.get('s1_unsub_min_particle_area'),
-            'local_otsu_roi_size': gui_params.get('s1_unsub_local_otsu_roi_size') 
-        }
+        self.current_params['s1_unsubtracted_effective'] = {'min_particle_area': gui_params.get('s1_unsub_min_particle_area'), 'local_otsu_roi_size': gui_params.get('s1_unsub_local_otsu_roi_size')}
         self.current_params['s1_comparison_effective'] = {k.replace('s1_comp_', ''):v for k,v in gui_params.items() if k.startswith('s1_comp_')}
         
-        # S2 specific parameters
         self.current_params['s2_effective'] = {
-            'intermediate_crop': {
-                'mode': gui_params.get('s2_intermediate_crop_mode'),
-                'square_size': gui_params.get('s2_intermediate_crop_square_size'),
-                'bbox_column_mapping': get_config().get('stage_02_quality_filter', {}).get('intermediate_crop', {}).get('bbox_column_mapping', {'x': 'bounding_x', 'y': 'bounding_y', 'w': 'bounding_w', 'h': 'bounding_h'})
-            },
+            'intermediate_crop': {'mode': gui_params.get('s2_intermediate_crop_mode'), 'square_size': gui_params.get('s2_intermediate_crop_square_size'), 'bbox_column_mapping': get_config().get('stage_02_quality_filter', {}).get('intermediate_crop', {}).get('bbox_column_mapping', {}) },
             'black_mask_check': {'min_area_ratio': gui_params.get('s2_black_mask_min_area_ratio')},
-            'filters_enabled': { 
-                'black_mask_artifact': gui_params.get('s2_enable_black_mask_filter', True),
-                'on_crop_boundary': gui_params.get('s2_enable_on_boundary_filter', True),
-                'final_sharpness': gui_params.get('s2_enable_final_sharpness_filter', True),
-            },
+            'filters_enabled': {'black_mask_artifact': gui_params.get('s2_enable_black_mask_filter'), 'on_crop_boundary': gui_params.get('s2_enable_on_boundary_filter'), 'final_sharpness': gui_params.get('s2_enable_final_sharpness_filter')},
             'sharpness_metrics': AVAILABLE_SHARPNESS_METRICS, 
             'final_sharp_object_filter': { f"{gui_params.get('s2_final_sharpness_metric_to_filter')}_min": gui_params.get('s2_final_sharpness_threshold_min')},
             'final_sharp_crop_size': gui_params.get('s2_final_crop_size'),
         }
         
-        # S3/S4 Core Segmentation & S3 Egg Detection Parameters
-        # This will be a flat dictionary combining global settings and specific S3/S4 core params
-        self.current_params['s3_s4_segmentation_and_feature_params'] = {
+        s3_s4_params = {
             'source_image_illumination_type': viewer_global_illum,
-            'thresholding_mode': viewer_global_thresh_cfg['mode'],
-            'otsu_threshold_multiplier': viewer_global_thresh_cfg['otsu_threshold_multiplier'],
-            'fixed_threshold_value': viewer_global_thresh_cfg['fixed_threshold_value'],
+            **viewer_global_thresh_cfg,
         }
-        for k, v_spec in self._get_s3_s4_core_param_specs().items(): # Iterate over defined S3/S4 specs
-            param_key_short = k.replace('s3_s4_core_', '')
-            self.current_params['s3_s4_segmentation_and_feature_params'][param_key_short] = gui_params.get(k)
+        for k_gui, spec_main in self._get_main_body_seg_param_specs().items():
+            s3_s4_params[k_gui.replace('main_body_seg_', '')] = gui_params.get(k_gui)
+        for k_gui, spec_egg in self._get_egg_detect_param_specs().items():
+            s3_s4_params[k_gui.replace('egg_detect_', '')] = gui_params.get(k_gui)
+            
+        self.current_params['s3_s4_segmentation_and_feature_params'] = s3_s4_params
             
         return self.current_params
 
-    def process_and_display_safe(self): # Unchanged
+    def process_and_display_safe(self): 
         active_mode, valid_input = self.active_visualization_mode.get(), False
         if active_mode in ["S1", "S2"]:
             if self.s1_image_directory_path and not self.s1_image_file_list_df.empty and self.s1_selected_fg_filepath_var.get(): valid_input = True
@@ -664,7 +632,7 @@ class FeatureViewerApp:
         else: self.status_label.config(text="S3/S4: Load image.")
         if not valid_input:
             if self.update_job_id: self.master.after_cancel(self.update_job_id); self.update_job_id = None
-            if self.fig_dynamic_vis: # Check if figure exists
+            if self.fig_dynamic_vis: 
                 self.fig_dynamic_vis.clear()
                 self.ax_dynamic_vis = self.fig_dynamic_vis.add_subplot(111)
                 self.ax_dynamic_vis.set_axis_off()
@@ -684,7 +652,7 @@ class FeatureViewerApp:
         finally:
             if self.update_job_id: self.master.after_cancel(self.update_job_id); self.update_job_id = None
 
-    def process_and_display(self): # MODIFIED for S3/S4 logic
+    def process_and_display(self): 
         params = self.collect_current_params() 
         mode = self.active_visualization_mode.get()
         
@@ -693,8 +661,6 @@ class FeatureViewerApp:
         elif self.ax_dynamic_vis is not None: self.ax_dynamic_vis.clear(); self.ax_dynamic_vis.set_axis_off()
         self.fig_dynamic_vis.clear() 
         
-        # These are viewer's global settings for illumination and thresholding,
-        # which will be part of the comprehensive dict for S3/S4 processing.
         viewer_global_source_illum = self.param_vars['viewer_source_illumination_type'].get()
         viewer_global_thresh_cfg = {
             'mode': self.param_vars['viewer_thresholding_mode'].get(),
@@ -702,16 +668,28 @@ class FeatureViewerApp:
             'fixed_threshold_value': self.param_vars['viewer_fixed_threshold_value'].get(),
         }
 
-        if mode == "S1": # S1 logic remains largely the same as it has its own param groups
+        if mode == "S1":
             axes_s1 = self.fig_dynamic_vis.subplots(2, 2) 
             self.ax_dynamic_vis = axes_s1 
             s1_sub_eff = params['s1_subtracted_effective']; s1_wm_eff = params['s1_well_mask_effective']
             s1_unsub_eff = params['s1_unsubtracted_effective']; s1_comp_eff = params['s1_comparison_effective']
             s1_bg_off = params['s1_bg_offset_effective']
             fg_fn = self.s1_selected_fg_filepath_var.get()
-            self.fig_dynamic_vis.suptitle(f"S1 Output (Local Unsub) - FG: {fg_fn}", fontsize=10)
-            fg_row = self.s1_image_file_list_df[self.s1_image_file_list_df['filename'] == fg_fn].iloc[0]
-            bg_row = self.s1_image_file_list_df.iloc[(fg_row.name + s1_bg_off) % len(self.s1_image_file_list_df)]
+            
+            bg_filename_s1 = "N/A" 
+            if not self.s1_image_file_list_df.empty and fg_fn:
+                fg_row_series_list = self.s1_image_file_list_df[self.s1_image_file_list_df['filename'] == fg_fn]
+                if fg_row_series_list.empty: raise ValueError(f"S1 Viewer: Selected FG filename '{fg_fn}' not found in DataFrame.")
+                fg_row = fg_row_series_list.iloc[0]
+                fg_row_positional_index = self.s1_image_file_list_df.index.get_loc(fg_row.name)
+                
+                bg_df_idx = (fg_row_positional_index + s1_bg_off) % len(self.s1_image_file_list_df)
+                bg_row = self.s1_image_file_list_df.iloc[bg_df_idx]
+                bg_filename_s1 = bg_row['filename']
+            else: raise ValueError("S1 Viewer: Image list or FG selection is empty.")
+
+            self.fig_dynamic_vis.suptitle(f"S1 Output - FG: {fg_fn}\nBG: {bg_filename_s1}", fontsize=9, y=0.99)
+
             img_fg_orig_uint8 = core_load_image(fg_row['full_path'],'gray')
             img_bg_orig_uint8 = core_load_image(bg_row['full_path'],'gray')
             if img_fg_orig_uint8 is None or img_bg_orig_uint8 is None: raise ValueError("S1 Viewer: FG/BG load fail.")
@@ -752,14 +730,30 @@ class FeatureViewerApp:
                     axes_s1[1,1].tick_params(axis='both', which='major', labelsize=7); axes_s1[1,1].set_xlim(0,1)
                 else: axes_s1[1,1].text(0.5,0.5,"No Hist Data", ha='center', va='center'); axes_s1[1,1].set_axis_off()
             else: axes_s1[1,0].text(0.5,0.5,"No ROI", ha='center', va='center'); axes_s1[1,0].set_axis_off(); axes_s1[1,1].text(0.5,0.5,"No Hist", ha='center', va='center'); axes_s1[1,1].set_axis_off()
+            self.fig_dynamic_vis.tight_layout(rect=[0, 0, 1, 0.96]) 
 
-        elif mode == "S2": # S2 logic remains largely the same
+        elif mode == "S2": 
             self.ax_dynamic_vis = self.fig_dynamic_vis.add_subplot(111) 
             self.s2_status_text_var.set("S2 Status: Simulating S1 for frame...")
             s1_sub_eff = params['s1_subtracted_effective']; s1_wm_eff = params['s1_well_mask_effective']; s1_unsub_eff = params['s1_unsubtracted_effective']; s1_comp_eff = params['s1_comparison_effective']; s1_bg_off = params['s1_bg_offset_effective']; s2_eff_config = params['s2_effective']
-            fg_fn = self.s1_selected_fg_filepath_var.get(); self.fig_dynamic_vis.suptitle(f"S2 Quality Filter Output - FG: {fg_fn}", fontsize=10)
-            fg_row = self.s1_image_file_list_df[self.s1_image_file_list_df['filename'] == fg_fn].iloc[0]; img_fg_orig_uint8_s2 = core_load_image(fg_row['full_path'], 'gray'); img_fg_orig_color_s2 = core_load_image(fg_row['full_path'], 'color') 
-            bg_row_s2 = self.s1_image_file_list_df.iloc[(fg_row.name + s1_bg_off) % len(self.s1_image_file_list_df)]; img_bg_orig_uint8_s2 = core_load_image(bg_row_s2['full_path'], 'gray')
+            fg_fn = self.s1_selected_fg_filepath_var.get()
+            
+            bg_filename_s2 = "N/A"
+            if not self.s1_image_file_list_df.empty and fg_fn:
+                fg_row_series_list = self.s1_image_file_list_df[self.s1_image_file_list_df['filename'] == fg_fn]
+                if fg_row_series_list.empty: raise ValueError(f"S2 Viewer: Selected FG filename '{fg_fn}' not found.")
+                fg_row = fg_row_series_list.iloc[0]
+                fg_row_positional_index = self.s1_image_file_list_df.index.get_loc(fg_row.name)
+
+                bg_df_idx = (fg_row_positional_index + s1_bg_off) % len(self.s1_image_file_list_df)
+                bg_row_s2 = self.s1_image_file_list_df.iloc[bg_df_idx]
+                bg_filename_s2 = bg_row_s2['filename']
+            else: raise ValueError("S2 Viewer: Image list or FG selection is empty.")
+
+            self.fig_dynamic_vis.suptitle(f"S2 Quality Filter Output - FG: {fg_fn}\n(Sim. S1 BG: {bg_filename_s2})", fontsize=9, y=0.99)
+
+            img_fg_orig_uint8_s2 = core_load_image(fg_row['full_path'], 'gray'); img_fg_orig_color_s2 = core_load_image(fg_row['full_path'], 'color') 
+            img_bg_orig_uint8_s2 = core_load_image(bg_row_s2['full_path'], 'gray') 
             if img_fg_orig_uint8_s2 is None or img_fg_orig_color_s2 is None or img_bg_orig_uint8_s2 is None: raise ValueError("S2 Viewer: FG/BG load fail.")
             well_mask_uint8_s2 = None
             if s1_wm_eff.get('create_mask'): _, well_mask_uint8_s2 = mask_well_area(img_fg_orig_uint8_s2.copy(), s1_wm_eff, self.s1_system_config_from_file)
@@ -791,7 +785,7 @@ class FeatureViewerApp:
                 s2_intermediate_cropper = ParticleCropper(s2_eff_config['intermediate_crop']); s2_temp_dir = os.path.join(self.temp_dir.name, f"s2_viewer_crops_{fg_fn.replace('.png','').replace('.','_')}"); os.makedirs(s2_temp_dir, exist_ok=True)
                 s2_single_particle_results_list = []
                 for _, s1_row in s1_particles_for_frame_df.iterrows(): 
-                    s2_res_obj = _process_single_particle_for_quality(s1_row, img_fg_orig_color_s2, img_fg_orig_uint8_s2, s2_intermediate_cropper, s2_temp_dir, s2_eff_config, viewer_global_source_illum, viewer_global_thresh_cfg['mode'], viewer_global_thresh_cfg['otsu_threshold_multiplier'], viewer_global_thresh_cfg['fixed_threshold_value'])
+                    s2_res_obj = _process_single_particle_for_quality(s1_row, img_fg_orig_color_s2, img_fg_orig_uint8_s2, s2_intermediate_cropper, s2_temp_dir, s2_eff_config, viewer_global_source_illum, viewer_global_thresh_cfg )
                     s2_res_obj.input_particle_data['s1_viewer_fused_idx'] = s1_row['s1_viewer_fused_idx']; s2_single_particle_results_list.append(s2_res_obj.to_dict())
                 s2_detailed_df = pd.DataFrame(s2_single_particle_results_list)
                 s2_merged_for_score = pd.merge(s1_particles_for_frame_df, s2_detailed_df, left_on='s1_viewer_fused_idx', right_on='input_particle_index', how='left', suffixes=('', '_s2analysis'))
@@ -826,52 +820,54 @@ class FeatureViewerApp:
                 try:
                     if os.path.exists(s2_temp_dir): shutil.rmtree(s2_temp_dir)
                 except Exception: pass
+            self.fig_dynamic_vis.tight_layout(rect=[0, 0, 1, 0.96])
         
         elif mode in ["S3", "S4"]: 
             self.ax_dynamic_vis = self.fig_dynamic_vis.add_subplot(111) 
-            # Use the comprehensive param dict from collect_current_params
             s3_s4_processing_params = params['s3_s4_segmentation_and_feature_params']
             
             self.ax_dynamic_vis.set_axis_off(); img_f_original = self.image_array_gray_float; title_b = os.path.basename(self.image_path or '')
             
-            # Illumination and thresholding are now part of s3_s4_processing_params
             viewer_illum_s3s4_eff = s3_s4_processing_params.get('source_image_illumination_type')
             viewer_thresh_s3s4_eff = s3_s4_processing_params.get('thresholding_mode')
             unsharp_enabled_eff = s3_s4_processing_params.get('enable_unsharp_masking')
-            
             title_suffix = f"(Illum: {viewer_illum_s3s4_eff}, Thresh: {viewer_thresh_s3s4_eff}, Unsharp: {'On' if unsharp_enabled_eff else 'Off'})"
 
             if mode == "S3":
                 self.ax_dynamic_vis.set_title(f"S3: {title_b} {title_suffix}", fontsize=8)
-                # extract_ml_features now uses segment_main_body internally
-                # Pass the original float image, segment_main_body will handle inversion.
                 s3f,s3mp,s3eap = extract_ml_features(self.image_path, s3_s4_processing_params, img_f_original) 
                 if not (s3f or s3mp or s3eap): self.ax_dynamic_vis.imshow(img_f_original, cmap='gray'); self.ax_dynamic_vis.set_title("S3: Failed", fontsize=8)
                 else:
                     tmp_s3_vis = os.path.join(self.temp_dir.name, "s3_viewer_vis.png")
-                    # Pass img_f_original for visualization, as visualize_ml_features expects original and handles its own float conversion etc.
                     visualize_ml_features(img_f_original, s3mp, s3eap, tmp_s3_vis, ml_feature_params=s3_s4_processing_params) 
                     if os.path.exists(tmp_s3_vis): self.ax_dynamic_vis.imshow(skimage.io.imread(tmp_s3_vis))
                     else: self.ax_dynamic_vis.imshow(img_f_original, cmap='gray')
             elif mode == "S4":
                 self.ax_dynamic_vis.set_title(f"S4: {title_b} {title_suffix}", fontsize=8)
-                # Get S3-style main_props for consistent posterior end in visualization
-                _, s3mp_for_s4_vis, _ = extract_ml_features(self.image_path, s3_s4_processing_params, img_f_original)
+                _, _, s4_main_props_from_seg = segment_main_body_from_image_float(img_f_original.copy(), s3_s4_processing_params)
                 
-                # Get S4 masks using the unified segmentation
-                s4rm, s4fm, _ = segment_main_body_from_image_float(img_f_original, s3_s4_processing_params)
+                s4_main_props_for_vis = None
+                if s4_main_props_from_seg:
+                    egg_post_frac = s3_s4_processing_params.get('egg_posterior_pixel_fraction', 0.45) 
+                    s4_main_props_for_vis, _, _ = _calculate_and_attach_posterior_attributes(
+                        s4_main_props_from_seg,
+                        img_f_original.shape,
+                        egg_post_frac
+                    )
+                
+                s4rm, s4fm, _ = segment_main_body_from_image_float(img_f_original.copy(), s3_s4_processing_params) 
                 
                 if not (s4rm is not None or s4fm is not None) : self.ax_dynamic_vis.imshow(img_f_original, cmap='gray'); self.ax_dynamic_vis.set_title("S4: Segmentation Failed", fontsize=8)
                 else:
                     tmp_s4_vis = os.path.join(self.temp_dir.name, "s4_viewer_vis.png")
-                    visualize_detailed_morphology(img_f_original, s3mp_for_s4_vis, s4rm, s4fm, tmp_s4_vis)
+                    visualize_detailed_morphology(img_f_original, s4_main_props_for_vis, s4rm, s4fm, tmp_s4_vis)
                     if os.path.exists(tmp_s4_vis): self.ax_dynamic_vis.imshow(skimage.io.imread(tmp_s4_vis))
                     else: self.ax_dynamic_vis.imshow(img_f_original, cmap='gray')
+            self.fig_dynamic_vis.tight_layout() # General tight_layout for S3/S4
         self.canvas_dynamic_vis.draw()
 
-    # S2 specific helper methods (update_s2_sharp_particle_selector, on_s2_sharp_particle_selected, update_s2_single_crop_display)
-    # remain unchanged from your provided version.
-    def update_s2_sharp_particle_selector(self): # Unchanged
+
+    def update_s2_sharp_particle_selector(self):
         if not self.s2_final_sharp_particles_df_for_viewer.empty:
             df = self.s2_final_sharp_particles_df_for_viewer
             idx_col = 's1_viewer_fused_idx' if 's1_viewer_fused_idx' in df.columns else 'input_particle_index'
@@ -884,9 +880,9 @@ class FeatureViewerApp:
         else: self.s2_sharp_particle_selector['values'] = []; self.s2_sharp_particle_selector.config(state="disabled"); self.s2_selected_sharp_particle_var.set("")
         self.update_s2_single_crop_display()
 
-    def on_s2_sharp_particle_selected(self, event=None): self.update_s2_single_crop_display() # Unchanged
+    def on_s2_sharp_particle_selected(self, event=None): self.update_s2_single_crop_display()
 
-    def update_s2_single_crop_display(self): # Unchanged
+    def update_s2_single_crop_display(self):
         self.ax_s2_single_crop.clear(); self.s2_sharp_particle_attributes_text.config(state=tk.NORMAL); self.s2_sharp_particle_attributes_text.delete(1.0, tk.END)
         selected_particle_str = self.s2_selected_sharp_particle_var.get()
         if not selected_particle_str or self.s2_final_sharp_particles_df_for_viewer.empty:
@@ -908,9 +904,18 @@ class FeatureViewerApp:
                 final_crop_gray, _ = final_cropper.crop_single_particle_from_image(orig_color_img, orig_gray_img, particle_series_for_crop, output_dir_for_crop=None)
                 if final_crop_gray is not None:
                     final_crop_bgr = cv2.cvtColor(final_crop_gray, cv2.COLOR_GRAY2BGR)
-                    viewer_illum_s2 = self.param_vars['viewer_source_illumination_type'].get(); viewer_thresh_mode_s2 = self.param_vars['viewer_thresholding_mode'].get()
-                    viewer_otsu_mult_s2 = self.param_vars['viewer_otsu_threshold_multiplier'].get(); viewer_fixed_val_s2 = self.param_vars['viewer_fixed_threshold_value'].get()
-                    is_on_this_crop_boundary = detect_cropped_particle_on_boundary(final_crop_gray, f"viewer_fc_S1fusedIdx{s1_fused_idx}.png", viewer_illum_s2, viewer_thresh_mode_s2, viewer_otsu_mult_s2, viewer_fixed_val_s2)
+                    viewer_illum_s2 = self.param_vars['viewer_source_illumination_type'].get(); 
+                    viewer_thresh_params_s2 = {
+                        'thresholding_mode': self.param_vars['viewer_thresholding_mode'].get(),
+                        'otsu_threshold_multiplier': self.param_vars['viewer_otsu_threshold_multiplier'].get(),
+                        'fixed_threshold_value': self.param_vars['viewer_fixed_threshold_value'].get()
+                    }
+                    is_on_this_crop_boundary = detect_cropped_particle_on_boundary(
+                        final_crop_gray, 
+                        f"viewer_fc_S1fusedIdx{s1_fused_idx}.png", 
+                        viewer_illum_s2, 
+                        viewer_thresh_params_s2 
+                    )
                     self.ax_s2_single_crop.imshow(final_crop_bgr); self.ax_s2_single_crop.set_title(f"S2 Final Crop ({final_crop_gray.shape[1]}x{final_crop_gray.shape[0]})")
                     attr_text = f"S1 Frame: {fg_fn}\nS1 Fused Idx: {s1_fused_idx}\nGlobal Centroid: X={int(crop_centroid_x)}, Y={int(crop_centroid_y)}\n\n"
                     attr_text += f"S2 Intermed. Crop: {particle_attrs.get('cropped_filename', 'N/A')}\n  Black Mask: {particle_attrs.get('is_black_mask', 'N/A')}\n  On Intermed. Boundary: {particle_attrs.get('is_on_crop_boundary', 'N/A')}\n\n" 
@@ -921,7 +926,7 @@ class FeatureViewerApp:
             except Exception as e: self.ax_s2_single_crop.imshow(np.zeros((100,100)), cmap='gray'); self.s2_sharp_particle_attributes_text.insert(tk.END, f"Error: {e}")
         self.ax_s2_single_crop.set_axis_off(); self.canvas_s2_single_crop.draw(); self.s2_sharp_particle_attributes_text.config(state=tk.DISABLED)
 
-def main(): # Unchanged
+def main(): 
     try: load_config(os.path.join(PROJECT_ROOT, "config", "pipeline_config.yml"))
     except Exception as e: messagebox.showerror("Startup Error", f"Failed to load config: {e}"); return
     root = tk.Tk(); FeatureViewerApp(root); root.mainloop()
