@@ -5,33 +5,57 @@ sample_subdir_name: "20250409_plate4_well1" # Example, will be overridden by run
 
 # Logging Configuration
 logging:
-  level: "DEBUG"  # Overall most detailed level for file logging
-  console_level: "INFO" # Level for console output (INFO, WARNING, ERROR, CRITICAL)
+  level: "DEBUG" 
+  console_level: "INFO" 
   format: "%(asctime)s - %(levelname)s - %(name)s - %(module)s.%(funcName)s - %(message)s"
   date_format: "%Y-%m-%d %H:%M:%S"
   log_file: "pipeline_run.log" 
-  # Example: "logs/pipeline_run.log" 
-  # If null or not present, logs go to console.
-  # Default filemode is 'a' (append).
-
+  
 # System and Image Parameters
 system:
   image_width_px: 4504 
   image_height_px: 4504 
-  source_image_illumination_type: "collimated" #  "collimated" or "darkfield"
+  source_image_illumination_type: "collimated" 
   thresholding:
     mode: "otsu" 
-    otsu_threshold_multiplier: 1 
+    otsu_threshold_multiplier: 0.9 
     fixed_threshold_value: 70 
   
 # Stage 1: Initial Detection
 stage_01_initial_detection:
   bg_offset_val: 180 
-  well_masking:
+  well_masking: # This is the existing well_masking (circular, potentially auto-centered)
     create_mask: True
     auto_center_mask: True
     radius_px: 2000 
     radius_fraction: 0.75 
+
+  # NEW: Parameters for black plate well identification and brightness adjustment
+  black_plate_well_analysis:
+    enable_brightness_adjustment: true # Master switch for the new brightness adjustment logic
+    
+    # Parameters for create_well_mask_black_plate
+    well_identification: 
+      low_threshold_value: 10 # For separating well from very dark plate background
+      min_expected_diameter_px: 1500 # Adjust based on your setup (magnification, well size)
+      max_expected_diameter_px: 4000 # Adjust based on your setup
+      min_circularity: 0.80          # How circular the detected well should be (0 to 1)
+
+    # Parameters for calculate_well_brightness_peak (used by calc_avg_well_brightness and match_well_brightness)
+    brightness_peak_calculation:
+      min_intensity_for_peak_search: 75 # Helps guide peak finding if using argmax, less critical for percentile
+      percentile_for_peak_proxy: 75     # Use median of top (100-percentile)% brightest pixels in well
+
+    # Parameters for match_well_brightness
+    brightness_matching:
+      max_peak_difference_allowed: 15   # Max allowed diff between FG & BG well peaks before attempting adjustment
+      adjustment_method: "global_shift" # "global_shift" or "histogram_matching" (current hist_match is basic)
+      # For global_shift method:
+      target_peak_offset_after_shift: 3 # Aim to make adjusted BG well peak this many values dimmer than FG (or target)
+      # For histogram_matching (if developed further):
+      # hist_match_percentile_range: [2, 98] # Percentiles to use for intensity rescaling during hist matching
+
+  # Parameters for SUBTRACTED IMAGE ANALYSIS (original particle_analysis block)
   particle_analysis: 
     apply_convolution: False
     convolution_kernel: 
@@ -43,9 +67,11 @@ stage_01_initial_detection:
     min_microorganism_area: 500 
     microorganism_blur_kernel: 5 
     filter_by_shape: False 
+  # Parameters for UNSUBTRACTED (original FG) image analysis
   unsubtracted_particle_analysis:
     min_particle_area: 1000     
     local_otsu_roi_size: 150   
+  # Parameters for compare_detected_particles
   particle_comparison:
     search_radius_factor: 2.0
     default_particle_area: 2000 
@@ -57,53 +83,33 @@ stage_01_initial_detection:
     enabled: False 
     output_subdir_suffix: "_wim_particle_detection_debug"
 
-# Stage 2: Quality Filter
+# Stage 2: Quality Filter (unchanged)
 stage_02_quality_filter:
   intermediate_crop:
     mode: "centroid_square" 
     square_size: 150 
-    bbox_column_mapping: 
-      x: "bounding_x"
-      y: "bounding_y"
-      w: "bounding_w"
-      h: "bounding_h"
-  black_mask_check:
-    min_area_ratio: 0.05 
-  sharpness_metrics: 
-    - "variance_laplacian"
-    - "tenengrad_variance"
-    - "energy_laplacian" 
-    - "energy_gradient"
-  final_sharp_object_filter: 
-    combined_sharpness_min: 0.25
+    bbox_column_mapping: {x: "bounding_x", y: "bounding_y", w: "bounding_w", h: "bounding_h"}
+  black_mask_check: {min_area_ratio: 0.05}
+  sharpness_metrics: ["variance_laplacian", "tenengrad_variance", "energy_laplacian", "energy_gradient"]
+  final_sharp_object_filter: {combined_sharpness_min: 0.25}
   final_sharp_crop_size: 150 
-  filters_enabled:
-    black_mask_artifact: true   
-    on_crop_boundary: true    
-    final_sharpness: true     
+  filters_enabled: {black_mask_artifact: true, on_crop_boundary: true, final_sharpness: true}     
 
-# Stage 3: ML Classification
+# Stage 3: ML Classification (unchanged from previous step)
 stage_03_ml_classification:
   model_filename: "rf_fem_classifier.joblib"
   scaler_filename: "rf_fem_scaler.joblib"
   image_extensions: [".png", ".tif", ".tiff", ".jpg", ".jpeg"] 
-  
-  # MODIFIED: Restructured feature_extraction_params
   feature_extraction_params:
-    main_body_segmentation: # Parameters for segment_main_body_from_image_float
-      enable_unsharp_masking: true 
-      unsharp_mask_sigma: 1.8       
-      unsharp_mask_amount: 1.6      
+    main_body_segmentation:
+      enable_unsharp_masking: false 
+      unsharp_mask_sigma: 1.0       
+      unsharp_mask_amount: 1.0      
       min_noise_size: 50
-      closing_selem_size: 3 # Radius of disk for binary closing. 0 to disable.
-      # Note: min_significant_area is applied *after* segmentation in extract_ml_features
-      # to decide if egg detection proceeds. It's not a direct segmentation param for segment_main_body.
-      # However, segment_main_body_from_image_float does accept it to potentially filter its props.
-      # Keeping it here for now as part of the "main body context".
+      closing_selem_size: 3 
       min_significant_area: 300 
-
-    egg_detection: # Parameters specific to egg finding logic within extract_ml_features
-      gaussian_sigma: 1.0          # Sigma for Gaussian blur specifically for EGG detection
+    egg_detection:
+      gaussian_sigma: 1.0          
       egg_posterior_pixel_fraction: 0.4 
       egg_threshold_quantile: 0.8 
       egg_min_area: 50             
@@ -112,10 +118,7 @@ stage_03_ml_classification:
       egg_max_solidity: 0.99       
       egg_min_eccentricity: 0.2    
       orientation_diff_tolerance_deg: 85
-      # min_significant_area from main_body_segmentation is used by extract_ml_features 
-      # to decide whether to proceed with egg detection logic.
-
-  training_params:
+  training_params: # ... (unchanged)
     good_data_subdir: "good" 
     bad_data_subdir: "bad"   
     test_split_size: 0.25
@@ -128,14 +131,10 @@ stage_03_ml_classification:
       class_weight: ["balanced", null]
     grid_search_cv_folds: 3
     grid_search_scoring: "f1_weighted" 
-  post_ml_filters:
-    deduplication:
-      enabled: true
-      proximity_threshold_pixels: 100 
-      max_adjacent_frame_difference: 2 
-    boundary_recheck:
-      enabled: true
+  post_ml_filters: # ... (unchanged)
+    deduplication: {enabled: true, proximity_threshold_pixels: 100, max_adjacent_frame_difference: 2}
+    boundary_recheck: {enabled: true}
 
-# Stage 4: Detailed Morphological Characterization
+# Stage 4: Detailed Morphological Characterization (unchanged)
 stage_04_morphological_characterization:
   enabled: true

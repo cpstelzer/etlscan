@@ -35,8 +35,8 @@ try:
     from src.utils.common_exceptions import ConfigError, DataValidationError 
     from src.stages.stage_01_initial_detection import (
         _parse_image_filenames, 
-        _analyze_single_subtracted_image_global_thresh, 
         _filter_image_df,
+        _analyze_single_subtracted_image_global_thresh, 
         _analyze_unsubtracted_locally, 
         _compare_and_fuse_particle_dfs 
     )
@@ -51,6 +51,8 @@ try:
     from src.core.masking_operations import mask_well_area, apply_mask 
     from src.core.region_props_calculator import find_contours as core_find_contours, calculate_contour_measurements
     from src.core.segmentation import segment_main_body_from_image_float 
+    from src.core.well_analysis import create_well_mask_black_plate, calculate_well_brightness_peak, match_well_brightness
+
 
 except ImportError as e:
     print(f"Error importing modules: {e}", file=sys.stderr); sys.exit(1)
@@ -66,14 +68,14 @@ DEFAULT_ROI_SIZE_MIN, DEFAULT_ROI_SIZE_MAX = 30, 500
 class FeatureViewerApp:
     def __init__(self, master):
         self.master = master
-        master.title("Interactive Viewer (Config Restructured)"); master.geometry("1600x950") 
+        master.title("Interactive Viewer (Well Brightness Adjust)"); master.geometry("1600x950") 
         self.image_path = None; self.image_array_gray_float = None 
         self.default_params = {}; self.current_params = {} 
         self.param_vars = {} 
         self.param_str_vars = {} 
         self.param_specs = {} 
         self.param_widgets = {} 
-        self.update_job_id = None; self.active_visualization_mode = tk.StringVar(value="S3") 
+        self.update_job_id = None; self.active_visualization_mode = tk.StringVar(value="S1")
         self.s1_image_directory_path = None; self.s1_image_file_list_df = pd.DataFrame()
         self.s1_selected_fg_filepath_var = tk.StringVar()
         self.s1_convolution_kernel_list = None; self.s1_raw_config = {} 
@@ -106,7 +108,8 @@ class FeatureViewerApp:
             s1_particle_cfg = self.s1_raw_config.get('particle_analysis', {}) 
             s1_unsub_particle_cfg = self.s1_raw_config.get('unsubtracted_particle_analysis', {})
             s1_comp_cfg = self.s1_raw_config.get('particle_comparison', {}) 
-            s1_well_mask_cfg = self.s1_raw_config.get('well_masking', {})
+            s1_well_mask_cfg = self.s1_raw_config.get('well_masking', {}) 
+            s1_black_plate_well_analysis_cfg = self.s1_raw_config.get('black_plate_well_analysis', {})
             
             s2_cfg = cfg.get('stage_02_quality_filter', {})
             s2_intermediate_crop_cfg = s2_cfg.get('intermediate_crop', {})
@@ -130,7 +133,7 @@ class FeatureViewerApp:
                 's1_sub_apply_convolution': s1_particle_cfg.get('apply_convolution', True),
                 's1_sub_min_microorganism_area': s1_particle_cfg.get('min_microorganism_area', 200),
                 's1_sub_microorganism_blur_kernel': s1_particle_cfg.get('microorganism_blur_kernel', 5),
-                's1_well_mask_create_mask': s1_well_mask_cfg.get('create_mask', True),
+                's1_well_mask_create_mask': s1_well_mask_cfg.get('create_mask', True), 
                 's1_well_mask_auto_center_mask': s1_well_mask_cfg.get('auto_center_mask', True),
                 's1_well_mask_radius_px': s1_well_mask_cfg.get('radius_px', 2000),
                 's1_well_mask_radius_fraction': s1_well_mask_cfg.get('radius_fraction', 0.67),
@@ -139,6 +142,13 @@ class FeatureViewerApp:
                 's1_comp_search_radius_factor': s1_comp_cfg.get('search_radius_factor', 2.0),
                 's1_comp_default_particle_area': s1_comp_cfg.get('default_particle_area', 500),
             })
+            self.default_params['s1_bpwa_enable_brightness_adjustment'] = s1_black_plate_well_analysis_cfg.get('enable_brightness_adjustment', True)
+            s1_bpwa_well_id_cfg = s1_black_plate_well_analysis_cfg.get('well_identification', {})
+            self.default_params.update({f"s1_bpwa_well_id_{k}": v for k,v in s1_bpwa_well_id_cfg.items()})
+            s1_bpwa_peak_cfg = s1_black_plate_well_analysis_cfg.get('brightness_peak_calculation', {})
+            self.default_params.update({f"s1_bpwa_peak_{k}": v for k,v in s1_bpwa_peak_cfg.items()})
+            s1_bpwa_match_cfg = s1_black_plate_well_analysis_cfg.get('brightness_matching', {})
+            self.default_params.update({f"s1_bpwa_match_{k}": v for k,v in s1_bpwa_match_cfg.items()})
             self.default_params.update({
                 's2_intermediate_crop_mode': s2_intermediate_crop_cfg.get('mode', 'centroid_square'),
                 's2_intermediate_crop_square_size': s2_intermediate_crop_cfg.get('square_size', 128),
@@ -159,7 +169,9 @@ class FeatureViewerApp:
 
     def _initialize_param_vars_and_specs(self):
         all_specs = {
-            **self._get_global_param_specs(), **self._get_s1_param_specs(), 
+            **self._get_global_param_specs(), 
+            **self._get_s1_param_specs(), 
+            **self._get_s1_black_plate_well_param_specs(), 
             **self._get_s2_param_specs(), 
             **self._get_main_body_seg_param_specs(), 
             **self._get_egg_detect_param_specs()     
@@ -168,6 +180,11 @@ class FeatureViewerApp:
             spec = all_specs.get(name)
             if spec: 
                 self.param_specs[name] = spec; param_type = spec['type']
+                if default_val is None: 
+                    if param_type == 'int': default_val = 0
+                    elif param_type == 'float': default_val = 0.0
+                    elif param_type == 'bool': default_val = False
+                    elif param_type == 'choice' and spec.get('options'): default_val = str(spec['options'][0])
                 if param_type == 'int':
                     self.param_vars[name] = tk.IntVar(value=int(default_val))
                     self.param_str_vars[name] = tk.StringVar(value=str(int(default_val)))
@@ -222,9 +239,12 @@ class FeatureViewerApp:
         self.create_global_param_controls(self.global_params_frame)
         
         self.s1_params_frame_main = ttk.Frame(self.controls_frame_inner) 
+        self.s1_bpwa_params_frame = ttk.Labelframe(self.s1_params_frame_main, text="S1 Black Plate Well & Brightness Adj.", padding=5)
+        self.create_s1_black_plate_well_param_controls(self.s1_bpwa_params_frame) 
+        
         self.s1_subtracted_params_frame = ttk.Labelframe(self.s1_params_frame_main, text="S1 Subtracted Analysis Params", padding=5)
         self.create_s1_subtracted_param_controls(self.s1_subtracted_params_frame)
-        self.s1_wellmask_params_frame = ttk.Labelframe(self.s1_params_frame_main, text="S1 Well Masking Params", padding=5)
+        self.s1_wellmask_params_frame = ttk.Labelframe(self.s1_params_frame_main, text="S1 General Well Masking Params", padding=5)
         self.create_s1_wellmask_param_controls(self.s1_wellmask_params_frame)
         self.s1_unsubtracted_params_frame = ttk.Labelframe(self.s1_params_frame_main, text="S1 Unsubtracted FG Analysis Params (Local Thresh)", padding=5)
         self.create_s1_unsubtracted_param_controls(self.s1_unsubtracted_params_frame)
@@ -275,13 +295,20 @@ class FeatureViewerApp:
         
         if mode == "S1":
             self.s1_params_frame_main.pack(fill=tk.X, expand=True)
+            self.s1_bpwa_params_frame.pack(fill=tk.X, expand=True, pady=3)
             self.s1_subtracted_params_frame.pack(fill=tk.X, expand=True, pady=3); self.s1_wellmask_params_frame.pack(fill=tk.X, expand=True, pady=3)
             self.s1_unsubtracted_params_frame.pack(fill=tk.X, expand=True, pady=3); self.s1_comparison_params_frame.pack(fill=tk.X, expand=True, pady=3)
             self.load_button.config(text="Load S1 Dir"); self.s1_fg_image_selector_label.pack(side=tk.LEFT, padx=(10,2), before=self.status_label)
             self.s1_fg_image_selector.pack(side=tk.LEFT, padx=2, before=self.status_label); self.s1_fg_image_selector.config(state="readonly" if self.s1_image_directory_path and not self.s1_image_file_list_df.empty else "disabled")
         elif mode == "S2":
-            self.s2_params_frame_main.pack(fill=tk.X, expand=True); self.load_button.config(text="Load S2 Dir") 
-            self.s1_fg_image_selector_label.pack(side=tk.LEFT, padx=(10,2), before=self.status_label); self.s1_fg_image_selector.pack(side=tk.LEFT, padx=2, before=self.status_label)
+            self.s1_params_frame_main.pack(fill=tk.X, expand=True) 
+            self.s1_bpwa_params_frame.pack(fill=tk.X, expand=True, pady=3) 
+            self.s1_subtracted_params_frame.pack(fill=tk.X, expand=True, pady=3)
+            self.s1_wellmask_params_frame.pack(fill=tk.X, expand=True, pady=3)
+            self.s1_unsubtracted_params_frame.pack(fill=tk.X, expand=True, pady=3)
+            self.s1_comparison_params_frame.pack(fill=tk.X, expand=True, pady=3)
+            self.s2_params_frame_main.pack(fill=tk.X, expand=True) 
+            self.load_button.config(text="Load S2 Dir (uses S1 FG)"); self.s1_fg_image_selector_label.pack(side=tk.LEFT, padx=(10,2), before=self.status_label); self.s1_fg_image_selector.pack(side=tk.LEFT, padx=2, before=self.status_label)
             self.s1_fg_image_selector.config(state="readonly" if self.s1_image_directory_path and not self.s1_image_file_list_df.empty else "disabled")
             self.s2_status_label.pack(side=tk.LEFT, padx=(10,0), after=self.s1_fg_image_selector); self.vis_notebook.add(self.s2_single_crop_tab, text=" S2 Crop Inspector ") 
             self.s2_selected_sharp_particle_var.set(""); self.update_s2_single_crop_display() 
@@ -360,14 +387,18 @@ class FeatureViewerApp:
         label_text_raw = name.replace('_', ' ').title()
         label_text = re.sub(r"Main Body Seg\s*", "", label_text_raw, flags=re.IGNORECASE) 
         label_text = re.sub(r"Egg Detect\s*", "", label_text, flags=re.IGNORECASE) 
+        label_text = re.sub(r"S1 Bpwa Well Id\s*", "", label_text, flags=re.IGNORECASE) 
+        label_text = re.sub(r"S1 Bpwa Peak\s*", "", label_text, flags=re.IGNORECASE)   
+        label_text = re.sub(r"S1 Bpwa Match\s*", "", label_text, flags=re.IGNORECASE) 
+        label_text = re.sub(r"S1 Bpwa\s*", "", label_text, flags=re.IGNORECASE) 
         label_text = re.sub(r"S\d\s*(Sub|Unsub|Comp|Well Mask|Enable|Viewer|)\s*", "", label_text, flags=re.IGNORECASE)
         
-        ttk.Label(container, text=label_text.strip() + ":", width=25, anchor="w").pack(side=tk.LEFT, padx=(0,5))
+        ttk.Label(container, text=label_text.strip() + ":", width=28, anchor="w").pack(side=tk.LEFT, padx=(0,5))
         tk_var = self.param_vars.get(name) 
         if param_type == 'choice':
             cmd = self.schedule_update 
             if name == 'viewer_thresholding_mode': cmd = self.update_global_threshold_param_visibility
-            ttk.OptionMenu(container, tk_var, current_val_for_var, *spec['options'], command=cmd).pack(side=tk.LEFT, expand=True, fill=tk.X)
+            ttk.OptionMenu(container, tk_var, current_val_for_var if current_val_for_var is not None else spec['options'][0], *spec['options'], command=cmd).pack(side=tk.LEFT, expand=True, fill=tk.X)
         elif param_type in ['int', 'float']:
             str_tk_var = self.param_str_vars.get(name)
             ttk.Button(container, text="-", command=lambda p_name=name: self._adjust_param_value(p_name, -1), width=2).pack(side=tk.LEFT)
@@ -387,14 +418,14 @@ class FeatureViewerApp:
             'viewer_fixed_threshold_value': {'min': 0, 'max': 255, 'type': 'int', 'step': 1},
         }
 
-    def _get_s1_param_specs(self):
+    def _get_s1_param_specs(self): 
         s1_sub_specs = {
             's1_bg_offset_val': {'min': BG_OFFSET_MIN, 'max': BG_OFFSET_MAX, 'type': 'int', 'step': 1},
             's1_sub_apply_convolution': {'type': 'bool'}, 
             's1_sub_min_microorganism_area': {'min': 10, 'max': 5000, 'type': 'int', 'step': 10}, 
             's1_sub_microorganism_blur_kernel': {'min': 0, 'max': 15, 'type': 'int', 'step': 2}, 
         }
-        s1_wm_specs = {
+        s1_wm_specs = { 
             's1_well_mask_create_mask': {'type': 'bool'}, 
             's1_well_mask_auto_center_mask': {'type': 'bool'},
             's1_well_mask_radius_px': {'min': 100, 'max': 4000, 'type': 'int', 'step': 50}, 
@@ -409,6 +440,20 @@ class FeatureViewerApp:
             's1_comp_default_particle_area': {'min': 10, 'max': 5000, 'type': 'int', 'step': 10},
         }
         return {**s1_sub_specs, **s1_wm_specs, **s1_unsub_specs, **s1_comp_specs}
+
+    def _get_s1_black_plate_well_param_specs(self): 
+        return {
+            's1_bpwa_enable_brightness_adjustment': {'type': 'bool'},
+            's1_bpwa_well_id_low_threshold_value': {'min': 1, 'max': 50, 'type': 'int', 'step': 1},
+            's1_bpwa_well_id_min_expected_diameter_px': {'min': 100, 'max': 5000, 'type': 'int', 'step': 100},
+            's1_bpwa_well_id_max_expected_diameter_px': {'min': 200, 'max': 6000, 'type': 'int', 'step': 100},
+            's1_bpwa_well_id_min_circularity': {'min': 0.5, 'max': 1.0, 'type': 'float', 'res': 0.01},
+            's1_bpwa_peak_min_intensity_for_peak_search': {'min': 0, 'max': 200, 'type': 'int', 'step': 5},
+            's1_bpwa_peak_percentile_for_peak_proxy': {'min': 50, 'max': 99, 'type': 'int', 'step': 1},
+            's1_bpwa_match_max_peak_difference_allowed': {'min': 0, 'max': 50, 'type': 'int', 'step': 1},
+            's1_bpwa_match_adjustment_method': {'options': ['global_shift', 'histogram_matching'], 'type': 'choice'},
+            's1_bpwa_match_target_peak_offset_after_shift': {'min': -20, 'max': 20, 'type': 'int', 'step': 1},
+        }
 
     def _get_s2_param_specs(self):
         return {
@@ -453,6 +498,24 @@ class FeatureViewerApp:
         for name in ordered_global_params:
             if name in self.default_params:
                 self._create_generic_param_control(parent_frame, name, global_specs[name], self.current_params.get(name, self.default_params[name]))
+
+    def create_s1_black_plate_well_param_controls(self, parent_frame): 
+        specs = self._get_s1_black_plate_well_param_specs()
+        ordered_params = [
+            's1_bpwa_enable_brightness_adjustment',
+            's1_bpwa_well_id_low_threshold_value',
+            's1_bpwa_well_id_min_expected_diameter_px',
+            's1_bpwa_well_id_max_expected_diameter_px',
+            's1_bpwa_well_id_min_circularity',
+            's1_bpwa_peak_min_intensity_for_peak_search',
+            's1_bpwa_peak_percentile_for_peak_proxy',
+            's1_bpwa_match_max_peak_difference_allowed',
+            's1_bpwa_match_adjustment_method',
+            's1_bpwa_match_target_peak_offset_after_shift',
+        ]
+        for name in ordered_params:
+            if name in self.default_params and name in specs: 
+                self._create_generic_param_control(parent_frame, name, specs[name], self.current_params.get(name, self.default_params[name]))
 
     def create_s1_subtracted_param_controls(self, parent_frame):
         s1_specs = self._get_s1_param_specs()
@@ -601,6 +664,17 @@ class FeatureViewerApp:
         self.current_params['s1_unsubtracted_effective'] = {'min_particle_area': gui_params.get('s1_unsub_min_particle_area'), 'local_otsu_roi_size': gui_params.get('s1_unsub_local_otsu_roi_size')}
         self.current_params['s1_comparison_effective'] = {k.replace('s1_comp_', ''):v for k,v in gui_params.items() if k.startswith('s1_comp_')}
         
+        s1_bpwa_collected_cfg = {'enable_brightness_adjustment': gui_params.get('s1_bpwa_enable_brightness_adjustment')}
+        s1_bpwa_well_id_collected = {}; s1_bpwa_peak_collected = {}; s1_bpwa_match_collected = {}
+        for k_gui in gui_params:
+            if k_gui.startswith('s1_bpwa_well_id_'): s1_bpwa_well_id_collected[k_gui.replace('s1_bpwa_well_id_', '')] = gui_params[k_gui]
+            elif k_gui.startswith('s1_bpwa_peak_'): s1_bpwa_peak_collected[k_gui.replace('s1_bpwa_peak_', '')] = gui_params[k_gui]
+            elif k_gui.startswith('s1_bpwa_match_'): s1_bpwa_match_collected[k_gui.replace('s1_bpwa_match_', '')] = gui_params[k_gui]
+        s1_bpwa_collected_cfg['well_identification'] = s1_bpwa_well_id_collected
+        s1_bpwa_collected_cfg['brightness_peak_calculation'] = s1_bpwa_peak_collected
+        s1_bpwa_collected_cfg['brightness_matching'] = s1_bpwa_match_collected
+        self.current_params['s1_black_plate_well_analysis_effective'] = s1_bpwa_collected_cfg
+        
         self.current_params['s2_effective'] = {
             'intermediate_crop': {'mode': gui_params.get('s2_intermediate_crop_mode'), 'square_size': gui_params.get('s2_intermediate_crop_square_size'), 'bbox_column_mapping': get_config().get('stage_02_quality_filter', {}).get('intermediate_crop', {}).get('bbox_column_mapping', {}) },
             'black_mask_check': {'min_area_ratio': gui_params.get('s2_black_mask_min_area_ratio')},
@@ -668,166 +742,163 @@ class FeatureViewerApp:
             'fixed_threshold_value': self.param_vars['viewer_fixed_threshold_value'].get(),
         }
 
-        if mode == "S1":
-            axes_s1 = self.fig_dynamic_vis.subplots(2, 2) 
-            self.ax_dynamic_vis = axes_s1 
-            s1_sub_eff = params['s1_subtracted_effective']; s1_wm_eff = params['s1_well_mask_effective']
+        if mode == "S1" or mode == "S2": 
+            s1_sub_eff = params['s1_subtracted_effective']; s1_wm_eff = params['s1_well_mask_effective'] 
             s1_unsub_eff = params['s1_unsubtracted_effective']; s1_comp_eff = params['s1_comparison_effective']
             s1_bg_off = params['s1_bg_offset_effective']
-            fg_fn = self.s1_selected_fg_filepath_var.get()
+            s1_bpwa_eff_cfg = params['s1_black_plate_well_analysis_effective'] 
             
+            fg_fn = self.s1_selected_fg_filepath_var.get()
             bg_filename_s1 = "N/A" 
             if not self.s1_image_file_list_df.empty and fg_fn:
                 fg_row_series_list = self.s1_image_file_list_df[self.s1_image_file_list_df['filename'] == fg_fn]
-                if fg_row_series_list.empty: raise ValueError(f"S1 Viewer: Selected FG filename '{fg_fn}' not found in DataFrame.")
+                if fg_row_series_list.empty: raise ValueError(f"S1/S2 Viewer: Selected FG filename '{fg_fn}' not found.")
                 fg_row = fg_row_series_list.iloc[0]
                 fg_row_positional_index = self.s1_image_file_list_df.index.get_loc(fg_row.name)
                 
                 bg_df_idx = (fg_row_positional_index + s1_bg_off) % len(self.s1_image_file_list_df)
                 bg_row = self.s1_image_file_list_df.iloc[bg_df_idx]
                 bg_filename_s1 = bg_row['filename']
-            else: raise ValueError("S1 Viewer: Image list or FG selection is empty.")
+            else: raise ValueError("S1/S2 Viewer: Image list or FG selection is empty.")
 
-            self.fig_dynamic_vis.suptitle(f"S1 Output - FG: {fg_fn}\nBG: {bg_filename_s1}", fontsize=9, y=0.99)
+            title_prefix = "S1 Output" if mode == "S1" else "S2 Quality Filter (Sim. S1)"
+            self.fig_dynamic_vis.suptitle(f"{title_prefix} - FG: {fg_fn}\nBG: {bg_filename_s1}", fontsize=9, y=0.99)
 
             img_fg_orig_uint8 = core_load_image(fg_row['full_path'],'gray')
             img_bg_orig_uint8 = core_load_image(bg_row['full_path'],'gray')
-            if img_fg_orig_uint8 is None or img_bg_orig_uint8 is None: raise ValueError("S1 Viewer: FG/BG load fail.")
-            well_mask_uint8 = None
-            if s1_wm_eff.get('create_mask'): _, well_mask_uint8 = mask_well_area(img_fg_orig_uint8.copy(), s1_wm_eff, self.s1_system_config_from_file)
-            img_a_sub, img_b_sub = img_fg_orig_uint8.copy(), img_bg_orig_uint8.copy()
-            if viewer_global_source_illum == 'collimated': img_a_sub, img_b_sub = cv2.bitwise_not(img_a_sub), cv2.bitwise_not(img_b_sub)
-            subtracted_img = subtract_images(img_a_sub, img_b_sub)
-            if subtracted_img is None: raise ValueError("S1 Viewer: Subtraction failed.")
-            img_for_sub_analysis = apply_mask(subtracted_img, well_mask_uint8) if well_mask_uint8 is not None else subtracted_img
-            df_sub_list_dict, binary_mask_sub_disp = _analyze_single_subtracted_image_global_thresh(img_for_sub_analysis, s1_sub_eff, viewer_global_thresh_cfg)
-            df_subtracted_particles_viewer = pd.DataFrame(df_sub_list_dict)
-            if not df_subtracted_particles_viewer.empty: df_subtracted_particles_viewer['SAMPLE_ID'] = "viewer_s1"; df_subtracted_particles_viewer['source_image_filename'] = fg_fn
-            img_for_unsub_prep = img_fg_orig_uint8.copy()
-            if well_mask_uint8 is not None:
-                if viewer_global_source_illum == 'collimated':
-                    pixels_in_well = img_fg_orig_uint8[well_mask_uint8 == 255]
-                    if pixels_in_well.size > 0:
-                        hist = cv2.calcHist([img_fg_orig_uint8], [0], well_mask_uint8, [256], [0,256])
-                        dom_bg = np.argmax(hist); filled_out = np.full_like(img_fg_orig_uint8, dom_bg); filled_out[well_mask_uint8 == 255] = img_fg_orig_uint8[well_mask_uint8 == 255]
-                        img_for_unsub_prep = filled_out
-                    else: img_for_unsub_prep = apply_mask(img_fg_orig_uint8.copy(), well_mask_uint8) if well_mask_uint8 is not None else img_fg_orig_uint8.copy()
-                else: img_for_unsub_prep = apply_mask(img_fg_orig_uint8.copy(), well_mask_uint8) if well_mask_uint8 is not None else img_fg_orig_uint8.copy()
-            df_unsub_list_dict, composite_binary_mask_unsub_disp, (example_roi_img_disp, example_roi_hist_ravel_disp, example_roi_otsu_disp) = _analyze_unsubtracted_locally(img_for_unsub_prep, df_sub_list_dict, s1_unsub_eff['local_otsu_roi_size'], s1_unsub_eff, viewer_global_thresh_cfg, viewer_global_source_illum)
-            df_unsubtracted_particles_viewer = pd.DataFrame(df_unsub_list_dict)
-            if not df_unsubtracted_particles_viewer.empty: df_unsubtracted_particles_viewer['SAMPLE_ID'] = "viewer_s1"; df_unsubtracted_particles_viewer['source_image_filename'] = fg_fn
-            df_fused_s1_viewer = _compare_and_fuse_particle_dfs(df_subtracted_particles_viewer, df_unsubtracted_particles_viewer, s1_comp_eff)
-            axes_s1[0,0].imshow(binary_mask_sub_disp if binary_mask_sub_disp is not None else np.zeros_like(img_fg_orig_uint8), cmap='gray'); axes_s1[0,0].set_title(f"Subtracted Binary ({len(df_sub_list_dict)} p.)", fontsize=8); axes_s1[0,0].set_axis_off()
-            axes_s1[0,1].imshow(composite_binary_mask_unsub_disp if composite_binary_mask_unsub_disp is not None else np.zeros_like(img_fg_orig_uint8), cmap='gray'); axes_s1[0,1].set_title(f"Unsub Local Binary Comp. ({len(df_unsub_list_dict)} p.)", fontsize=8); axes_s1[0,1].set_axis_off()
-            if example_roi_img_disp is not None:
-                axes_s1[1,0].imshow(example_roi_img_disp, cmap='gray'); axes_s1[1,0].set_title("Example Local ROI (for hist)", fontsize=8); axes_s1[1,0].set_axis_off()
-                if example_roi_hist_ravel_disp is not None and example_roi_hist_ravel_disp.size > 0:
-                    axes_s1[1,1].hist(example_roi_hist_ravel_disp, bins=256, range=(0.0,1.0), fc='b', ec='b', alpha=0.7); axes_s1[1,1].set_title("Hist of Example ROI", fontsize=8)
-                    if example_roi_otsu_disp is not None:
-                        axes_s1[1,1].axvline(example_roi_otsu_disp, color='r', ls='--', lw=1)
-                        otsu_mult_viewer = viewer_global_thresh_cfg.get('otsu_threshold_multiplier', 0.45); final_local_calc_thresh = example_roi_otsu_disp * otsu_mult_viewer
-                        axes_s1[1,1].axvline(final_local_calc_thresh, color='m', linestyle=':', linewidth=1)
-                    axes_s1[1,1].tick_params(axis='both', which='major', labelsize=7); axes_s1[1,1].set_xlim(0,1)
-                else: axes_s1[1,1].text(0.5,0.5,"No Hist Data", ha='center', va='center'); axes_s1[1,1].set_axis_off()
-            else: axes_s1[1,0].text(0.5,0.5,"No ROI", ha='center', va='center'); axes_s1[1,0].set_axis_off(); axes_s1[1,1].text(0.5,0.5,"No Hist", ha='center', va='center'); axes_s1[1,1].set_axis_off()
-            self.fig_dynamic_vis.tight_layout(rect=[0, 0, 1, 0.96]) 
-
-        elif mode == "S2": 
-            self.ax_dynamic_vis = self.fig_dynamic_vis.add_subplot(111) 
-            self.s2_status_text_var.set("S2 Status: Simulating S1 for frame...")
-            s1_sub_eff = params['s1_subtracted_effective']; s1_wm_eff = params['s1_well_mask_effective']; s1_unsub_eff = params['s1_unsubtracted_effective']; s1_comp_eff = params['s1_comparison_effective']; s1_bg_off = params['s1_bg_offset_effective']; s2_eff_config = params['s2_effective']
-            fg_fn = self.s1_selected_fg_filepath_var.get()
+            if img_fg_orig_uint8 is None or img_bg_orig_uint8 is None: raise ValueError("S1/S2 Viewer: FG/BG load fail.")
             
-            bg_filename_s2 = "N/A"
-            if not self.s1_image_file_list_df.empty and fg_fn:
-                fg_row_series_list = self.s1_image_file_list_df[self.s1_image_file_list_df['filename'] == fg_fn]
-                if fg_row_series_list.empty: raise ValueError(f"S2 Viewer: Selected FG filename '{fg_fn}' not found.")
-                fg_row = fg_row_series_list.iloc[0]
-                fg_row_positional_index = self.s1_image_file_list_df.index.get_loc(fg_row.name)
+            img_a_for_sub_prep = img_fg_orig_uint8.copy()
+            img_b_for_sub_prep = img_bg_orig_uint8.copy()
+            if s1_bpwa_eff_cfg.get('enable_brightness_adjustment', False):
+                logger.debug(f"Viewer: Applying brightness matching for FG: {fg_fn}, BG: {bg_filename_s1}")
+                img_a_for_sub_prep, img_b_for_sub_prep = match_well_brightness(
+                    img_fg_orig_uint8, img_bg_orig_uint8, s1_bpwa_eff_cfg
+                )
+            
+            general_well_mask_for_roi_uint8 = None
+            if s1_wm_eff.get('create_mask'): 
+                _, general_well_mask_for_roi_uint8 = mask_well_area(img_fg_orig_uint8.copy(), s1_wm_eff, self.s1_system_config_from_file)
 
-                bg_df_idx = (fg_row_positional_index + s1_bg_off) % len(self.s1_image_file_list_df)
-                bg_row_s2 = self.s1_image_file_list_df.iloc[bg_df_idx]
-                bg_filename_s2 = bg_row_s2['filename']
-            else: raise ValueError("S2 Viewer: Image list or FG selection is empty.")
+            img_a_inv_ready = img_a_for_sub_prep.copy() 
+            img_b_inv_ready = img_b_for_sub_prep.copy() 
+            if viewer_global_source_illum == 'collimated': 
+                 img_a_inv_ready = cv2.bitwise_not(img_a_inv_ready)
+                 img_b_inv_ready = cv2.bitwise_not(img_b_inv_ready)
+            subtracted_img_uint8 = subtract_images(img_a_inv_ready, img_b_inv_ready)
+            if subtracted_img_uint8 is None: raise ValueError("S1/S2 Viewer: Subtraction failed.")
+            
+            img_for_sub_analysis_uint8 = apply_mask(subtracted_img_uint8, general_well_mask_for_roi_uint8) \
+                                         if general_well_mask_for_roi_uint8 is not None else subtracted_img_uint8
+            
+            if mode == "S1":
+                axes_s1 = self.fig_dynamic_vis.subplots(2, 2) 
+                self.ax_dynamic_vis = axes_s1
+                df_sub_list_dict, binary_mask_sub_disp = _analyze_single_subtracted_image_global_thresh(img_for_sub_analysis_uint8, s1_sub_eff, viewer_global_thresh_cfg)
+                df_subtracted_particles_viewer = pd.DataFrame(df_sub_list_dict) 
+                if not df_subtracted_particles_viewer.empty: df_subtracted_particles_viewer['SAMPLE_ID'] = "viewer_s1"; df_subtracted_particles_viewer['source_image_filename'] = fg_fn
+                
+                img_for_unsub_prep = img_fg_orig_uint8.copy() 
+                if general_well_mask_for_roi_uint8 is not None: 
+                    if viewer_global_source_illum == 'collimated':
+                        pixels_in_well = img_fg_orig_uint8[general_well_mask_for_roi_uint8 == 255]; 
+                        if pixels_in_well.size > 0: hist = cv2.calcHist([img_fg_orig_uint8], [0], general_well_mask_for_roi_uint8, [256], [0,256]); dom_bg = np.argmax(hist); filled_out = np.full_like(img_fg_orig_uint8, dom_bg); filled_out[general_well_mask_for_roi_uint8 == 255] = img_fg_orig_uint8[general_well_mask_for_roi_uint8 == 255]; img_for_unsub_prep = filled_out
+                        else: img_for_unsub_prep = apply_mask(img_fg_orig_uint8.copy(), general_well_mask_for_roi_uint8) if general_well_mask_for_roi_uint8 is not None else img_fg_orig_uint8.copy()
+                    else: img_for_unsub_prep = apply_mask(img_fg_orig_uint8.copy(), general_well_mask_for_roi_uint8) if general_well_mask_for_roi_uint8 is not None else img_fg_orig_uint8.copy()
+                
+                df_unsub_list_dict, composite_binary_mask_unsub_disp, (example_roi_img_disp, example_roi_hist_ravel_disp, example_roi_otsu_disp) = _analyze_unsubtracted_locally(img_for_unsub_prep, df_sub_list_dict, s1_unsub_eff['local_otsu_roi_size'], s1_unsub_eff, viewer_global_thresh_cfg, viewer_global_source_illum)
+                
+                axes_s1[0,0].imshow(binary_mask_sub_disp if binary_mask_sub_disp is not None else np.zeros_like(img_fg_orig_uint8), cmap='gray'); axes_s1[0,0].set_title(f"Subtracted Binary ({len(df_sub_list_dict)} p.)", fontsize=8); axes_s1[0,0].set_axis_off()
+                axes_s1[0,1].imshow(composite_binary_mask_unsub_disp if composite_binary_mask_unsub_disp is not None else np.zeros_like(img_fg_orig_uint8), cmap='gray'); axes_s1[0,1].set_title(f"Unsub Local Binary Comp. ({len(df_unsub_list_dict)} p.)", fontsize=8); axes_s1[0,1].set_axis_off()
+                if example_roi_img_disp is not None:
+                    axes_s1[1,0].imshow(example_roi_img_disp, cmap='gray'); axes_s1[1,0].set_title("Example Local ROI (for hist)", fontsize=8); axes_s1[1,0].set_axis_off()
+                    if example_roi_hist_ravel_disp is not None and example_roi_hist_ravel_disp.size > 0:
+                        axes_s1[1,1].hist(example_roi_hist_ravel_disp, bins=256, range=(0.0,1.0), fc='b', ec='b', alpha=0.7); axes_s1[1,1].set_title("Hist of Example ROI", fontsize=8)
+                        if example_roi_otsu_disp is not None:
+                            axes_s1[1,1].axvline(example_roi_otsu_disp, color='r', ls='--', lw=1)
+                            otsu_mult_viewer = viewer_global_thresh_cfg.get('otsu_threshold_multiplier', 0.45); final_local_calc_thresh = example_roi_otsu_disp * otsu_mult_viewer
+                            axes_s1[1,1].axvline(final_local_calc_thresh, color='m', linestyle=':', linewidth=1)
+                        axes_s1[1,1].tick_params(axis='both', which='major', labelsize=7); axes_s1[1,1].set_xlim(0,1)
+                    else: axes_s1[1,1].text(0.5,0.5,"No Hist Data", ha='center', va='center'); axes_s1[1,1].set_axis_off()
+                else: axes_s1[1,0].text(0.5,0.5,"No ROI", ha='center', va='center'); axes_s1[1,0].set_axis_off(); axes_s1[1,1].text(0.5,0.5,"No Hist", ha='center', va='center'); axes_s1[1,1].set_axis_off()
+            
+            elif mode == "S2":
+                self.ax_dynamic_vis = self.fig_dynamic_vis.add_subplot(111)
+                df_sub_list_dict_s2, _ = _analyze_single_subtracted_image_global_thresh(img_for_sub_analysis_uint8, s1_sub_eff, viewer_global_thresh_cfg) 
+                df_sub_s2 = pd.DataFrame(df_sub_list_dict_s2)
+                if not df_sub_s2.empty: df_sub_s2['SAMPLE_ID'] = "viewer_s2"; df_sub_s2['source_image_filename'] = fg_fn
+                
+                img_for_unsub_prep_s2 = img_fg_orig_uint8.copy() 
+                if general_well_mask_for_roi_uint8 is not None:
+                    if viewer_global_source_illum == 'collimated':
+                        pixels_in_well = img_fg_orig_uint8[general_well_mask_for_roi_uint8 == 255]; 
+                        if pixels_in_well.size > 0: hist = cv2.calcHist([img_fg_orig_uint8], [0], general_well_mask_for_roi_uint8, [256], [0,256]); dom_bg = np.argmax(hist); filled_out = np.full_like(img_fg_orig_uint8, dom_bg); filled_out[general_well_mask_for_roi_uint8 == 255] = img_fg_orig_uint8[general_well_mask_for_roi_uint8 == 255]; img_for_unsub_prep_s2 = filled_out
+                        else: img_for_unsub_prep_s2 = apply_mask(img_fg_orig_uint8.copy(), general_well_mask_for_roi_uint8) if general_well_mask_for_roi_uint8 is not None else img_fg_orig_uint8.copy()
+                    else: img_for_unsub_prep_s2 = apply_mask(img_fg_orig_uint8.copy(), general_well_mask_for_roi_uint8) if general_well_mask_for_roi_uint8 is not None else img_fg_orig_uint8.copy()
 
-            self.fig_dynamic_vis.suptitle(f"S2 Quality Filter Output - FG: {fg_fn}\n(Sim. S1 BG: {bg_filename_s2})", fontsize=9, y=0.99)
-
-            img_fg_orig_uint8_s2 = core_load_image(fg_row['full_path'], 'gray'); img_fg_orig_color_s2 = core_load_image(fg_row['full_path'], 'color') 
-            img_bg_orig_uint8_s2 = core_load_image(bg_row_s2['full_path'], 'gray') 
-            if img_fg_orig_uint8_s2 is None or img_fg_orig_color_s2 is None or img_bg_orig_uint8_s2 is None: raise ValueError("S2 Viewer: FG/BG load fail.")
-            well_mask_uint8_s2 = None
-            if s1_wm_eff.get('create_mask'): _, well_mask_uint8_s2 = mask_well_area(img_fg_orig_uint8_s2.copy(), s1_wm_eff, self.s1_system_config_from_file)
-            img_a_sub_s2, img_b_sub_s2 = img_fg_orig_uint8_s2.copy(), img_bg_orig_uint8_s2.copy()
-            if viewer_global_source_illum == 'collimated': img_a_sub_s2, img_b_sub_s2 = cv2.bitwise_not(img_a_sub_s2), cv2.bitwise_not(img_b_sub_s2)
-            sub_img_s2 = subtract_images(img_a_sub_s2, img_b_sub_s2)
-            if sub_img_s2 is None: sub_img_s2 = np.zeros_like(img_fg_orig_uint8_s2) 
-            img_for_sub_s2 = apply_mask(sub_img_s2, well_mask_uint8_s2) if well_mask_uint8_s2 is not None else sub_img_s2
-            df_sub_s2_list_dict, _ = _analyze_single_subtracted_image_global_thresh(img_for_sub_s2, s1_sub_eff, viewer_global_thresh_cfg)
-            df_sub_s2 = pd.DataFrame(df_sub_s2_list_dict)
-            if not df_sub_s2.empty: df_sub_s2['SAMPLE_ID'] = "viewer_s2"; df_sub_s2['source_image_filename'] = fg_fn
-            img_for_unsub_prep_s2 = img_fg_orig_uint8_s2.copy()
-            if well_mask_uint8_s2 is not None:
-                if viewer_global_source_illum == 'collimated':
-                    pixels_in_well = img_fg_orig_uint8_s2[well_mask_uint8_s2 == 255]
-                    if pixels_in_well.size > 0:
-                        hist = cv2.calcHist([img_fg_orig_uint8_s2], [0], well_mask_uint8_s2, [256], [0,256]); dom_bg = np.argmax(hist); filled_out = np.full_like(img_fg_orig_uint8_s2, dom_bg); filled_out[well_mask_uint8_s2 == 255] = img_fg_orig_uint8_s2[well_mask_uint8_s2 == 255]; img_for_unsub_prep_s2 = filled_out
-                    else: img_for_unsub_prep_s2 = apply_mask(img_fg_orig_uint8_s2.copy(), well_mask_uint8_s2) if well_mask_uint8_s2 is not None else img_fg_orig_uint8_s2.copy()
-                else: img_for_unsub_prep_s2 = apply_mask(img_fg_orig_uint8_s2.copy(), well_mask_uint8_s2) if well_mask_uint8_s2 is not None else img_fg_orig_uint8_s2.copy()
-            df_unsub_s2_list_dict, _, _ = _analyze_unsubtracted_locally(img_for_unsub_prep_s2, df_sub_s2_list_dict, s1_unsub_eff['local_otsu_roi_size'], s1_unsub_eff, viewer_global_thresh_cfg, viewer_global_source_illum)
-            df_unsub_s2 = pd.DataFrame(df_unsub_s2_list_dict)
-            if not df_unsub_s2.empty: df_unsub_s2['SAMPLE_ID'] = "viewer_s2"; df_unsub_s2['source_image_filename'] = fg_fn
-            s1_particles_for_frame_df = _compare_and_fuse_particle_dfs(df_sub_s2, df_unsub_s2, s1_comp_eff)
-            if not s1_particles_for_frame_df.empty: s1_particles_for_frame_df = s1_particles_for_frame_df.reset_index().rename(columns={'index': 's1_viewer_fused_idx'})
-            self.s2_status_text_var.set(f"S2: S1 found {len(s1_particles_for_frame_df)} p. Analyzing quality...")
-            if s1_particles_for_frame_df.empty:
-                self.ax_dynamic_vis.imshow(cv2.cvtColor(img_fg_orig_uint8_s2, cv2.COLOR_GRAY2BGR)); self.ax_dynamic_vis.set_axis_off(); self.s2_final_sharp_particles_df_for_viewer = pd.DataFrame() 
-            else:
-                s2_intermediate_cropper = ParticleCropper(s2_eff_config['intermediate_crop']); s2_temp_dir = os.path.join(self.temp_dir.name, f"s2_viewer_crops_{fg_fn.replace('.png','').replace('.','_')}"); os.makedirs(s2_temp_dir, exist_ok=True)
-                s2_single_particle_results_list = []
-                for _, s1_row in s1_particles_for_frame_df.iterrows(): 
-                    s2_res_obj = _process_single_particle_for_quality(s1_row, img_fg_orig_color_s2, img_fg_orig_uint8_s2, s2_intermediate_cropper, s2_temp_dir, s2_eff_config, viewer_global_source_illum, viewer_global_thresh_cfg )
-                    s2_res_obj.input_particle_data['s1_viewer_fused_idx'] = s1_row['s1_viewer_fused_idx']; s2_single_particle_results_list.append(s2_res_obj.to_dict())
-                s2_detailed_df = pd.DataFrame(s2_single_particle_results_list)
-                s2_merged_for_score = pd.merge(s1_particles_for_frame_df, s2_detailed_df, left_on='s1_viewer_fused_idx', right_on='input_particle_index', how='left', suffixes=('', '_s2analysis'))
-                s2_suitable_scored, _ = _filter_and_score_analysis_results(s2_merged_for_score, s2_eff_config)
-                status_parts_s2 = [f"S1_Fused: {len(s1_particles_for_frame_df)}"]; artifact_status = []
-                if s2_eff_config['filters_enabled']['black_mask_artifact']: artifact_status.append("BMaskOn") 
-                else: artifact_status.append("BMaskOff")
-                if s2_eff_config['filters_enabled']['on_crop_boundary']: artifact_status.append("BoundOn") 
-                else: artifact_status.append("BoundOff")
-                status_parts_s2.append(f"ArtF({','.join(artifact_status)}): {len(s2_suitable_scored)}")
-                self.s2_final_sharp_particles_df_for_viewer = s2_suitable_scored.copy() 
-                if not s2_suitable_scored.empty and s2_eff_config['filters_enabled']['final_sharpness']:
-                    sharp_filt_cfg = s2_eff_config['final_sharp_object_filter']
-                    if sharp_filt_cfg:
-                        metric_key, thresh_val = list(sharp_filt_cfg.items())[0]; metric_actual = metric_key.replace("_min","")
-                        if metric_actual in self.s2_final_sharp_particles_df_for_viewer.columns:
-                            pass_mask = pd.to_numeric(self.s2_final_sharp_particles_df_for_viewer[metric_actual], errors='coerce').fillna(float('-inf')) > thresh_val; self.s2_final_sharp_particles_df_for_viewer = self.s2_final_sharp_particles_df_for_viewer[pass_mask]
-                            status_parts_s2.append(f"SharpFOn({metric_actual}>{thresh_val:.2f}): {len(self.s2_final_sharp_particles_df_for_viewer)}")
-                elif s2_eff_config['filters_enabled']['final_sharpness']: status_parts_s2.append(f"SharpFOn: 0")
-                else: status_parts_s2.append(f"SharpFOff: {len(self.s2_final_sharp_particles_df_for_viewer)}")
-                self.s2_status_text_var.set(" | ".join(status_parts_s2)); self.update_s2_sharp_particle_selector() 
-                display_s2_final = cv2.cvtColor(img_fg_orig_uint8_s2, cv2.COLOR_GRAY2BGR)
-                if not self.s2_final_sharp_particles_df_for_viewer.empty:
-                    for _, p_row in self.s2_final_sharp_particles_df_for_viewer.iterrows():
-                        try: x,y,w,h = map(int, [p_row['bounding_x'],p_row['bounding_y'],p_row['bounding_w'],p_row['bounding_h']]); cv2.rectangle(display_s2_final, (x,y), (x+w,y+h), (0,255,255), 2) 
-                        except: pass 
-                self.ax_dynamic_vis.imshow(display_s2_final)
-                if well_mask_uint8_s2 is not None: 
-                    h_im, w_im = well_mask_uint8_s2.shape; xc_s2, yc_s2 = np.meshgrid(np.arange(w_im), np.arange(h_im)); masked_out_areas_s2 = (well_mask_uint8_s2 == 0) 
-                    self.ax_dynamic_vis.contourf(xc_s2, yc_s2, masked_out_areas_s2, levels=[0.5,1.5], colors='red', hatches=['//'], alpha=0.3)
-                self.ax_dynamic_vis.set_title(f"S2 Filtered Output ({len(self.s2_final_sharp_particles_df_for_viewer)} particles)", fontsize=8, loc='center'); self.ax_dynamic_vis.set_axis_off()
-                try:
-                    if os.path.exists(s2_temp_dir): shutil.rmtree(s2_temp_dir)
-                except Exception: pass
+                # CORRECTED: Pass df_sub_list_dict_s2 (list of dicts)
+                df_unsub_s2_list_dict, _, _ = _analyze_unsubtracted_locally(
+                    img_for_unsub_prep_s2, 
+                    df_sub_list_dict_s2, # Pass the list of dicts
+                    s1_unsub_eff['local_otsu_roi_size'], 
+                    s1_unsub_eff, 
+                    viewer_global_thresh_cfg, 
+                    viewer_global_source_illum
+                )
+                df_unsub_s2 = pd.DataFrame(df_unsub_s2_list_dict) 
+                if not df_unsub_s2.empty: df_unsub_s2['SAMPLE_ID'] = "viewer_s2"; df_unsub_s2['source_image_filename'] = fg_fn
+                
+                s1_particles_for_frame_df = _compare_and_fuse_particle_dfs(df_sub_s2, df_unsub_s2, s1_comp_eff)
+                if not s1_particles_for_frame_df.empty: s1_particles_for_frame_df = s1_particles_for_frame_df.reset_index().rename(columns={'index': 's1_viewer_fused_idx'})
+                self.s2_status_text_var.set(f"S2: S1 found {len(s1_particles_for_frame_df)} p. Analyzing quality...")
+                if s1_particles_for_frame_df.empty:
+                    self.ax_dynamic_vis.imshow(cv2.cvtColor(img_fg_orig_uint8, cv2.COLOR_GRAY2BGR)); self.ax_dynamic_vis.set_axis_off(); self.s2_final_sharp_particles_df_for_viewer = pd.DataFrame() 
+                else:
+                    s2_eff_config = params['s2_effective']
+                    s2_intermediate_cropper = ParticleCropper(s2_eff_config['intermediate_crop']); s2_temp_dir = os.path.join(self.temp_dir.name, f"s2_viewer_crops_{fg_fn.replace('.png','').replace('.','_')}"); os.makedirs(s2_temp_dir, exist_ok=True)
+                    s2_single_particle_results_list = []
+                    for _, s1_row in s1_particles_for_frame_df.iterrows(): 
+                        s2_res_obj = _process_single_particle_for_quality(s1_row, core_load_image(fg_row['full_path'], 'color'), img_fg_orig_uint8, s2_intermediate_cropper, s2_temp_dir, s2_eff_config, viewer_global_source_illum, viewer_global_thresh_cfg )
+                        s2_res_obj.input_particle_data['s1_viewer_fused_idx'] = s1_row['s1_viewer_fused_idx']; s2_single_particle_results_list.append(s2_res_obj.to_dict())
+                    s2_detailed_df = pd.DataFrame(s2_single_particle_results_list)
+                    s2_merged_for_score = pd.merge(s1_particles_for_frame_df, s2_detailed_df, left_on='s1_viewer_fused_idx', right_on='input_particle_index', how='left', suffixes=('', '_s2analysis'))
+                    s2_suitable_scored, _ = _filter_and_score_analysis_results(s2_merged_for_score, s2_eff_config)
+                    status_parts_s2 = [f"S1_Fused: {len(s1_particles_for_frame_df)}"]; artifact_status = []
+                    if s2_eff_config['filters_enabled']['black_mask_artifact']: artifact_status.append("BMaskOn") 
+                    else: artifact_status.append("BMaskOff")
+                    if s2_eff_config['filters_enabled']['on_crop_boundary']: artifact_status.append("BoundOn") 
+                    else: artifact_status.append("BoundOff")
+                    status_parts_s2.append(f"ArtF({','.join(artifact_status)}): {len(s2_suitable_scored)}")
+                    self.s2_final_sharp_particles_df_for_viewer = s2_suitable_scored.copy() 
+                    if not s2_suitable_scored.empty and s2_eff_config['filters_enabled']['final_sharpness']:
+                        sharp_filt_cfg = s2_eff_config['final_sharp_object_filter']
+                        if sharp_filt_cfg:
+                            metric_key, thresh_val = list(sharp_filt_cfg.items())[0]; metric_actual = metric_key.replace("_min","")
+                            if metric_actual in self.s2_final_sharp_particles_df_for_viewer.columns:
+                                pass_mask = pd.to_numeric(self.s2_final_sharp_particles_df_for_viewer[metric_actual], errors='coerce').fillna(float('-inf')) > thresh_val; self.s2_final_sharp_particles_df_for_viewer = self.s2_final_sharp_particles_df_for_viewer[pass_mask]
+                                status_parts_s2.append(f"SharpFOn({metric_actual}>{thresh_val:.2f}): {len(self.s2_final_sharp_particles_df_for_viewer)}")
+                    elif s2_eff_config['filters_enabled']['final_sharpness']: status_parts_s2.append(f"SharpFOn: 0")
+                    else: status_parts_s2.append(f"SharpFOff: {len(self.s2_final_sharp_particles_df_for_viewer)}")
+                    self.s2_status_text_var.set(" | ".join(status_parts_s2)); self.update_s2_sharp_particle_selector() 
+                    display_s2_final = cv2.cvtColor(img_fg_orig_uint8, cv2.COLOR_GRAY2BGR) 
+                    if not self.s2_final_sharp_particles_df_for_viewer.empty:
+                        for _, p_row in self.s2_final_sharp_particles_df_for_viewer.iterrows():
+                            try: x,y,w,h = map(int, [p_row['bounding_x'],p_row['bounding_y'],p_row['bounding_w'],p_row['bounding_h']]); cv2.rectangle(display_s2_final, (x,y), (x+w,y+h), (0,255,255), 2) 
+                            except: pass 
+                    self.ax_dynamic_vis.imshow(display_s2_final)
+                    if general_well_mask_for_roi_uint8 is not None: 
+                        h_im, w_im = general_well_mask_for_roi_uint8.shape; xc_s2, yc_s2 = np.meshgrid(np.arange(w_im), np.arange(h_im)); masked_out_areas_s2 = (general_well_mask_for_roi_uint8 == 0) 
+                        self.ax_dynamic_vis.contourf(xc_s2, yc_s2, masked_out_areas_s2, levels=[0.5,1.5], colors='red', hatches=['//'], alpha=0.3)
+                    self.ax_dynamic_vis.set_title(f"S2 Filtered Output ({len(self.s2_final_sharp_particles_df_for_viewer)} particles)", fontsize=8, loc='center'); self.ax_dynamic_vis.set_axis_off()
+                    try:
+                        if os.path.exists(s2_temp_dir): shutil.rmtree(s2_temp_dir)
+                    except Exception: pass
             self.fig_dynamic_vis.tight_layout(rect=[0, 0, 1, 0.96])
         
         elif mode in ["S3", "S4"]: 
             self.ax_dynamic_vis = self.fig_dynamic_vis.add_subplot(111) 
             s3_s4_processing_params = params['s3_s4_segmentation_and_feature_params']
-            
             self.ax_dynamic_vis.set_axis_off(); img_f_original = self.image_array_gray_float; title_b = os.path.basename(self.image_path or '')
-            
             viewer_illum_s3s4_eff = s3_s4_processing_params.get('source_image_illumination_type')
             viewer_thresh_s3s4_eff = s3_s4_processing_params.get('thresholding_mode')
             unsharp_enabled_eff = s3_s4_processing_params.get('enable_unsharp_masking')
@@ -845,27 +916,19 @@ class FeatureViewerApp:
             elif mode == "S4":
                 self.ax_dynamic_vis.set_title(f"S4: {title_b} {title_suffix}", fontsize=8)
                 _, _, s4_main_props_from_seg = segment_main_body_from_image_float(img_f_original.copy(), s3_s4_processing_params)
-                
                 s4_main_props_for_vis = None
                 if s4_main_props_from_seg:
                     egg_post_frac = s3_s4_processing_params.get('egg_posterior_pixel_fraction', 0.45) 
-                    s4_main_props_for_vis, _, _ = _calculate_and_attach_posterior_attributes(
-                        s4_main_props_from_seg,
-                        img_f_original.shape,
-                        egg_post_frac
-                    )
-                
+                    s4_main_props_for_vis, _, _ = _calculate_and_attach_posterior_attributes(s4_main_props_from_seg, img_f_original.shape, egg_post_frac)
                 s4rm, s4fm, _ = segment_main_body_from_image_float(img_f_original.copy(), s3_s4_processing_params) 
-                
                 if not (s4rm is not None or s4fm is not None) : self.ax_dynamic_vis.imshow(img_f_original, cmap='gray'); self.ax_dynamic_vis.set_title("S4: Segmentation Failed", fontsize=8)
                 else:
                     tmp_s4_vis = os.path.join(self.temp_dir.name, "s4_viewer_vis.png")
                     visualize_detailed_morphology(img_f_original, s4_main_props_for_vis, s4rm, s4fm, tmp_s4_vis)
                     if os.path.exists(tmp_s4_vis): self.ax_dynamic_vis.imshow(skimage.io.imread(tmp_s4_vis))
                     else: self.ax_dynamic_vis.imshow(img_f_original, cmap='gray')
-            self.fig_dynamic_vis.tight_layout() # General tight_layout for S3/S4
+            self.fig_dynamic_vis.tight_layout()
         self.canvas_dynamic_vis.draw()
-
 
     def update_s2_sharp_particle_selector(self):
         if not self.s2_final_sharp_particles_df_for_viewer.empty:
