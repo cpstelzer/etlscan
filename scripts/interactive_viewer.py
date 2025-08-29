@@ -25,6 +25,7 @@ import cv2
 from sklearn.neighbors import BallTree 
 import shutil 
 import re
+from matplotlib.patches import Patch
 
 try:
     from src.utils.config_loader import get_config, load_config, get_unified_segmentation_params 
@@ -794,6 +795,7 @@ class FeatureViewerApp:
             if mode == "S1":
                 axes_s1 = self.fig_dynamic_vis.subplots(2, 2) 
                 self.ax_dynamic_vis = axes_s1
+
                 df_sub_list_dict, binary_mask_sub_disp = _analyze_single_subtracted_image_global_thresh(img_for_sub_analysis_uint8, s1_sub_eff, viewer_global_thresh_cfg)
                 df_subtracted_particles_viewer = pd.DataFrame(df_sub_list_dict) 
                 if not df_subtracted_particles_viewer.empty: df_subtracted_particles_viewer['SAMPLE_ID'] = "viewer_s1"; df_subtracted_particles_viewer['source_image_filename'] = fg_fn
@@ -808,8 +810,55 @@ class FeatureViewerApp:
                 
                 df_unsub_list_dict, composite_binary_mask_unsub_disp, (example_roi_img_disp, example_roi_hist_ravel_disp, example_roi_otsu_disp) = _analyze_unsubtracted_locally(img_for_unsub_prep, df_sub_list_dict, s1_unsub_eff['local_otsu_roi_size'], s1_unsub_eff, viewer_global_thresh_cfg, viewer_global_source_illum)
                 
-                axes_s1[0,0].imshow(binary_mask_sub_disp if binary_mask_sub_disp is not None else np.zeros_like(img_fg_orig_uint8), cmap='gray'); axes_s1[0,0].set_title(f"Subtracted Binary ({len(df_sub_list_dict)} p.)", fontsize=8); axes_s1[0,0].set_axis_off()
-                axes_s1[0,1].imshow(composite_binary_mask_unsub_disp if composite_binary_mask_unsub_disp is not None else np.zeros_like(img_fg_orig_uint8), cmap='gray'); axes_s1[0,1].set_title(f"Unsub Local Binary Comp. ({len(df_unsub_list_dict)} p.)", fontsize=8); axes_s1[0,1].set_axis_off()
+                # --- START: MODIFICATION FOR S1 WELL AREA VISUALIZATION ---
+                cfg_well_id_vis = s1_bpwa_eff_cfg.get('well_identification', {})
+                low_thresh_vis = cfg_well_id_vis.get('low_threshold_value', 5)
+                
+                # Find largest contour for FG image
+                largest_contour_fg = None
+                _, thresh_img_fg = cv2.threshold(img_fg_orig_uint8, low_thresh_vis, 255, cv2.THRESH_BINARY)
+                contours_fg = core_find_contours(thresh_img_fg, mode="external", method="simple")
+                if contours_fg:
+                    largest_contour_fg = max(contours_fg, key=cv2.contourArea)
+
+                # Find largest contour for BG image
+                largest_contour_bg = None
+                _, thresh_img_bg = cv2.threshold(img_bg_orig_uint8, low_thresh_vis, 255, cv2.THRESH_BINARY)
+                contours_bg = core_find_contours(thresh_img_bg, mode="external", method="simple")
+                if contours_bg:
+                    largest_contour_bg = max(contours_bg, key=cv2.contourArea)
+
+                # Plot 1: Subtracted Binary with FG Well Area
+                ax_sub = axes_s1[0,0]
+                ax_sub.imshow(binary_mask_sub_disp if binary_mask_sub_disp is not None else np.zeros_like(img_fg_orig_uint8), cmap='gray')
+                ax_sub.set_title(f"Subtracted Binary ({len(df_sub_list_dict)} p.)", fontsize=8)
+                ax_sub.set_axis_off()
+
+                if largest_contour_fg is not None:
+                    h_im, w_im = img_fg_orig_uint8.shape
+                    xc, yc = np.meshgrid(np.arange(w_im), np.arange(h_im))
+                    fg_well_mask = np.zeros_like(img_fg_orig_uint8, dtype=np.uint8)
+                    cv2.drawContours(fg_well_mask, [largest_contour_fg], -1, 1, thickness=cv2.FILLED)
+                    ax_sub.contourf(xc, yc, fg_well_mask, levels=[0.5, 1.5], colors='blue', hatches=['//'], alpha=0.4)
+                    legend_elements_sub = [Patch(facecolor='blue', edgecolor='blue', hatch='//', alpha=0.4, label='FG Well Area')]
+                    ax_sub.legend(handles=legend_elements_sub, loc='upper right', fontsize='xx-small')
+
+                # Plot 2: Unsubtracted Composite Binary with BG Well Area
+                ax_unsub = axes_s1[0,1]
+                ax_unsub.imshow(composite_binary_mask_unsub_disp if composite_binary_mask_unsub_disp is not None else np.zeros_like(img_fg_orig_uint8), cmap='gray')
+                ax_unsub.set_title(f"Unsub Local Binary Comp. ({len(df_unsub_list_dict)} p.)", fontsize=8)
+                ax_unsub.set_axis_off()
+
+                if largest_contour_bg is not None:
+                    h_im, w_im = img_bg_orig_uint8.shape
+                    xc, yc = np.meshgrid(np.arange(w_im), np.arange(h_im))
+                    bg_well_mask = np.zeros_like(img_bg_orig_uint8, dtype=np.uint8)
+                    cv2.drawContours(bg_well_mask, [largest_contour_bg], -1, 1, thickness=cv2.FILLED)
+                    ax_unsub.contourf(xc, yc, bg_well_mask, levels=[0.5, 1.5], colors='yellow', hatches=['\\\\'], alpha=0.5)
+                    legend_elements_unsub = [Patch(facecolor='yellow', edgecolor='yellow', hatch='\\\\', alpha=0.5, label='BG Well Area')]
+                    ax_unsub.legend(handles=legend_elements_unsub, loc='upper right', fontsize='xx-small')
+                # --- END: MODIFICATION FOR S1 WELL AREA VISUALIZATION ---
+                
                 if example_roi_img_disp is not None:
                     axes_s1[1,0].imshow(example_roi_img_disp, cmap='gray'); axes_s1[1,0].set_title("Example Local ROI (for hist)", fontsize=8); axes_s1[1,0].set_axis_off()
                     if example_roi_hist_ravel_disp is not None and example_roi_hist_ravel_disp.size > 0:

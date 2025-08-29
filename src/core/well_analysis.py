@@ -32,8 +32,22 @@ def create_well_mask_black_plate(
     min_circularity_thresh = config_well_mask.get('min_circularity', 0.85) 
 
     _, threshold_img = cv2.threshold(image_gray_uint8, low_thresh, 255, cv2.THRESH_BINARY)
-    
-    contours = find_contours(threshold_img, mode="external", method="simple")
+
+    # --- START: MODIFICATION ---
+    # Apply a morphological opening to remove small noise and protrusions from the
+    # well's border before finding the contour. This ensures a smooth perimeter
+    # for an accurate circularity calculation.
+    # 1. Opening: Removes small noise and protrusions from the well's border.
+    # 2. Closing: Fills small holes and gaps in the well's border.
+    # This combination produces a much smoother contour for accurate circularity calculation.
+    kernel_size = 9 # Using a slightly larger kernel for a stronger effect
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (kernel_size, kernel_size))
+    opened_img = cv2.morphologyEx(threshold_img, cv2.MORPH_OPEN, kernel, iterations=1)
+    cleaned_threshold_img = cv2.morphologyEx(opened_img, cv2.MORPH_CLOSE, kernel, iterations=1)
+    # Find contours on the cleaned binary image
+    contours = find_contours(cleaned_threshold_img, mode="external", method="simple")
+    # --- END: MODIFICATION ---
+
     if not contours:
         logger.warning("create_well_mask_black_plate: No contours found after low thresholding.")
         return None, None

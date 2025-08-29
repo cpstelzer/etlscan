@@ -1,7 +1,7 @@
 # config/pipeline_config.yml
 # Global Settings
 project_base_dir: "D:/sandbox/" # CHANGE THIS to your project's root
-sample_subdir_name: "20250409_plate4_well1" # Example, will be overridden by run_pipeline.py
+sample_subdir_name: "D:/sizeselection/gen1_collimated_750us/" # Example, will be overridden by run_pipeline.py
 
 # Logging Configuration
 logging:
@@ -39,7 +39,7 @@ stage_01_initial_detection:
       low_threshold_value: 10 # For separating well from very dark plate background
       min_expected_diameter_px: 1500 # Adjust based on your setup (magnification, well size)
       max_expected_diameter_px: 4000 # Adjust based on your setup
-      min_circularity: 0.80          # How circular the detected well should be (0 to 1)
+      min_circularity: 0.75          # How circular the detected well should be (0 to 1)
 
     # Parameters for calculate_well_brightness_peak (used by calc_avg_well_brightness and match_well_brightness)
     brightness_peak_calculation:

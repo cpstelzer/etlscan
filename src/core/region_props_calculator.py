@@ -75,11 +75,16 @@ def calculate_contour_measurements(contour: np.ndarray) -> Optional[Dict[str, An
             logger.debug("Contour M00 is 0, skipping measurements.")
             return None  # Avoid division by zero
 
+        # Direct measures of the contour
         measurements['X'] = int(M["m10"] / M["m00"])
         measurements['Y'] = int(M["m01"] / M["m00"])
         measurements['area'] = cv2.contourArea(contour)
         measurements['perimeter'] = cv2.arcLength(contour, True)
+        measurements['equivalent_diameter'] = np.sqrt(4 * measurements['area'] / np.pi) if measurements['area'] > 0 else 0
+        measurements['circularity'] = (4 * np.pi * measurements['area'] / (measurements['perimeter'] ** 2)) if measurements['perimeter'] > 0 else 0
+        
 
+        # Fitting an ellipse to get orientation and eccentricity
         try:
             if len(contour) >= 5: # fitEllipse requires at least 5 points
                 ellipse = cv2.fitEllipse(contour)
@@ -99,17 +104,42 @@ def calculate_contour_measurements(contour: np.ndarray) -> Optional[Dict[str, An
             measurements['orientation'] = np.nan
             measurements['eccentricity'] = np.nan
 
+        # Fitting a rotated rectangle
+        rot_rect = cv2.minAreaRect(contour)
+        (width, height) = rot_rect[1]
+        
+        if height > 1e-6: # Avoid division by zero  
+            measurements['aspect_ratio'] = float(width) / height if width > height else float(height) / width
+        else:
+            measurements['aspect_ratio'] = np.nan
+        measurements['rot_rect_width'] = width
+        measurements['rot_rect_height'] = height
+
+        r_angle = rot_rect[2] # Angle in degrees
+        # Adjust angle to be in [0, 180], like in an ellipse
+        if width < height:
+            measurements['rot_rect_angle'] = (r_angle + 90) % 180  
+        else:
+            measurements['rot_rect_angle'] = r_angle % 180
+
+        measurements['rot_rect_center_x'] = rot_rect[0][0]
+        measurements['rot_rect_center_y'] = rot_rect[0][1]
+        measurements['rot_rect_area'] = width * height  
+       
+        # Fitting a bounding box
         x, y, w, h = cv2.boundingRect(contour)
         measurements['bounding_x'] = x
         measurements['bounding_y'] = y
         measurements['bounding_w'] = w
         measurements['bounding_h'] = h
-        measurements['aspect_ratio'] = float(w) / h if h != 0 else np.nan
+        
 
+        # Fitting a convex hull
         hull = cv2.convexHull(contour)
         hull_area = cv2.contourArea(hull)
         measurements['solidity'] = measurements['area'] / hull_area if hull_area != 0 else np.nan
 
+        # Fitting a minimum enclosing circle
         (center_EC, radius_EC) = cv2.minEnclosingCircle(contour)
         measurements['feret_diameter'] = 2 * radius_EC
 
