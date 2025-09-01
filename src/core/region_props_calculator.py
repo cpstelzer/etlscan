@@ -83,7 +83,6 @@ def calculate_contour_measurements(contour: np.ndarray) -> Optional[Dict[str, An
         measurements['equivalent_diameter'] = np.sqrt(4 * measurements['area'] / np.pi) if measurements['area'] > 0 else 0
         measurements['circularity'] = (4 * np.pi * measurements['area'] / (measurements['perimeter'] ** 2)) if measurements['perimeter'] > 0 else 0
         
-
         # Fitting an ellipse to get orientation and eccentricity
         try:
             if len(contour) >= 5: # fitEllipse requires at least 5 points
@@ -114,16 +113,7 @@ def calculate_contour_measurements(contour: np.ndarray) -> Optional[Dict[str, An
             measurements['aspect_ratio'] = np.nan
         measurements['rot_rect_width'] = width
         measurements['rot_rect_height'] = height
-
-        r_angle = rot_rect[2] # Angle in degrees
-        # Adjust angle to be in [0, 180], like in an ellipse
-        if width < height:
-            measurements['rot_rect_angle'] = (r_angle + 90) % 180  
-        else:
-            measurements['rot_rect_angle'] = r_angle % 180
-
-        measurements['rot_rect_center_x'] = rot_rect[0][0]
-        measurements['rot_rect_center_y'] = rot_rect[0][1]
+        measurements['rot_rect_angle'] = rot_rect[2] # Angle in degrees
         measurements['rot_rect_area'] = width * height  
        
         # Fitting a bounding box
@@ -133,7 +123,6 @@ def calculate_contour_measurements(contour: np.ndarray) -> Optional[Dict[str, An
         measurements['bounding_w'] = w
         measurements['bounding_h'] = h
         
-
         # Fitting a convex hull
         hull = cv2.convexHull(contour)
         hull_area = cv2.contourArea(hull)
