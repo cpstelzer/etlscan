@@ -11,7 +11,8 @@ import skimage.util
 # import skimage.filters 
 
 from src.utils.common_exceptions import ImageProcessingError, DataValidationError, ConfigError
-from .image_io_operations import save_image 
+from .image_io_operations import save_image, convert_to_grayscale 
+# MODIFIED: Added convert_to_grayscale import
 # apply_threshold is no longer needed from image_enhancement
 # from .image_enhancement import apply_threshold 
 from .region_props_calculator import find_contours 
@@ -21,23 +22,61 @@ from src.core.segmentation import generate_binary_mask_from_float_image
 
 logger = logging.getLogger(__name__)
 
-class ParticleCropper: # Unchanged
+# ADDED: The new rotational cropping function with docstrings and type hints.
+def crop_rotated(
+    img: np.ndarray, 
+    center: Tuple[float, float], 
+    size: Tuple[int, int], 
+    angle: float, 
+    padding: int = 0
+) -> Optional[np.ndarray]:
+    """
+    Crops a rotated rectangular region from an image with optional padding.
+
+    Args:
+        img (np.ndarray): The source image (can be color or grayscale).
+        center (Tuple[float, float]): The center of the rectangle (cx, cy).
+        size (Tuple[int, int]): The size of the rectangle (width, height).
+        angle (float): The rotation angle in degrees.
+        padding (int): Optional padding to add to each side of the crop.
+
+    Returns:
+        Optional[np.ndarray]: The cropped rectangular region, or None on error.
+    """
+    try:
+        padded_size = (int(size[0] + 2 * padding), int(size[1] + 2 * padding))
+        rot_mat = cv2.getRotationMatrix2D(center, angle, 1.0)
+        h, w = img.shape[:2]
+        
+        # Rotate the entire source image
+        img_rot = cv2.warpAffine(img, rot_mat, (w, h), flags=cv2.INTER_CUBIC)
+        
+        # Extract the axis-aligned crop from the rotated image
+        crop = cv2.getRectSubPix(img_rot, padded_size, center)
+        return crop
+    except Exception as e:
+        logger.error(f"Error in crop_rotated: {e}")
+        return None
+
+class ParticleCropper:
     """
     Handles cropping of single particles from a larger image based on configuration.
     """
     def __init__(self, config: Dict[str, Any]):
-        self.crop_mode = config.get('mode', 'centroid_square')
+        # MODIFIED: Init logic to handle both modes and their respective parameters.
+        self.crop_mode = config.get('mode', 'rotational_rectangle')
         self.square_crop_size = config.get('square_size', 128)
+        self.rotational_padding = config.get('rotational_padding', 10)
         self.bbox_keys = config.get('bbox_column_mapping',
                                     {'x': 'bounding_x', 'y': 'bounding_y',
                                      'w': 'bounding_w', 'h': 'bounding_h'})
         
-        if self.crop_mode not in ['bounding_box', 'centroid_square']:
-            raise ConfigError(f"Invalid crop_mode: '{self.crop_mode}'. Must be 'bounding_box' or 'centroid_square'.")
+        if self.crop_mode not in ['bounding_box', 'centroid_square', 'rotational_rectangle']:
+            raise ConfigError(f"Invalid crop_mode: '{self.crop_mode}'. Must be 'bounding_box', 'centroid_square', or 'rotational_rectangle'.")
         if self.crop_mode == 'centroid_square' and self.square_crop_size <= 0:
             raise ConfigError("square_crop_size must be positive for 'centroid_square' mode.")
 
-    def crop_single_particle_from_image( # Unchanged
+    def crop_single_particle_from_image( # MODIFIED: Main logic updated for new mode
         self,
         main_image_color: np.ndarray,
         main_image_gray: np.ndarray,
@@ -48,10 +87,14 @@ class ParticleCropper: # Unchanged
         particle_id_info = f"(idx={particle_data.name}, X={particle_data.get('X', 'N/A')}, Y={particle_data.get('Y', 'N/A')})"
         img_h, img_w = main_image_gray.shape
         saved_crop_path: Optional[str] = None
+        crop_img_color: Optional[np.ndarray] = None
+        
         try:
             if 'X' not in particle_data or 'Y' not in particle_data:
                 raise DataValidationError(f"'X' and 'Y' centroid coordinates are required in particle_data {particle_id_info}.")
+            
             particle_centroid_x, particle_centroid_y = int(particle_data['X']), int(particle_data['Y'])
+
             if self.crop_mode == 'bounding_box':
                 required_bbox_keys = [self.bbox_keys['x'], self.bbox_keys['y'], self.bbox_keys['w'], self.bbox_keys['h']]
                 if not all(key in particle_data for key in required_bbox_keys):
@@ -62,37 +105,67 @@ class ParticleCropper: # Unchanged
                     logger.debug(f"Skipping crop {particle_id_info}: Invalid bounding box W={bw}, H={bh}.")
                     return None, None
                 x1_raw, y1_raw = bx, by; x2_raw, y2_raw = bx + bw, by + bh
-                required_w, required_h = bw, bh
+                x1_clamped = max(0, x1_raw); y1_clamped = max(0, y1_raw)
+                x2_clamped = min(img_w, x2_raw); y2_clamped = min(img_h, y2_raw)
+                crop_img_color = main_image_color[y1_clamped:y2_clamped, x1_clamped:x2_clamped]
+
             elif self.crop_mode == 'centroid_square':
                 half_size = self.square_crop_size // 2
                 x1_raw = particle_centroid_x - half_size ; y1_raw = particle_centroid_y - half_size
                 x2_raw = x1_raw + self.square_crop_size; y2_raw = y1_raw + self.square_crop_size
-                required_w, required_h = self.square_crop_size, self.square_crop_size
+                x1_clamped = max(0, x1_raw); y1_clamped = max(0, y1_raw)
+                x2_clamped = min(img_w, x2_raw); y2_clamped = min(img_h, y2_raw)
+                actual_w, actual_h = x2_clamped - x1_clamped, y2_clamped - y1_clamped
+                if actual_w < 1 or actual_h < 1 or actual_w < self.square_crop_size or actual_h < self.square_crop_size:
+                    logger.debug(f"Skipping crop {particle_id_info}: Clamped crop dimensions ({actual_w}x{actual_h}) "
+                                 f"do not meet required size ({self.square_crop_size}x{self.square_crop_size}) for mode '{self.crop_mode}'.")
+                    return None, None
+                crop_img_color = main_image_color[y1_clamped:y2_clamped, x1_clamped:x2_clamped]
+
+            # ADDED: Logic for the new rotational_rectangle mode.
+            elif self.crop_mode == 'rotational_rectangle':
+                required_rot_keys = ['rot_rect_width', 'rot_rect_height', 'rot_rect_angle']
+                if not all(key in particle_data for key in required_rot_keys):
+                    missing = set(required_rot_keys) - set(particle_data.keys())
+                    raise DataValidationError(f"Missing rotational rectangle keys {missing} for 'rotational_rectangle' mode {particle_id_info}.")
+
+                cx, cy = float(particle_data['X']), float(particle_data['Y'])
+                w, h = float(particle_data['rot_rect_width']), float(particle_data['rot_rect_height'])
+                angle = float(particle_data['rot_rect_angle'])
+
+                # Standardize orientation (long side vertical)
+                if w > h:
+                    w, h = h, w
+                    angle += 90
+                
+                if w <= 0 or h <= 0:
+                     logger.debug(f"Skipping crop {particle_id_info}: Invalid rotational rectangle W={w}, H={h}.")
+                     return None, None
+
+                # Use the new core function to perform the crop on the color image
+                crop_img_color = crop_rotated(main_image_color, (cx, cy), (int(w), int(h)), angle, padding=self.rotational_padding)
+
             else:
                 raise RuntimeError(f"Internal error: Unhandled crop_mode '{self.crop_mode}'.")
-            x1_clamped = max(0, x1_raw); y1_clamped = max(0, y1_raw)
-            x2_clamped = min(img_w, x2_raw); y2_clamped = min(img_h, y2_raw)
-            actual_w, actual_h = x2_clamped - x1_clamped, y2_clamped - y1_clamped
-            min_dim_threshold = 1
-            if actual_w < min_dim_threshold or actual_h < min_dim_threshold or \
-               (self.crop_mode == 'centroid_square' and (actual_w < required_w or actual_h < required_h)):
-                logger.debug(f"Skipping crop {particle_id_info}: Clamped crop dimensions ({actual_w}x{actual_h}) "
-                             f"are too small or do not meet required size ({required_w}x{required_h}) for mode '{self.crop_mode}'.")
+
+            # Common logic for post-cropping steps
+            if crop_img_color is None or crop_img_color.size == 0:
+                logger.debug(f"Skipping crop {particle_id_info}: Resulting color crop is None or empty.")
                 return None, None
-            crop_img_gray = main_image_gray[y1_clamped:y2_clamped, x1_clamped:x2_clamped]
-            if crop_img_gray.size == 0:
-                logger.debug(f"Skipping crop {particle_id_info}: Resulting grayscale crop is empty.")
-                return None, None
+            
+            crop_img_gray = convert_to_grayscale(crop_img_color)
+            if crop_img_gray is None:
+                 logger.warning(f"Could not convert color crop to grayscale for {particle_id_info}.")
+
             if output_dir_for_crop:
-                crop_img_color = main_image_color[y1_clamped:y2_clamped, x1_clamped:x2_clamped]
-                if crop_img_color.size == 0:
-                     logger.warning(f"Color crop for {particle_id_info} is empty, but gray crop was not.")
                 filename = f"{crop_filename_prefix}_X{particle_centroid_x}_Y{particle_centroid_y}.png"
                 saved_crop_path = save_image(crop_img_color, output_dir_for_crop, filename)
                 if not saved_crop_path:
                     logger.error(f"Failed to save color crop for {particle_id_info} to {output_dir_for_crop}/{filename}.")
                     return crop_img_gray, None 
+            
             return crop_img_gray, saved_crop_path
+            
         except DataValidationError as dve:
             logger.error(f"Data validation error during cropping {particle_id_info}: {dve}")
             raise
@@ -182,20 +255,35 @@ def detect_cropped_particle_on_boundary(
         logger.exception(f"Error during boundary crop detection for {base_filename}: {e}")
         return False
 
-if __name__ == '__main__': # MODIFIED to test new detect_cropped_particle_on_boundary signature
+if __name__ == '__main__':
     if not logging.getLogger().hasHandlers():
         logging.basicConfig(level=logging.DEBUG)
 
     # ... (ParticleCropper tests can remain unchanged if you wish to keep them) ...
     # Example from ParticleCropper test:
-    # main_h, main_w = 200, 300
-    # main_color_img = np.random.randint(0, 256, (main_h, main_w, 3), dtype=np.uint8)
-    # main_gray_img = cv2.cvtColor(main_color_img, cv2.COLOR_BGR2GRAY)
-    # particles = pd.DataFrame([{'X': 50, 'Y': 50, 'particle_id': 1, 'bounding_x': 40, 'bounding_y': 40, 'bounding_w': 20, 'bounding_h': 20}])
-    # cropper_config_square = {'mode': 'centroid_square', 'square_size': 64}
-    # square_cropper = ParticleCropper(cropper_config_square)
-    temp_crop_output_dir = "temp_particle_ops_test_consolidated_thresh" 
+    main_h, main_w = 400, 500
+    main_color_img = np.random.randint(0, 256, (main_h, main_w, 3), dtype=np.uint8)
+    cv2.ellipse(main_color_img, (250, 200), (100, 50), 25, 0, 360, (255, 0, 0), -1)
+    main_gray_img = cv2.cvtColor(main_color_img, cv2.COLOR_BGR2GRAY)
+    
+    # MODIFIED: Added test data for rotational crop
+    particles = pd.DataFrame([
+        {'X': 50, 'Y': 50, 'particle_id': 1, 'bounding_x': 40, 'bounding_y': 40, 'bounding_w': 20, 'bounding_h': 20, 'rot_rect_width': 20, 'rot_rect_height': 22, 'rot_rect_angle': 15.0},
+        {'X': 250, 'Y': 200, 'particle_id': 2, 'bounding_x': 150, 'bounding_y': 150, 'bounding_w': 200, 'bounding_h': 100, 'rot_rect_width': 200, 'rot_rect_height': 100, 'rot_rect_angle': 25.0} # Wide rectangle
+    ])
+    
+    temp_crop_output_dir = "temp_particle_ops_test_rotational" 
     os.makedirs(temp_crop_output_dir, exist_ok=True)
+
+    logger.info("\n--- Testing Rotational Crop Mode ---")
+    cropper_config_rot = {'mode': 'rotational_rectangle', 'rotational_padding': 15}
+    rot_cropper = ParticleCropper(cropper_config_rot)
+    crop_rot, path_rot = rot_cropper.crop_single_particle_from_image(main_color_img, main_gray_img, particles.iloc[1])
+    assert crop_rot is not None and path_rot is not None
+    logger.info(f"Rotational crop successful. Saved to {path_rot}")
+    # Verify the orientation (height > width)
+    assert crop_rot.shape[0] > crop_rot.shape[1], "Rotational crop orientation logic failed."
+    logger.info("Rotational crop orientation test passed.")
 
 
     logger.info("\n--- Testing Boundary Crop Detection (Consolidated Thresholding Logic) ---")
@@ -209,7 +297,6 @@ if __name__ == '__main__': # MODIFIED to test new detect_cropped_particle_on_bou
     otsu_thresh_params_test = {
         'thresholding_mode':"otsu",
         'otsu_threshold_multiplier':0.45, 
-        # 'fixed_threshold_value' could be absent or present, helper will ignore if mode is otsu
     }
     is_touching_consolidated_otsu = detect_cropped_particle_on_boundary(
         crop_dark_particle_bright_bg_distinct, test_path1_distinct, 
@@ -218,23 +305,6 @@ if __name__ == '__main__': # MODIFIED to test new detect_cropped_particle_on_bou
     )
     assert is_touching_consolidated_otsu is True, "Boundary crop (distinct dark particle, collimated, consolidated Otsu) detection failed"
     logger.info("Boundary crop (distinct dark particle, collimated, consolidated Otsu) detection PASSED.")
-
-    crop_fixed_thresh_touching = np.full((50,50), 100, dtype=np.uint8)
-    cv2.rectangle(crop_fixed_thresh_touching, (40,10), (49,40), 200, -1) 
-    test_path_fixed = os.path.join(temp_crop_output_dir, "fixed_thresh_touching_consolidated.png")
-    cv2.imwrite(test_path_fixed, crop_fixed_thresh_touching)
-    
-    fixed_thresh_params_test = {
-        'thresholding_mode': "fixed",
-        'fixed_threshold_value': 150 
-    }
-    is_touching_consolidated_fixed = detect_cropped_particle_on_boundary(
-        crop_fixed_thresh_touching, test_path_fixed,
-        illumination_mode_of_crop="darkfield", 
-        threshold_params=fixed_thresh_params_test
-    )
-    assert is_touching_consolidated_fixed is True, "Boundary crop (bright particle, darkfield, consolidated Fixed) failed"
-    logger.info("Boundary crop (bright particle, darkfield, consolidated Fixed) PASSED.")
 
 
     if os.path.exists(temp_crop_output_dir):

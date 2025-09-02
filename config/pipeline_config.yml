@@ -83,16 +83,23 @@ stage_01_initial_detection:
     enabled: False 
     output_subdir_suffix: "_wim_particle_detection_debug"
 
-# Stage 2: Quality Filter (unchanged)
+# Stage 2: Quality Filter
 stage_02_quality_filter:
   intermediate_crop:
-    mode: "centroid_square" 
-    square_size: 150 
+    # MODIFIED: 'rotational_rectangle' is now the default mode.
+    mode: "rotational_rectangle" 
+    # ADDED: Padding for the new default mode.
+    rotational_padding: 10
+    # MODIFIED: square_size is now only needed if mode is 'centroid_square'.
+    square_size: 150 # Kept for 'centroid_square' mode
     bbox_column_mapping: {x: "bounding_x", y: "bounding_y", w: "bounding_w", h: "bounding_h"}
   black_mask_check: {min_area_ratio: 0.05}
   sharpness_metrics: ["variance_laplacian", "tenengrad_variance", "energy_laplacian", "energy_gradient"]
   final_sharp_object_filter: {combined_sharpness_min: 0.25}
-  final_sharp_crop_size: 150 
+  # MODIFIED: Replaced 'final_sharp_crop_size' with a more flexible dictionary.
+  final_sharp_crop_settings:
+    centroid_square_size: 150
+    rotational_padding: 10
   filters_enabled: {black_mask_artifact: true, on_crop_boundary: true, final_sharpness: true}     
 
 # Stage 3: ML Classification (unchanged from previous step)

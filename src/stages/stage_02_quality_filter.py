@@ -142,12 +142,29 @@ def _save_final_sharp_object_crops(
     sharp_objects_df: pd.DataFrame, 
     image_dir_path: str, 
     final_sharp_crops_output_dir: str,
-    final_crop_size: int,
+    # MODIFIED: Pass the new flexible settings dictionary
+    final_crop_settings: Dict[str, Any],
+    # MODIFIED: Pass the crop mode to be used
+    crop_mode: str,
     sample_info: Dict[str, str] 
     ):
-    logger.info(f"Saving final sharp object crops to: {final_sharp_crops_output_dir}")
+    logger.info(f"Saving final sharp object crops to: {final_sharp_crops_output_dir} using mode '{crop_mode}'")
     os.makedirs(final_sharp_crops_output_dir, exist_ok=True)
     sharp_crops_saved_count = 0
+
+    # MODIFIED: Construct the configuration for the final cropper dynamically.
+    final_cropper_cfg = {'mode': crop_mode}
+    if crop_mode == 'centroid_square':
+        final_cropper_cfg['square_size'] = final_crop_settings.get('centroid_square_size', 150)
+    elif crop_mode == 'rotational_rectangle':
+        final_cropper_cfg['rotational_padding'] = final_crop_settings.get('rotational_padding', 10)
+    
+    try:
+        final_cropper = ParticleCropper(final_cropper_cfg)
+    except ConfigError as e:
+        logger.error(f"Could not initialize final cropper for mode '{crop_mode}': {e}")
+        return
+
     for image_filename, group in sharp_objects_df.groupby('source_image_filename'):
         full_image_path_orig = os.path.join(image_dir_path, image_filename)
         original_color_img = load_image(full_image_path_orig, mode='color')
@@ -155,24 +172,41 @@ def _save_final_sharp_object_crops(
             logger.warning(f"Could not load original image {full_image_path_orig} for final cropping. Skipping {len(group)} sharp objects from this image.")
             continue
         logger.debug(f"Loaded {image_filename} for final sharp object cropping.")
+        
+        # A gray image is needed by crop_single_particle_from_image signature, even if not always used by the logic.
         dummy_gray_for_final_crop = convert_to_grayscale(original_color_img)
         if dummy_gray_for_final_crop is None:
             logger.error(f"Could not create dummy gray for final crop from {image_filename}. Skipping its sharp objects.")
             continue
+
         for _, particle_row in group.iterrows():
-            try: coord_x = int(particle_row['original_X']) ; coord_y = int(particle_row['original_Y'])
+            # This data is needed for both modes
+            try: coord_x = int(particle_row['X']) ; coord_y = int(particle_row['Y'])
             except (KeyError, ValueError, TypeError) as e:
-                logger.error(f"Missing or invalid original coordinates for particle in {image_filename} (X={particle_row.get('original_X')}, Y={particle_row.get('original_Y')}). Error: {e}. Skipping crop.")
+                logger.error(f"Missing or invalid coordinates for particle in {image_filename} (X={particle_row.get('X')}, Y={particle_row.get('Y')}). Error: {e}. Skipping crop.")
                 continue
+
             frame_num = extract_frame_from_filename(image_filename) 
             if frame_num is None: frame_num_str = "UnkF"
             else: frame_num_str = f"F{frame_num:05d}"
+            
             output_crop_filename_prefix = (f"{sample_info['date']}_plate{sample_info['plate']}_well{sample_info['well']}_{frame_num_str}_sharp")
-            final_cropper_cfg = {'mode': 'centroid_square', 'square_size': final_crop_size}; final_cropper = ParticleCropper(final_cropper_cfg)
-            temp_particle_series_for_final_crop = pd.Series({'X': coord_x, 'Y': coord_y}, name=particle_row.name)
-            _, saved_final_crop_path = final_cropper.crop_single_particle_from_image(original_color_img, dummy_gray_for_final_crop, temp_particle_series_for_final_crop, output_dir_for_crop=final_sharp_crops_output_dir, crop_filename_prefix=output_crop_filename_prefix)
-            if saved_final_crop_path: sharp_crops_saved_count += 1
-            else: logger.warning(f"Failed to save final sharp crop for particle X{coord_x},Y{coord_y} from {image_filename}")
+            
+            # The particle_row already contains all necessary data (like rot_rect_*)
+            # The cropper will pick the columns it needs based on its mode.
+            _, saved_final_crop_path = final_cropper.crop_single_particle_from_image(
+                original_color_img, 
+                dummy_gray_for_final_crop, 
+                particle_row, # Pass the entire row
+                output_dir_for_crop=final_sharp_crops_output_dir, 
+                crop_filename_prefix=output_crop_filename_prefix
+            )
+
+            if saved_final_crop_path: 
+                sharp_crops_saved_count += 1
+            else: 
+                logger.warning(f"Failed to save final sharp crop for particle X{coord_x},Y{coord_y} from {image_filename}")
+                
     logger.info(f"Saved {sharp_crops_saved_count} final sharp object crops.")
 
 
@@ -249,7 +283,7 @@ def run_stage_02_quality_filter(
                 intermediate_cropper, image_specific_temp_crop_dir, 
                 config_s2, 
                 source_image_illumination_type, 
-                global_threshold_config_for_boundary # MODIFIED: Correct variable name used here
+                global_threshold_config_for_boundary
             )
             all_single_particle_results_list.append(analysis_result_obj.to_dict())
         
@@ -267,7 +301,7 @@ def run_stage_02_quality_filter(
     logger.info(f"Aggregated quality analysis results for {len(detailed_analysis_df)} particles.")
     suitable_scored_df, all_analyzed_with_scores_df = _filter_and_score_analysis_results(detailed_analysis_df.copy(), config_s2)
     left_df_for_merge = original_particles_df.reset_index().rename(columns={'index': 'input_particle_index'})
-    final_merged_df = pd.merge(left_df_for_merge, all_analyzed_with_scores_df, left_on=['input_particle_index', 'X', 'Y'], right_on=['input_particle_index', 'original_X', 'original_Y'], how='left', suffixes=('', '_s2_analysis'))
+    final_merged_df = pd.merge(left_df_for_merge, all_analyzed_with_scores_df, on='input_particle_index', how='left', suffixes=('', '_s2_analysis'))
     cols_to_drop = [col for col in final_merged_df.columns if col.endswith('_s2_analysis')]; cols_to_drop.extend(['original_X', 'original_Y', 'analyzed_centroid_x', 'analyzed_centroid_y']) 
     final_merged_df.drop(columns=cols_to_drop, inplace=True, errors='ignore')
     logger.info(f"Final merged DataFrame created with {len(final_merged_df)} rows and columns: {final_merged_df.columns.tolist()}")
@@ -290,12 +324,24 @@ def run_stage_02_quality_filter(
         objects_for_final_crop_df = df_for_sharp_thresholding[sharp_mask]
         logger.info(f"Found {len(objects_for_final_crop_df)} objects meeting ALL numerical sharpness criteria for final crop saving.")
         if not objects_for_final_crop_df.empty:
-            final_sharp_crops_output_dir = os.path.join(output_dir_stage2, "sharp_object_final_crops"); final_crop_s = config_s2.get('final_sharp_crop_size', 150)
+            final_sharp_crops_output_dir = os.path.join(output_dir_stage2, "sharp_object_final_crops")
+            
+            # MODIFIED: Logic to prepare for final cropping is now more robust.
+            final_crop_settings_from_config = config_s2.get('final_sharp_crop_settings', {})
+            # Determine which mode to use for final cropping (should match intermediate)
+            intermediate_crop_mode = config_s2.get('intermediate_crop', {}).get('mode', 'rotational_rectangle')
+            
             parsed_date, parsed_plate, parsed_well = parse_date_plate_well(sample_id)
             sample_meta_info = {'date': parsed_date or "UNKDATE", 'plate': parsed_plate or "UNKP", 'well': parsed_well or "UNKW"}
-            temp_df_for_saving_sharp = objects_for_final_crop_df.rename(columns={'X': 'original_X', 'Y': 'original_Y'} )
-            if 'source_image_filename' not in temp_df_for_saving_sharp.columns: logger.error("'source_image_filename' is missing from the DataFrame for sharp crop saving. Cannot proceed.")
-            else: _save_final_sharp_object_crops(temp_df_for_saving_sharp, image_dir_path, final_sharp_crops_output_dir, final_crop_s, sample_meta_info)
+            
+            _save_final_sharp_object_crops(
+                objects_for_final_crop_df, 
+                image_dir_path, 
+                final_sharp_crops_output_dir, 
+                final_crop_settings_from_config, 
+                intermediate_crop_mode,
+                sample_meta_info
+            )
             sharp_objects_csv_path = save_dataframe_to_csv(objects_for_final_crop_df, output_dir_stage2, f"{sample_id}_stage2_sharply_filtered_particles.csv") 
             logger.info(f"Details of {len(objects_for_final_crop_df)} sharp objects saved to: {sharp_objects_csv_path}")
         else: logger.info("No objects met the specific final sharpness criteria for saving crops.")
@@ -326,35 +372,35 @@ if __name__ == '__main__':
         s2_cfg_test = cfg_main.setdefault('stage_02_quality_filter', {})
         s2_cfg_test.setdefault('filters_enabled', {'black_mask_artifact': True, 'on_crop_boundary': True, 'final_sharpness': True})
         s2_cfg_test.setdefault('final_sharp_object_filter', {'combined_sharpness_min': 0.1})
+        # ADDED: Ensure the new final crop settings are present for testing
+        s2_cfg_test.setdefault('final_sharp_crop_settings', {'centroid_square_size': 150, 'rotational_padding': 10})
 
-        TEST_SAMPLE_ID = "test_s2_consolidated_boundary_thresh" 
+
+        TEST_SAMPLE_ID = "test_s2_rotational_crop_default" 
         base_project_dir = cfg_main.get('project_base_dir')
         if not base_project_dir: raise ValueError("project_base_dir not set in config for testing.")
 
         stage1_output_dir = os.path.join(base_project_dir, "data", "output", TEST_SAMPLE_ID, "stage1_output")
         test_s1_csv_path = os.path.join(stage1_output_dir, f"{TEST_SAMPLE_ID}_stage1_particles.csv")
         test_image_input_dir_s2 = os.path.join(base_project_dir, "data", "input", TEST_SAMPLE_ID)
-        test_s2_output_dir = os.path.join(base_project_dir, "data", "output", TEST_SAMPLE_ID, "stage2_consolidated_boundary_thresh_test")
+        test_s2_output_dir = os.path.join(base_project_dir, "data", "output", TEST_SAMPLE_ID, "stage2_rotational_crop_test")
         os.makedirs(test_s2_output_dir, exist_ok=True)
-
-        logger.info(f"Test S1 Input CSV: {test_s1_csv_path}")
-        logger.info(f"Test Image Dir for S2: {test_image_input_dir_s2}")
-        logger.info(f"Test S2 Output Dir: {test_s2_output_dir}")
 
         if not os.path.exists(test_s1_csv_path): 
             logger.error(f"Input CSV from Stage 1 ('{test_s1_csv_path}') not found. Creating dummy data.")
-            dummy_s1_data = pd.DataFrame({'X': [100, 150, 20, 195, 5, 5], 'Y': [50, 75, 180, 10, 5, 195], 'area': [100, 120, 90, 150, 80, 80], 'perimeter': [40,45,35,50,30,30], 'source_image_filename': ['20230101_plate1_well1_f00000_dpt0.0_fd0.0mm.png', '20230101_plate1_well1_f00000_dpt0.0_fd0.0mm.png','20230101_plate1_well1_f00001_dpt0.1_fd0.0mm.png','20230101_plate1_well1_f00001_dpt0.1_fd0.0mm.png','20230101_plate1_well1_f00002_dpt0.2_fd0.0mm.png', '20230101_plate1_well1_f00002_dpt0.2_fd0.0mm.png'],'SAMPLE_ID': [TEST_SAMPLE_ID]*6,'bounding_x': [90,140,10,185, 0, 0], 'bounding_y': [40,65,170,0, 0, 190], 'bounding_w': [20,20,20,20,10,10], 'bounding_h': [20,20,20,20,10,10]})
-            os.makedirs(stage1_output_dir, exist_ok=True); dummy_s1_data.to_csv(test_s1_csv_path, index=False); logger.info(f"Created dummy Stage 1 CSV: {test_s1_csv_path}")
+            dummy_s1_data = pd.DataFrame({
+                'X': [100, 150], 'Y': [50, 75], 'area': [100, 120], 
+                'source_image_filename': ['20230101_plate1_well1_f00000_dpt0.0_fd0.0mm.png', '20230101_plate1_well1_f00000_dpt0.0_fd0.0mm.png'],
+                'SAMPLE_ID': [TEST_SAMPLE_ID]*2,
+                # ADDED: rot_rect data needed for new default mode
+                'rot_rect_width': [20.5, 30.2], 'rot_rect_height': [40.1, 25.8], 'rot_rect_angle': [15.0, 80.0]
+                })
+            os.makedirs(stage1_output_dir, exist_ok=True); dummy_s1_data.to_csv(test_s1_csv_path, index=False)
             os.makedirs(test_image_input_dir_s2, exist_ok=True)
-            for fname in dummy_s1_data['source_image_filename'].unique():
-                dummy_img_path = os.path.join(test_image_input_dir_s2, fname)
-                if not os.path.exists(dummy_img_path):
-                     img_content_uint8 = np.full((200,200), 220, dtype=np.uint8); 
-                     if 'f00000' in fname : cv2.putText(img_content_uint8, "Sharp", (50,100), cv2.FONT_HERSHEY_SIMPLEX, 2, (30), 3) 
-                     elif 'f00001' in fname: img_content_blur_uint8 = cv2.GaussianBlur(img_content_uint8, (25,25), 0); cv2.putText(img_content_blur_uint8, "Blurry", (40,120), cv2.FONT_HERSHEY_SIMPLEX, 2, (40), 3); img_content_uint8 = img_content_blur_uint8
-                     elif 'f00002' in fname: cv2.rectangle(img_content_uint8, (0,0), (10,10), (20), -1) ; cv2.rectangle(img_content_uint8, (0,190), (10,199), (25), -1) 
-                     cv2.imwrite(dummy_img_path, img_content_uint8) 
-            logger.info(f"Created dummy 'collimated-like' images in {test_image_input_dir_s2}")
+            fname = '20230101_plate1_well1_f00000_dpt0.0_fd0.0mm.png'
+            dummy_img_path = os.path.join(test_image_input_dir_s2, fname)
+            if not os.path.exists(dummy_img_path): cv2.imwrite(dummy_img_path, np.full((200,200,3), 220, dtype=np.uint8))
+            logger.info(f"Created dummy Stage 1 CSV and image.")
 
         result_s2_csv_path = run_stage_02_quality_filter(
             input_particles_csv_path=test_s1_csv_path,
@@ -363,19 +409,11 @@ if __name__ == '__main__':
             sample_id=TEST_SAMPLE_ID
         )
         if result_s2_csv_path: 
-            logger.info(f"Stage 2 test (consolidated boundary thresh) completed. Final analyzed CSV: {result_s2_csv_path}")
+            logger.info(f"Stage 2 test (rotational crop) completed. Final analyzed CSV: {result_s2_csv_path}")
             df_out = pd.read_csv(result_s2_csv_path)
-            print("Stage 2 Test (Consolidated Boundary Thresh) Output DataFrame Head:")
+            print("Stage 2 Test (Rotational Crop) Output DataFrame Head:")
             print(df_out.head())
-            if 'is_on_crop_boundary' in df_out.columns:
-                on_boundary_count = df_out[df_out['is_on_crop_boundary'] == True].shape[0]
-                not_on_boundary_count = df_out[df_out['is_on_crop_boundary'] == False].shape[0]
-                logger.info(f"Particles detected on boundary: {on_boundary_count}")
-                logger.info(f"Particles NOT detected on boundary: {not_on_boundary_count}")
         else: 
-            logger.error("Stage 2 test (consolidated boundary thresh) FAILED or produced no output CSV.")
+            logger.error("Stage 2 test (rotational crop) FAILED or produced no output CSV.")
 
-    except ConfigError as ce: logger.error(f"Configuration error during Stage 2 test: {ce}")
-    except DataValidationError as dve: logger.error(f"Data validation error during Stage 2 test: {dve}")
-    except FileNotFoundError as fnfe: logger.error(f"File not found during Stage 2 test setup: {fnfe}")
     except Exception as e: logger.exception(f"An unexpected error occurred during the Stage 2 test: {e}")

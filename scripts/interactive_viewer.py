@@ -117,7 +117,8 @@ class FeatureViewerApp:
             s2_black_mask_cfg = s2_cfg.get('black_mask_check', {})
             s2_final_sharp_filter_cfg = s2_cfg.get('final_sharp_object_filter', {})
             s2_filters_enabled_cfg = s2_cfg.get('filters_enabled', {})
-            self.s2_final_crop_size_from_config = s2_cfg.get('final_sharp_crop_size', 150) 
+            # MODIFIED: Read the new flexible final crop settings
+            s2_final_crop_settings_cfg = s2_cfg.get('final_sharp_crop_settings', {})
 
             self.s1_convolution_kernel_list = s1_particle_cfg.get('convolution_kernel')
             
@@ -150,13 +151,17 @@ class FeatureViewerApp:
             self.default_params.update({f"s1_bpwa_peak_{k}": v for k,v in s1_bpwa_peak_cfg.items()})
             s1_bpwa_match_cfg = s1_black_plate_well_analysis_cfg.get('brightness_matching', {})
             self.default_params.update({f"s1_bpwa_match_{k}": v for k,v in s1_bpwa_match_cfg.items()})
+            
+            # MODIFIED: Updated S2 default params for the viewer UI
             self.default_params.update({
-                's2_intermediate_crop_mode': s2_intermediate_crop_cfg.get('mode', 'centroid_square'),
+                's2_intermediate_crop_mode': s2_intermediate_crop_cfg.get('mode', 'rotational_rectangle'),
                 's2_intermediate_crop_square_size': s2_intermediate_crop_cfg.get('square_size', 128),
+                's2_intermediate_crop_rotational_padding': s2_intermediate_crop_cfg.get('rotational_padding', 10),
                 's2_black_mask_min_area_ratio': s2_black_mask_cfg.get('min_area_ratio', 0.05),
                 's2_final_sharpness_metric_to_filter': 'combined_sharpness', 
                 's2_final_sharpness_threshold_min': s2_final_sharp_filter_cfg.get('combined_sharpness_min', 0.3),
-                's2_final_crop_size': self.s2_final_crop_size_from_config,
+                's2_final_crop_settings_centroid_square_size': s2_final_crop_settings_cfg.get('centroid_square_size', 150),
+                's2_final_crop_settings_rotational_padding': s2_final_crop_settings_cfg.get('rotational_padding', 10),
                 's2_enable_black_mask_filter': s2_filters_enabled_cfg.get('black_mask_artifact', True),
                 's2_enable_on_boundary_filter': s2_filters_enabled_cfg.get('on_crop_boundary', True),
                 's2_enable_final_sharpness_filter': s2_filters_enabled_cfg.get('final_sharpness', True),
@@ -321,6 +326,9 @@ class FeatureViewerApp:
             self.load_button.config(text="Load Img (S3/S4)")
         
         self.update_global_threshold_param_visibility(); 
+        # ADDED: Call the new visibility manager for S2 crop params
+        if mode == "S2":
+            self._update_s2_crop_param_visibility()
         if mode != "S1" and mode !="S2": self.s1_image_directory_path = None; self.s1_image_file_list_df = pd.DataFrame(); self.s1_fg_image_selector['values'] = []; self.s1_selected_fg_filepath_var.set("")
         self.update_raw_image_display(); self.schedule_update()
     
@@ -349,6 +357,27 @@ class FeatureViewerApp:
         if fixed_widget_name in self.param_widgets and self.param_widgets[fixed_widget_name]:
             if mode == 'fixed': self.param_widgets[fixed_widget_name].pack(fill=tk.X, pady=2, padx=5)
             else: self.param_widgets[fixed_widget_name].pack_forget()
+
+    # ADDED: New function to manage visibility of S2 crop-specific parameters.
+    def _update_s2_crop_param_visibility(self, *args):
+        mode_var = self.param_vars.get('s2_intermediate_crop_mode')
+        if not mode_var: return
+        mode = mode_var.get()
+        
+        widgets_to_check = {
+            'rotational_rectangle': ['s2_intermediate_crop_rotational_padding', 's2_final_crop_settings_rotational_padding'],
+            'centroid_square': ['s2_intermediate_crop_square_size', 's2_final_crop_settings_centroid_square_size']
+        }
+
+        for widget_name in widgets_to_check['rotational_rectangle']:
+            if widget_name in self.param_widgets and self.param_widgets[widget_name]:
+                if mode == 'rotational_rectangle': self.param_widgets[widget_name].pack(fill=tk.X, pady=2, padx=5)
+                else: self.param_widgets[widget_name].pack_forget()
+        
+        for widget_name in widgets_to_check['centroid_square']:
+            if widget_name in self.param_widgets and self.param_widgets[widget_name]:
+                if mode == 'centroid_square': self.param_widgets[widget_name].pack(fill=tk.X, pady=2, padx=5)
+                else: self.param_widgets[widget_name].pack_forget()
         
     def _adjust_param_value(self, param_name, delta):
         num_var, spec = self.param_vars.get(param_name), self.param_specs.get(param_name)
@@ -392,13 +421,18 @@ class FeatureViewerApp:
         label_text = re.sub(r"S1 Bpwa Peak\s*", "", label_text, flags=re.IGNORECASE)   
         label_text = re.sub(r"S1 Bpwa Match\s*", "", label_text, flags=re.IGNORECASE) 
         label_text = re.sub(r"S1 Bpwa\s*", "", label_text, flags=re.IGNORECASE) 
+        # MODIFIED: Clean up S2 labels better
+        label_text = re.sub(r"S2\s*(Intermediate|Final|Enable|Black Mask|)\s*", "", label_text, flags=re.IGNORECASE)
         label_text = re.sub(r"S\d\s*(Sub|Unsub|Comp|Well Mask|Enable|Viewer|)\s*", "", label_text, flags=re.IGNORECASE)
+        
         
         ttk.Label(container, text=label_text.strip() + ":", width=28, anchor="w").pack(side=tk.LEFT, padx=(0,5))
         tk_var = self.param_vars.get(name) 
         if param_type == 'choice':
+            # MODIFIED: Added callback for S2 crop mode selector
             cmd = self.schedule_update 
             if name == 'viewer_thresholding_mode': cmd = self.update_global_threshold_param_visibility
+            if name == 's2_intermediate_crop_mode': cmd = self._update_s2_crop_param_visibility
             ttk.OptionMenu(container, tk_var, current_val_for_var if current_val_for_var is not None else spec['options'][0], *spec['options'], command=cmd).pack(side=tk.LEFT, expand=True, fill=tk.X)
         elif param_type in ['int', 'float']:
             str_tk_var = self.param_str_vars.get(name)
@@ -407,7 +441,13 @@ class FeatureViewerApp:
             entry.pack(side=tk.LEFT, padx=2); entry.bind("<Return>", lambda e, p_name=name: self._on_param_entry_commit(p_name, e)); entry.bind("<FocusOut>", lambda e, p_name=name: self._on_param_entry_commit(p_name, e))
             ttk.Button(container, text="+", command=lambda p_name=name: self._adjust_param_value(p_name, 1), width=2).pack(side=tk.LEFT)
         elif param_type == 'bool': ttk.Checkbutton(container, variable=tk_var, command=self.schedule_update).pack(side=tk.LEFT)
-        if not (name in ['viewer_otsu_threshold_multiplier', 'viewer_fixed_threshold_value']):
+        
+        # MODIFIED: Prevent auto-packing of conditional S2 widgets
+        conditional_s2_widgets = [
+            's2_intermediate_crop_square_size', 's2_intermediate_crop_rotational_padding',
+            's2_final_crop_settings_centroid_square_size', 's2_final_crop_settings_rotational_padding'
+        ]
+        if not (name in ['viewer_otsu_threshold_multiplier', 'viewer_fixed_threshold_value'] or name in conditional_s2_widgets):
             container.pack(fill=tk.X, pady=2, padx=5)
         self.param_widgets[name] = container 
     
@@ -456,14 +496,17 @@ class FeatureViewerApp:
             's1_bpwa_match_target_peak_offset_after_shift': {'min': -20, 'max': 20, 'type': 'int', 'step': 1},
         }
 
+    # MODIFIED: Updated S2 parameter specifications
     def _get_s2_param_specs(self):
         return {
-            's2_intermediate_crop_mode': {'options': ['bounding_box', 'centroid_square'], 'type': 'choice'},
+            's2_intermediate_crop_mode': {'options': ['rotational_rectangle', 'centroid_square', 'bounding_box'], 'type': 'choice'},
             's2_intermediate_crop_square_size': {'min': 32, 'max': 512, 'type': 'int', 'step': 4},
+            's2_intermediate_crop_rotational_padding': {'min': 0, 'max': 50, 'type': 'int', 'step': 1},
             's2_black_mask_min_area_ratio': {'min': 0.01, 'max': 0.5, 'type': 'float', 'res': 0.01},
             's2_final_sharpness_metric_to_filter': {'options': AVAILABLE_SHARPNESS_METRICS + ['combined_sharpness'], 'type': 'choice'},
             's2_final_sharpness_threshold_min': {'min': 0.0, 'max': 5000.0, 'type': 'float', 'res': 0.01}, 
-            's2_final_crop_size': {'min': 32, 'max': 512, 'type': 'int', 'step': 4},
+            's2_final_crop_settings_centroid_square_size': {'min': 32, 'max': 512, 'type': 'int', 'step': 4},
+            's2_final_crop_settings_rotational_padding': {'min': 0, 'max': 50, 'type': 'int', 'step': 1},
             's2_enable_black_mask_filter': {'type': 'bool'},
             's2_enable_on_boundary_filter': {'type': 'bool'},
             's2_enable_final_sharpness_filter': {'type': 'bool'},
@@ -543,23 +586,31 @@ class FeatureViewerApp:
         for name in ordered_params:
             if name in self.default_params: self._create_generic_param_control(parent_frame, name, s1_specs[name], self.current_params.get(name, self.default_params[name]))
 
+    # MODIFIED: Updated S2 parameter control creation
     def create_s2_param_controls(self, parent_frame):
         ttk.Label(parent_frame, text="S2 Quality Filter Params", font='Helvetica 10 bold').pack(fill=tk.X, pady=(5,2))
         s2_specs = self._get_s2_param_specs()
+        
         filter_toggles_frame = ttk.Labelframe(parent_frame, text="Filter Toggles", padding=5)
         filter_toggles_frame.pack(fill=tk.X, expand=True, pady=3)
         ordered_s2_toggles = ['s2_enable_black_mask_filter', 's2_enable_on_boundary_filter', 's2_enable_final_sharpness_filter']
         for name in ordered_s2_toggles:
             if name in self.default_params:
                 self._create_generic_param_control(filter_toggles_frame, name, s2_specs[name], self.current_params.get(name, self.default_params[name]))
+        
         other_params_frame = ttk.Labelframe(parent_frame, text="Other S2 Parameters", padding=5)
         other_params_frame.pack(fill=tk.X, expand=True, pady=3)
-        ordered_s2_params = ['s2_intermediate_crop_mode', 's2_intermediate_crop_square_size', 's2_black_mask_min_area_ratio', 
-                             's2_final_sharpness_metric_to_filter', 's2_final_sharpness_threshold_min', 's2_final_crop_size']
+        ordered_s2_params = [
+            's2_intermediate_crop_mode', 
+            's2_intermediate_crop_square_size', 's2_intermediate_crop_rotational_padding',
+            's2_black_mask_min_area_ratio', 
+            's2_final_sharpness_metric_to_filter', 's2_final_sharpness_threshold_min', 
+            's2_final_crop_settings_centroid_square_size', 's2_final_crop_settings_rotational_padding'
+        ]
         for name in ordered_s2_params:
             if name in self.default_params:
                 self._create_generic_param_control(other_params_frame, name, s2_specs[name], self.current_params.get(name, self.default_params[name]))
-
+    
     def create_main_body_seg_param_controls(self, parent_frame): 
         specs = self._get_main_body_seg_param_specs()
         ordered_params = [
@@ -648,6 +699,7 @@ class FeatureViewerApp:
         else: self.ax_raw.imshow(np.zeros((100,100)), cmap='gray') 
         self.ax_raw.set_title(title, fontsize=8); self.ax_raw.set_axis_off(); self.canvas_raw.draw()
 
+    # MODIFIED: Updated to collect new S2 parameters
     def collect_current_params(self):
         gui_params = {name: var.get() for name, var in self.param_vars.items()}
         
@@ -676,13 +728,26 @@ class FeatureViewerApp:
         s1_bpwa_collected_cfg['brightness_matching'] = s1_bpwa_match_collected
         self.current_params['s1_black_plate_well_analysis_effective'] = s1_bpwa_collected_cfg
         
+        # MODIFIED: Assemble the effective S2 config from the UI, including the new crop settings.
         self.current_params['s2_effective'] = {
-            'intermediate_crop': {'mode': gui_params.get('s2_intermediate_crop_mode'), 'square_size': gui_params.get('s2_intermediate_crop_square_size'), 'bbox_column_mapping': get_config().get('stage_02_quality_filter', {}).get('intermediate_crop', {}).get('bbox_column_mapping', {}) },
+            'intermediate_crop': {
+                'mode': gui_params.get('s2_intermediate_crop_mode'), 
+                'square_size': gui_params.get('s2_intermediate_crop_square_size'), 
+                'rotational_padding': gui_params.get('s2_intermediate_crop_rotational_padding'),
+                'bbox_column_mapping': get_config().get('stage_02_quality_filter', {}).get('intermediate_crop', {}).get('bbox_column_mapping', {})
+            },
             'black_mask_check': {'min_area_ratio': gui_params.get('s2_black_mask_min_area_ratio')},
-            'filters_enabled': {'black_mask_artifact': gui_params.get('s2_enable_black_mask_filter'), 'on_crop_boundary': gui_params.get('s2_enable_on_boundary_filter'), 'final_sharpness': gui_params.get('s2_enable_final_sharpness_filter')},
+            'filters_enabled': {
+                'black_mask_artifact': gui_params.get('s2_enable_black_mask_filter'), 
+                'on_crop_boundary': gui_params.get('s2_enable_on_boundary_filter'), 
+                'final_sharpness': gui_params.get('s2_enable_final_sharpness_filter')
+            },
             'sharpness_metrics': AVAILABLE_SHARPNESS_METRICS, 
             'final_sharp_object_filter': { f"{gui_params.get('s2_final_sharpness_metric_to_filter')}_min": gui_params.get('s2_final_sharpness_threshold_min')},
-            'final_sharp_crop_size': gui_params.get('s2_final_crop_size'),
+            'final_sharp_crop_settings': {
+                'centroid_square_size': gui_params.get('s2_final_crop_settings_centroid_square_size'),
+                'rotational_padding': gui_params.get('s2_final_crop_settings_rotational_padding')
+            }
         }
         
         s3_s4_params = {
@@ -810,54 +875,44 @@ class FeatureViewerApp:
                 
                 df_unsub_list_dict, composite_binary_mask_unsub_disp, (example_roi_img_disp, example_roi_hist_ravel_disp, example_roi_otsu_disp) = _analyze_unsubtracted_locally(img_for_unsub_prep, df_sub_list_dict, s1_unsub_eff['local_otsu_roi_size'], s1_unsub_eff, viewer_global_thresh_cfg, viewer_global_source_illum)
                 
-                # --- START: MODIFICATION FOR S1 WELL AREA VISUALIZATION ---
                 cfg_well_id_vis = s1_bpwa_eff_cfg.get('well_identification', {})
                 low_thresh_vis = cfg_well_id_vis.get('low_threshold_value', 5)
                 
-                # Find largest contour for FG image
                 largest_contour_fg = None
                 _, thresh_img_fg = cv2.threshold(img_fg_orig_uint8, low_thresh_vis, 255, cv2.THRESH_BINARY)
                 contours_fg = core_find_contours(thresh_img_fg, mode="external", method="simple")
-                if contours_fg:
-                    largest_contour_fg = max(contours_fg, key=cv2.contourArea)
+                if contours_fg: largest_contour_fg = max(contours_fg, key=cv2.contourArea)
 
-                # Find largest contour for BG image
                 largest_contour_bg = None
                 _, thresh_img_bg = cv2.threshold(img_bg_orig_uint8, low_thresh_vis, 255, cv2.THRESH_BINARY)
                 contours_bg = core_find_contours(thresh_img_bg, mode="external", method="simple")
-                if contours_bg:
-                    largest_contour_bg = max(contours_bg, key=cv2.contourArea)
+                if contours_bg: largest_contour_bg = max(contours_bg, key=cv2.contourArea)
 
-                # Plot 1: Subtracted Binary with FG Well Area
                 ax_sub = axes_s1[0,0]
                 ax_sub.imshow(binary_mask_sub_disp if binary_mask_sub_disp is not None else np.zeros_like(img_fg_orig_uint8), cmap='gray')
                 ax_sub.set_title(f"Subtracted Binary ({len(df_sub_list_dict)} p.)", fontsize=8)
                 ax_sub.set_axis_off()
 
                 if largest_contour_fg is not None:
-                    h_im, w_im = img_fg_orig_uint8.shape
-                    xc, yc = np.meshgrid(np.arange(w_im), np.arange(h_im))
+                    h_im, w_im = img_fg_orig_uint8.shape; xc, yc = np.meshgrid(np.arange(w_im), np.arange(h_im))
                     fg_well_mask = np.zeros_like(img_fg_orig_uint8, dtype=np.uint8)
                     cv2.drawContours(fg_well_mask, [largest_contour_fg], -1, 1, thickness=cv2.FILLED)
                     ax_sub.contourf(xc, yc, fg_well_mask, levels=[0.5, 1.5], colors='blue', hatches=['//'], alpha=0.4)
                     legend_elements_sub = [Patch(facecolor='blue', edgecolor='blue', hatch='//', alpha=0.4, label='FG Well Area')]
                     ax_sub.legend(handles=legend_elements_sub, loc='upper right', fontsize='xx-small')
 
-                # Plot 2: Unsubtracted Composite Binary with BG Well Area
                 ax_unsub = axes_s1[0,1]
                 ax_unsub.imshow(composite_binary_mask_unsub_disp if composite_binary_mask_unsub_disp is not None else np.zeros_like(img_fg_orig_uint8), cmap='gray')
                 ax_unsub.set_title(f"Unsub Local Binary Comp. ({len(df_unsub_list_dict)} p.)", fontsize=8)
                 ax_unsub.set_axis_off()
 
                 if largest_contour_bg is not None:
-                    h_im, w_im = img_bg_orig_uint8.shape
-                    xc, yc = np.meshgrid(np.arange(w_im), np.arange(h_im))
+                    h_im, w_im = img_bg_orig_uint8.shape; xc, yc = np.meshgrid(np.arange(w_im), np.arange(h_im))
                     bg_well_mask = np.zeros_like(img_bg_orig_uint8, dtype=np.uint8)
                     cv2.drawContours(bg_well_mask, [largest_contour_bg], -1, 1, thickness=cv2.FILLED)
                     ax_unsub.contourf(xc, yc, bg_well_mask, levels=[0.5, 1.5], colors='yellow', hatches=['\\\\'], alpha=0.5)
                     legend_elements_unsub = [Patch(facecolor='yellow', edgecolor='yellow', hatch='\\\\', alpha=0.5, label='BG Well Area')]
                     ax_unsub.legend(handles=legend_elements_unsub, loc='upper right', fontsize='xx-small')
-                # --- END: MODIFICATION FOR S1 WELL AREA VISUALIZATION ---
                 
                 if example_roi_img_disp is not None:
                     axes_s1[1,0].imshow(example_roi_img_disp, cmap='gray'); axes_s1[1,0].set_title("Example Local ROI (for hist)", fontsize=8); axes_s1[1,0].set_axis_off()
@@ -885,10 +940,9 @@ class FeatureViewerApp:
                         else: img_for_unsub_prep_s2 = apply_mask(img_fg_orig_uint8.copy(), general_well_mask_for_roi_uint8) if general_well_mask_for_roi_uint8 is not None else img_fg_orig_uint8.copy()
                     else: img_for_unsub_prep_s2 = apply_mask(img_fg_orig_uint8.copy(), general_well_mask_for_roi_uint8) if general_well_mask_for_roi_uint8 is not None else img_fg_orig_uint8.copy()
 
-                # CORRECTED: Pass df_sub_list_dict_s2 (list of dicts)
                 df_unsub_s2_list_dict, _, _ = _analyze_unsubtracted_locally(
                     img_for_unsub_prep_s2, 
-                    df_sub_list_dict_s2, # Pass the list of dicts
+                    df_sub_list_dict_s2,
                     s1_unsub_eff['local_otsu_roi_size'], 
                     s1_unsub_eff, 
                     viewer_global_thresh_cfg, 
@@ -994,6 +1048,7 @@ class FeatureViewerApp:
 
     def on_s2_sharp_particle_selected(self, event=None): self.update_s2_single_crop_display()
 
+    # MODIFIED: Updated to handle rotational cropping for the final crop display.
     def update_s2_single_crop_display(self):
         self.ax_s2_single_crop.clear(); self.s2_sharp_particle_attributes_text.config(state=tk.NORMAL); self.s2_sharp_particle_attributes_text.delete(1.0, tk.END)
         selected_particle_str = self.s2_selected_sharp_particle_var.get()
@@ -1006,14 +1061,27 @@ class FeatureViewerApp:
                 s1_fused_idx = int(match.group(1)); idx_col_to_match = 's1_viewer_fused_idx' if 's1_viewer_fused_idx' in self.s2_final_sharp_particles_df_for_viewer.columns else 'input_particle_index'
                 selected_rows = self.s2_final_sharp_particles_df_for_viewer[self.s2_final_sharp_particles_df_for_viewer[idx_col_to_match].astype(int) == s1_fused_idx]
                 if selected_rows.empty: raise ValueError(f"No S2 particle data for S1 Fused Idx {s1_fused_idx}")
-                particle_attrs = selected_rows.iloc[0]; fg_fn = self.s1_selected_fg_filepath_var.get(); original_frame_path = os.path.join(self.s1_image_directory_path, fg_fn)
-                orig_color_img = core_load_image(original_frame_path, 'color'); orig_gray_img = convert_to_grayscale(orig_color_img)
+                
+                particle_attrs = selected_rows.iloc[0]
+                fg_fn = self.s1_selected_fg_filepath_var.get()
+                original_frame_path = os.path.join(self.s1_image_directory_path, fg_fn)
+                orig_color_img = core_load_image(original_frame_path, 'color')
+                orig_gray_img = convert_to_grayscale(orig_color_img)
                 if orig_color_img is None or orig_gray_img is None: raise ValueError("Could not load original frame for S2 crop.")
-                final_crop_size = self.param_vars['s2_final_crop_size'].get(); final_cropper = ParticleCropper({'mode': 'centroid_square', 'square_size': final_crop_size})
-                crop_centroid_x = particle_attrs.get('X') ; crop_centroid_y = particle_attrs.get('Y')
-                if pd.isna(crop_centroid_x) or pd.isna(crop_centroid_y): raise ValueError("Missing X/Y for S2 final crop in selected particle attrs.")
-                particle_series_for_crop = pd.Series({'X': int(crop_centroid_x), 'Y': int(crop_centroid_y)})
-                final_crop_gray, _ = final_cropper.crop_single_particle_from_image(orig_color_img, orig_gray_img, particle_series_for_crop, output_dir_for_crop=None)
+                
+                # ADDED: Build final cropper config dynamically from UI
+                final_crop_mode = self.param_vars['s2_intermediate_crop_mode'].get()
+                final_cropper_cfg = {'mode': final_crop_mode}
+                if final_crop_mode == 'centroid_square':
+                    final_cropper_cfg['square_size'] = self.param_vars['s2_final_crop_settings_centroid_square_size'].get()
+                elif final_crop_mode == 'rotational_rectangle':
+                    final_cropper_cfg['rotational_padding'] = self.param_vars['s2_final_crop_settings_rotational_padding'].get()
+                
+                final_cropper = ParticleCropper(final_cropper_cfg)
+                
+                # The `particle_attrs` Series contains all required columns (X, Y, rot_rect_*, etc.)
+                final_crop_gray, _ = final_cropper.crop_single_particle_from_image(orig_color_img, orig_gray_img, particle_attrs, output_dir_for_crop=None)
+
                 if final_crop_gray is not None:
                     final_crop_bgr = cv2.cvtColor(final_crop_gray, cv2.COLOR_GRAY2BGR)
                     viewer_illum_s2 = self.param_vars['viewer_source_illumination_type'].get(); 
@@ -1029,9 +1097,9 @@ class FeatureViewerApp:
                         viewer_thresh_params_s2 
                     )
                     self.ax_s2_single_crop.imshow(final_crop_bgr); self.ax_s2_single_crop.set_title(f"S2 Final Crop ({final_crop_gray.shape[1]}x{final_crop_gray.shape[0]})")
-                    attr_text = f"S1 Frame: {fg_fn}\nS1 Fused Idx: {s1_fused_idx}\nGlobal Centroid: X={int(crop_centroid_x)}, Y={int(crop_centroid_y)}\n\n"
+                    attr_text = f"S1 Frame: {fg_fn}\nS1 Fused Idx: {s1_fused_idx}\nGlobal Centroid: X={int(particle_attrs.get('X', -1))}, Y={int(particle_attrs.get('Y', -1))}\n\n"
                     attr_text += f"S2 Intermed. Crop: {particle_attrs.get('cropped_filename', 'N/A')}\n  Black Mask: {particle_attrs.get('is_black_mask', 'N/A')}\n  On Intermed. Boundary: {particle_attrs.get('is_on_crop_boundary', 'N/A')}\n\n" 
-                    attr_text += f"S2 Final Crop (this view):\n  Boundary Flag (this view): {is_on_this_crop_boundary}\n\nSharpness:\n"
+                    attr_text += f"S2 Final Crop (this view):\n  Mode: {final_crop_mode}\n  Boundary Flag (this view): {is_on_this_crop_boundary}\n\nSharpness:\n"
                     for metric in AVAILABLE_SHARPNESS_METRICS: attr_text += f"  {metric}: {particle_attrs.get(metric, np.nan):.2f}\n  {metric}_norm: {particle_attrs.get(metric+'_norm', np.nan):.3f}\n"
                     attr_text += f"  combined_sharpness: {particle_attrs.get('combined_sharpness', np.nan):.3f}\n"; self.s2_sharp_particle_attributes_text.insert(tk.END, attr_text)
                 else: self.ax_s2_single_crop.imshow(np.zeros((100,100)), cmap='gray'); self.s2_sharp_particle_attributes_text.insert(tk.END, "Error final cropping.")
