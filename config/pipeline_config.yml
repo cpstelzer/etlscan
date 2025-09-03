@@ -83,6 +83,15 @@ stage_01_initial_detection:
     enabled: False 
     output_subdir_suffix: "_wim_particle_detection_debug"
 
+  # NEW: Parameters for 3D particle tracking
+  tracking:
+    enabled: true
+    pixel_size_um: 2.74
+    magnification: 0.638 # Optotune TS1-0638-70-EL
+    search_range_mm: 0.5
+    memory_frames: 3
+    min_track_length: 10
+
 # Stage 2: Quality Filter
 stage_02_quality_filter:
   intermediate_crop:

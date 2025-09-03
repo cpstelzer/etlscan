@@ -10,6 +10,8 @@ from sklearn.neighbors import BallTree
 import shutil
 import skimage.util 
 import skimage.filters 
+import trackpy as tp
+import matplotlib.pyplot as plt
 
 from src.utils import (
     get_config, load_dataframe_from_csv, save_dataframe_to_csv,
@@ -186,6 +188,179 @@ def _compare_and_fuse_particle_dfs(df_ref: pd.DataFrame, df_query: pd.DataFrame,
     return final_matched_df
 
 
+def _process_particle_coordinates_for_tracking(input_csv_path, pixel_size_um, magnification):
+    """
+    Loads raw particle data, converts coordinates, and extracts metadata from filenames.
+    """
+    if not os.path.exists(input_csv_path):
+        logger.error(f"Error: Input file not found at '{input_csv_path}'")
+        return pd.DataFrame()
+
+    logger.info(f"Tracking Step 1: Loading and processing data from: {os.path.basename(input_csv_path)}")
+    df = pd.read_csv(input_csv_path)
+
+    if df.empty:
+        logger.warning("Input CSV for tracking is empty. No particles to process.")
+        return pd.DataFrame()
+
+    pixel_to_mm_factor = pixel_size_um / (magnification * 1000)
+    logger.info(f"   - Using Pixel-to-MM factor: {pixel_to_mm_factor:.6f}")
+    df['x_mm'] = df['X'] * pixel_to_mm_factor
+    df['y_mm'] = df['Y'] * pixel_to_mm_factor
+
+    def extract_metadata(filename):
+        frame_match = re.search(r'_f(\d+)', filename)
+        z_match = re.search(r'_fd([-\d.]+?)mm', filename)
+        dpt_match = re.search(r'_dpt([-\d.]+?)_', filename)
+        frame = int(frame_match.group(1)) if frame_match else -1
+        z_mm = float(z_match.group(1)) if z_match else np.nan
+        dioptries = float(dpt_match.group(1)) if dpt_match else np.nan
+        return frame, z_mm, dioptries
+
+    logger.info("   - Extracting frame, Z coordinate (mm), and dioptries from filenames...")
+    df[['frame', 'z_mm', 'dioptries']] = df['source_image_filename'].apply(
+        lambda fname: pd.Series(extract_metadata(fname))
+    )
+
+    initial_rows = len(df)
+    df.dropna(subset=['z_mm', 'dioptries'], inplace=True)
+    df = df[df['frame'] != -1].copy()
+    final_rows = len(df)
+
+    if final_rows < initial_rows:
+        logger.warning(f"   - Dropped {initial_rows - final_rows} rows due to failed metadata extraction.")
+
+    key_cols = ['frame', 'x_mm', 'y_mm', 'z_mm', 'dioptries']
+    other_cols = [col for col in df.columns if col not in key_cols]
+    df = df[key_cols + other_cols]
+    return df
+
+def _track_particles_3d(processed_df, search_range_mm, memory_frames, min_track_length):
+    """
+    Performs 3D particle tracking.
+    """
+    if processed_df.empty:
+        logger.warning("Input DataFrame for tracking is empty. Skipping tracking.")
+        return pd.DataFrame()
+
+    logger.info("Tracking Step 2: Performing 3D tracking with trackpy...")
+    tp_df = processed_df.rename(columns={'x_mm': 'x', 'y_mm': 'y', 'z_mm': 'z'})
+    
+    tp_df['frame'] = tp_df['frame'].astype(int)
+    pos_cols = ['x', 'y', 'z']
+    for col in pos_cols:
+        tp_df[col] = pd.to_numeric(tp_df[col], errors='coerce')
+    tp_df.dropna(subset=pos_cols, inplace=True)
+
+    trajectories = tp.link(
+        tp_df,
+        search_range=search_range_mm,
+        memory=memory_frames,
+        pos_columns=pos_cols,
+        t_column='frame'
+    )
+    num_tracks_raw = trajectories['particle'].nunique()
+    logger.info(f"   - trackpy identified {num_tracks_raw} raw tracks.")
+
+    logger.info(f"   - Filtering out tracks shorter than {min_track_length} frames...")
+    filtered_trajectories = tp.filter_stubs(trajectories, min_track_length)
+    num_tracks_final = filtered_trajectories['particle'].nunique()
+    logger.info(f"   - Kept {num_tracks_final} tracks after filtering.")
+
+    filtered_trajectories.rename(columns={'particle': 'tracked_particle'}, inplace=True)
+    filtered_trajectories = filtered_trajectories.reset_index(drop=True)
+    return filtered_trajectories
+
+def _run_particle_tracking(
+    stage1_csv_path: str,
+    output_dir: str,
+    tracking_config: Dict[str, Any]
+    ):
+    """
+    Orchestrates the particle tracking process based on the output of Stage 1.
+    """
+    logger.info(f"--- Post-S1 Tracking initiated for: {os.path.basename(stage1_csv_path)} ---")
+    
+    # --- Configuration ---
+    pixel_size_um = tracking_config.get('pixel_size_um')
+    magnification = tracking_config.get('magnification')
+    search_range_mm = tracking_config.get('search_range_mm')
+    memory_frames = tracking_config.get('memory_frames')
+    min_track_length = tracking_config.get('min_track_length')
+    
+    if not all([pixel_size_um, magnification, search_range_mm, memory_frames, min_track_length]):
+        raise ConfigError("One or more required tracking parameters are missing from the configuration.")
+
+    base_filename = os.path.splitext(os.path.basename(stage1_csv_path))[0]
+    output_csv_all = os.path.join(output_dir, f"{base_filename}_with_tracking_all.csv")
+    output_csv_tracked = os.path.join(output_dir, f"{base_filename}_with_tracking_only.csv")
+    figure_3d_path = os.path.join(output_dir, f"{base_filename}_tracks_3d.png")
+    figure_2d_path = os.path.join(output_dir, f"{base_filename}_tracks_2d.png")
+    
+    # Process coordinates and track particles
+    processed_data = _process_particle_coordinates_for_tracking(stage1_csv_path, pixel_size_um, magnification)
+    if processed_data.empty:
+        logger.warning("Tracking workflow stopped: No data after initial processing.")
+        return
+
+    tracked_data = _track_particles_3d(processed_data, search_range_mm, memory_frames, min_track_length)
+    if tracked_data.empty:
+        logger.warning("Tracking workflow stopped: No tracks survived the filtering process.")
+        return
+
+    # Merge to create full output with tracked_particle ID
+    logger.info("Tracking Step 3: Merging tracking results with original data...")
+    merge_cols = ['frame','x_mm','y_mm','z_mm']
+    tracked_cols = ['frame','x','y','z','tracked_particle']
+    
+    processed_rounded = processed_data.copy()
+    processed_rounded[merge_cols[1:]] = processed_rounded[merge_cols[1:]].round(6)
+    tracked_rounded = tracked_data.copy()
+    tracked_rounded[['x','y','z']] = tracked_rounded[['x','y','z']].round(6)
+
+    merged_df = pd.merge(
+        processed_rounded,
+        tracked_rounded[tracked_cols],
+        how='left',
+        left_on=merge_cols,
+        right_on=['frame','x','y','z']
+    )
+    merged_df.drop(columns=['x','y','z'], inplace=True, errors='ignore')
+    merged_df['tracked_particle'] = merged_df['tracked_particle'].fillna(0).astype(int)
+
+    save_dataframe_to_csv(merged_df, output_dir, os.path.basename(output_csv_all))
+    save_dataframe_to_csv(merged_df[merged_df['tracked_particle'] != 0], output_dir, os.path.basename(output_csv_tracked))
+
+    logger.info("Tracking Step 4: Visualizing and saving tracks...")
+    base_cmap = plt.cm.get_cmap('tab20')
+    unique_particles = sorted(tracked_data['tracked_particle'].unique())
+    colors = {pid: base_cmap(i % 20) for i, pid in enumerate(unique_particles)}
+    
+    # Visualize 3D
+    fig = plt.figure(figsize=(10, 8))
+    ax = fig.add_subplot(111, projection='3d')
+    ax.set_title("3D Particle Tracks")
+    ax.set_xlabel("X (mm)"); ax.set_ylabel("Y (mm)"); ax.set_zlabel("Z (mm)")
+    for particle_no, track in tracked_data.groupby('tracked_particle'):
+        ax.plot(track['x'], track['y'], track['z'], color=colors[particle_no], linewidth=1)
+    plt.tight_layout()
+    plt.savefig(figure_3d_path, dpi=150)
+    plt.close(fig)
+    logger.info(f"   - Saved 3D figure to: {figure_3d_path}")
+
+    # Visualize 2D
+    fig2d, ax2d = plt.subplots(figsize=(10, 8))
+    ax2d.set_title("2D Particle Tracks (X vs Y)")
+    ax2d.set_xlabel("X (mm)"); ax2d.set_ylabel("Y (mm)")
+    for particle_no, track in tracked_data.groupby('tracked_particle'):
+        ax2d.plot(track['x'], track['y'], color=colors[particle_no], linewidth=1)
+    plt.tight_layout()
+    plt.savefig(figure_2d_path, dpi=150)
+    plt.close(fig2d)
+    logger.info(f"   - Saved 2D figure to: {figure_2d_path}")
+    logger.info(f"--- Post-S1 Tracking for {os.path.basename(stage1_csv_path)} COMPLETED ---")
+
+
 def run_stage_01_initial_detection(
     image_dir_path: str,
     output_dir_stage1: str,
@@ -206,30 +381,12 @@ def run_stage_01_initial_detection(
     enable_brightness_adjustment = config_black_plate_well.get('enable_brightness_adjustment', False)
     logger.info(f"Stage 1: Brightness adjustment for BG subtraction is {'ENABLED' if enable_brightness_adjustment else 'DISABLED'}.")
 
-    # MODIFIED: Calculate average well brightness for the sample IF adjustment is enabled
-    # This is done once per sample.
-    # target_average_well_brightness_for_sample = None
-    # if enable_brightness_adjustment:
-    #     logger.info(f"Stage 1: Calculating average well brightness for sample {sample_id}...")
-    #     # Max images to sample for average calculation can be configured if needed
-    #     target_average_well_brightness_for_sample = calc_avg_well_brightness_from_dir(
-    #         image_dir_path,
-    #         config_black_plate_well, # Pass the sub-dictionary
-    #         max_images_to_sample=config_black_plate_well.get('avg_brightness_max_samples', 50) # New config option
-    #     )
-    #     if target_average_well_brightness_for_sample is None:
-    #         logger.warning(f"Stage 1: Could not determine target average well brightness for {sample_id}. Brightness adjustment might be impaired.")
-    # We don't use target_average_well_brightness directly in match_well_brightness yet,
-    # but it's good to calculate. The match_well_brightness adjusts BG relative to FG for now.
-
     particle_analysis_subtracted_config = config_s1.get('particle_analysis', {})
     unsubtracted_analysis_config = config_s1.get('unsubtracted_particle_analysis', {}) 
     local_otsu_roi_size = unsubtracted_analysis_config.get('local_otsu_roi_size', 150)
     particle_comparison_config = config_s1.get('particle_comparison', {})
     bg_offset = config_s1.get('bg_offset_val', 110)
     
-    # This is the general well masking config (e.g. auto-center circle)
-    # used for ROI masking AFTER subtraction and for unsubtracted analysis preparation.
     general_well_masking_cfg = config_s1.get('well_masking', {})
     
     images_df = _parse_image_filenames(image_dir_path)
@@ -258,51 +415,35 @@ def run_stage_01_initial_detection(
 
         if enable_brightness_adjustment:
             logger.debug(f"Applying brightness matching for FG: {fg_row['filename']}, BG: {bg_row['filename']}")
-            # match_well_brightness expects the full black_plate_well_analysis config
             _, img_b_for_sub_final = match_well_brightness(
-                img_a_gray_orig_uint8, # Pass original FG
-                img_b_gray_orig_uint8, # Pass original BG
+                img_a_gray_orig_uint8,
+                img_b_gray_orig_uint8,
                 config_black_plate_well
-                # target_avg_well_brightness could be passed if match_well_brightness supports it
             )
-            # Currently match_well_brightness returns adjusted_fg, adjusted_bg.
-            # We are primarily interested in the adjusted_bg relative to fg.
-            # If FG were also adjusted, img_a_for_sub would be assigned adjusted_fg.
         
-        # --- General Well Masking (for ROI) ---
-        # This uses the `well_masking` config (e.g. auto-center, radius_fraction)
-        # It's applied to the original FG to define the main analysis ROI.
-        # The mask from `create_well_mask_black_plate` (inside match_well_brightness)
-        # is used internally there for histogram calculations.
         general_well_mask_for_roi_uint8 = None
         if general_well_masking_cfg.get('create_mask', False):
-            # Use original FG for creating this general mask
             _, general_well_mask_for_roi_uint8 = mask_well_area(
                 img_a_gray_orig_uint8.copy(), 
                 general_well_masking_cfg, 
                 system_cfg
             )
             
-        # --- Inversion and Subtraction ---
-        # img_a_for_sub is still the original FG here, use it for inversion.
-        # img_b_for_sub_final is the (potentially brightness-adjusted) BG.
         img_a_inv_ready = img_a_for_sub.copy()
         img_b_inv_ready = img_b_for_sub_final.copy()
 
         if source_image_illumination == 'collimated': 
              img_a_inv_ready = cv2.bitwise_not(img_a_inv_ready)
-             img_b_inv_ready = cv2.bitwise_not(img_b_inv_ready) # Invert the (potentially adjusted) BG
+             img_b_inv_ready = cv2.bitwise_not(img_b_inv_ready)
         
         subtracted_img_uint8 = subtract_images(img_a_inv_ready, img_b_inv_ready)
         if subtracted_img_uint8 is None: 
             logger.warning(f"Subtraction resulted in None for FG: {fg_row['filename']}. Skipping pair.")
             continue
         
-        # Apply the general well mask to the subtracted image
         img_for_sub_analysis_uint8 = apply_mask(subtracted_img_uint8, general_well_mask_for_roi_uint8) \
                                      if general_well_mask_for_roi_uint8 is not None else subtracted_img_uint8
         
-        # --- Analyze Subtracted Image ---
         particles_subtracted_list_dicts, _ = _analyze_single_subtracted_image_global_thresh(
             img_for_sub_analysis_uint8, 
             particle_analysis_subtracted_config, 
@@ -313,24 +454,20 @@ def run_stage_01_initial_detection(
             df_subtracted_particles['SAMPLE_ID'] = sample_id
             df_subtracted_particles['source_image_filename'] = fg_row['filename']
 
-        # --- Analyze Unsubtracted Image (Local ROIs based on subtracted) ---
-        # Prepare the original FG image for unsubtracted analysis (e.g., apply general well mask)
-        img_for_unsub_analysis_prepared_uint8 = img_a_gray_orig_uint8.copy() # Start with original FG
+        img_for_unsub_analysis_prepared_uint8 = img_a_gray_orig_uint8.copy()
         if general_well_mask_for_roi_uint8 is not None:
-            # Specific handling for collimated to fill outside well with dominant BG for better local Otsu
             if source_image_illumination == 'collimated':
                 pixels_inside_well = img_a_gray_orig_uint8[general_well_mask_for_roi_uint8 == 255]
                 if pixels_inside_well.size > 0:
-                    # Use a robust measure for dominant background if possible
                     hist_unsub = cv2.calcHist([img_a_gray_orig_uint8], [0], general_well_mask_for_roi_uint8, [256], [0,256])
-                    dominant_bg_val = np.argmax(hist_unsub) # Consider if this is robust enough
+                    dominant_bg_val = np.argmax(hist_unsub)
                     
                     filled_outside = np.full_like(img_a_gray_orig_uint8, dominant_bg_val)
                     filled_outside[general_well_mask_for_roi_uint8 == 255] = img_a_gray_orig_uint8[general_well_mask_for_roi_uint8 == 255]
                     img_for_unsub_analysis_prepared_uint8 = filled_outside
-                else: # Fallback if no pixels in mask
+                else:
                     img_for_unsub_analysis_prepared_uint8 = apply_mask(img_a_gray_orig_uint8.copy(), general_well_mask_for_roi_uint8)
-            else: # For darkfield, just apply mask
+            else:
                 img_for_unsub_analysis_prepared_uint8 = apply_mask(img_a_gray_orig_uint8.copy(), general_well_mask_for_roi_uint8)
         
         if particles_subtracted_list_dicts: 
@@ -378,8 +515,23 @@ def run_stage_01_initial_detection(
 
     output_filename = f"{sample_id}_stage1_particles.csv"
     saved_csv_path = save_dataframe_to_csv(final_sample_df, output_dir_stage1, output_filename)
-    if saved_csv_path: logger.info(f"--- Stage 1: Initial Detection for Sample ID: {sample_id} COMPLETED ---")
-    else: logger.error(f"--- Stage 1: Failed to save results for Sample ID: {sample_id} ---")
+    
+    if saved_csv_path: 
+        logger.info(f"--- Stage 1: Initial Detection for Sample ID: {sample_id} COMPLETED ---")
+        
+        # --- NEW: Run tracking if enabled ---
+        tracking_config = config_s1.get('tracking', {})
+        if tracking_config.get('enabled', False):
+            try:
+                _run_particle_tracking(saved_csv_path, output_dir_stage1, tracking_config)
+            except Exception as e:
+                logger.exception(f"Particle tracking failed for sample {sample_id}: {e}")
+        else:
+            logger.info("Particle tracking is disabled in the configuration. Skipping.")
+            
+    else: 
+        logger.error(f"--- Stage 1: Failed to save results for Sample ID: {sample_id} ---")
+        
     return saved_csv_path
 
 if __name__ == '__main__': 

@@ -171,6 +171,7 @@ def main():
         os.makedirs(s4_output_dir, exist_ok=True)
 
         s1_output_csv_path: Optional[str] = None
+        s2_input_csv_path: Optional[str] = None # MODIFIED: New variable for S2 input
         s2_analyzed_particles_csv_path: Optional[str] = None
         s2_sharp_objects_dir: Optional[str] = None
         s3_output_final_csv_path_sample: Optional[str] = None 
@@ -193,21 +194,33 @@ def main():
                     if run_s2 or run_s3_predict or run_s4: raise ProcessingError(f"S1 failed for {current_sample_id}, cannot proceed.")
                 else:
                     logger.info(f"<<< Stage 1 for {current_sample_id} COMPLETED in {s1_duration:.2f}s. Output: {s1_output_csv_path} >>>")
-            elif run_s2 or run_s3_predict or run_s4: 
-                s1_output_csv_path = os.path.join(s1_output_dir, f"{current_sample_id}_stage1_particles.csv")
-                if not os.path.exists(s1_output_csv_path):
-                    raise FileNotFoundError(f"S1 output CSV '{s1_output_csv_path}' for {current_sample_id} not found.")
-                logger.info(f"Using existing S1 output for {current_sample_id}: {s1_output_csv_path}")
+
+            # --- MODIFIED: Determine the correct input CSV for Stage 2 ---
+            if run_s2 or run_s3_predict or run_s4:
+                s1_base_csv_name = f"{current_sample_id}_stage1_particles.csv"
+                s1_output_csv_path = os.path.join(s1_output_dir, s1_base_csv_name)
+                
+                s1_tracking_csv_name = f"{current_sample_id}_stage1_particles_with_tracking_only.csv"
+                s1_tracking_output_csv_path = os.path.join(s1_output_dir, s1_tracking_csv_name)
+
+                if os.path.exists(s1_tracking_output_csv_path):
+                    s2_input_csv_path = s1_tracking_output_csv_path
+                    logger.info(f"Using tracking-filtered particle CSV for Stage 2: {s1_tracking_csv_name}")
+                elif os.path.exists(s1_output_csv_path):
+                    s2_input_csv_path = s1_output_csv_path
+                    logger.info(f"Tracking file not found. Falling back to using all particles for Stage 2: {s1_base_csv_name}")
+                else:
+                    raise FileNotFoundError(f"Neither Stage 1 base CSV nor tracking CSV found for {current_sample_id} in {s1_output_dir}")
 
             # --- Stage 2: Quality Filter ---
             if run_s2:
-                if not s1_output_csv_path:
+                if not s2_input_csv_path: # MODIFIED: Check the new variable
                     raise ProcessingError(f"S1 output CSV for {current_sample_id} not available for S2.")
                 
                 logger.info(f">>> Starting Stage 2 for {current_sample_id} <<<")
                 s2_start_time = time.time()
                 s2_analyzed_particles_csv_path = run_stage_02_quality_filter(
-                    input_particles_csv_path=s1_output_csv_path,
+                    input_particles_csv_path=s2_input_csv_path, # MODIFIED: Pass the new variable
                     image_dir_path=s1_input_image_dir_for_sample, 
                     output_dir_stage2=s2_output_dir,
                     sample_id=current_sample_id
@@ -219,6 +232,8 @@ def main():
                 else:
                     logger.info(f"<<< Stage 2 for {current_sample_id} COMPLETED in {s2_duration:.2f}s. Analyzed CSV: {s2_analyzed_particles_csv_path} >>>")
                     s2_sharp_objects_dir = os.path.join(s2_output_dir, "sharp_object_final_crops")
+            
+            # (No changes needed below this point in the loop)
             elif run_s3_predict or run_s4: 
                 s2_analyzed_particles_csv_path = os.path.join(s2_output_dir, f"{current_sample_id}_stage2_analyzed_particles.csv")
                 s2_sharp_objects_dir = os.path.join(s2_output_dir, "sharp_object_final_crops")

@@ -217,7 +217,8 @@ def run_stage_02_quality_filter(
     sample_id: str
     ) -> Optional[str]:
     logger.info(f"--- Stage 2: Quality Filter for Sample ID: {sample_id} (Consolidated Thresh for Boundary) ---")
-    logger.info(f"Input particle CSV: {input_particles_csv_path}")
+    # MODIFIED: Updated log message for clarity
+    logger.info(f"Input particle CSV: {os.path.basename(input_particles_csv_path)}")
     logger.info(f"Original image directory: {image_dir_path}")
     logger.info(f"Output directory for this stage: {output_dir_stage2}")
 
