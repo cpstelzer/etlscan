@@ -88,8 +88,8 @@ stage_01_initial_detection:
     enabled: true
     pixel_size_um: 2.74
     magnification: 0.638 # Optotune TS1-0638-70-EL
-    search_range_mm: 0.5
-    memory_frames: 3
+    search_range_mm: 0.55
+    memory_frames: 5
     min_track_length: 10
 
 # Stage 2: Quality Filter

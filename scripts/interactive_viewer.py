@@ -26,6 +26,9 @@ from sklearn.neighbors import BallTree
 import shutil 
 import re
 from matplotlib.patches import Patch
+from mpl_toolkits.mplot3d import Axes3D
+import trackpy as tp
+
 
 try:
     from src.utils.config_loader import get_config, load_config, get_unified_segmentation_params 
@@ -39,7 +42,9 @@ try:
         _filter_image_df,
         _analyze_single_subtracted_image_global_thresh, 
         _analyze_unsubtracted_locally, 
-        _compare_and_fuse_particle_dfs 
+        _compare_and_fuse_particle_dfs,
+        _process_particle_coordinates_for_tracking,
+        _track_particles_3d
     )
     from src.stages.stage_02_quality_filter import (
         _process_single_particle_for_quality,
@@ -69,7 +74,7 @@ DEFAULT_ROI_SIZE_MIN, DEFAULT_ROI_SIZE_MAX = 30, 500
 class FeatureViewerApp:
     def __init__(self, master):
         self.master = master
-        master.title("Interactive Viewer (Well Brightness Adjust)"); master.geometry("1600x950") 
+        master.title("Interactive Pipeline Viewer"); master.geometry("1600x950") 
         self.image_path = None; self.image_array_gray_float = None 
         self.default_params = {}; self.current_params = {} 
         self.param_vars = {} 
@@ -81,7 +86,8 @@ class FeatureViewerApp:
         self.s1_selected_fg_filepath_var = tk.StringVar()
         self.s1_convolution_kernel_list = None; self.s1_raw_config = {} 
         self.s1_system_config_from_file = {} 
-        self.s1_bg_offset_val_str = tk.StringVar() 
+        self.s1_bg_offset_val_str = tk.StringVar()
+        self.s1_particle_df_for_tracking = pd.DataFrame() # Holds loaded S1 CSV data
         self.s2_status_text_var = tk.StringVar(value="S2 Status: Load Dir & select FG frame.")
         
         self.s2_final_sharp_particles_df_for_viewer = pd.DataFrame() 
@@ -111,13 +117,13 @@ class FeatureViewerApp:
             s1_comp_cfg = self.s1_raw_config.get('particle_comparison', {}) 
             s1_well_mask_cfg = self.s1_raw_config.get('well_masking', {}) 
             s1_black_plate_well_analysis_cfg = self.s1_raw_config.get('black_plate_well_analysis', {})
+            s1_tracking_cfg = self.s1_raw_config.get('tracking', {})
             
             s2_cfg = cfg.get('stage_02_quality_filter', {})
             s2_intermediate_crop_cfg = s2_cfg.get('intermediate_crop', {})
             s2_black_mask_cfg = s2_cfg.get('black_mask_check', {})
             s2_final_sharp_filter_cfg = s2_cfg.get('final_sharp_object_filter', {})
             s2_filters_enabled_cfg = s2_cfg.get('filters_enabled', {})
-            # MODIFIED: Read the new flexible final crop settings
             s2_final_crop_settings_cfg = s2_cfg.get('final_sharp_crop_settings', {})
 
             self.s1_convolution_kernel_list = s1_particle_cfg.get('convolution_kernel')
@@ -152,7 +158,6 @@ class FeatureViewerApp:
             s1_bpwa_match_cfg = s1_black_plate_well_analysis_cfg.get('brightness_matching', {})
             self.default_params.update({f"s1_bpwa_match_{k}": v for k,v in s1_bpwa_match_cfg.items()})
             
-            # MODIFIED: Updated S2 default params for the viewer UI
             self.default_params.update({
                 's2_intermediate_crop_mode': s2_intermediate_crop_cfg.get('mode', 'rotational_rectangle'),
                 's2_intermediate_crop_square_size': s2_intermediate_crop_cfg.get('square_size', 128),
@@ -166,6 +171,9 @@ class FeatureViewerApp:
                 's2_enable_on_boundary_filter': s2_filters_enabled_cfg.get('on_crop_boundary', True),
                 's2_enable_final_sharpness_filter': s2_filters_enabled_cfg.get('final_sharpness', True),
             })
+            
+            self.default_params.update({f"tracking_{k}": v for k,v in s1_tracking_cfg.items()})
+
 
             self.current_params = self.default_params.copy()
             self._initialize_param_vars_and_specs()
@@ -177,7 +185,8 @@ class FeatureViewerApp:
         all_specs = {
             **self._get_global_param_specs(), 
             **self._get_s1_param_specs(), 
-            **self._get_s1_black_plate_well_param_specs(), 
+            **self._get_s1_black_plate_well_param_specs(),
+            **self._get_tracking_param_specs(),
             **self._get_s2_param_specs(), 
             **self._get_main_body_seg_param_specs(), 
             **self._get_egg_detect_param_specs()     
@@ -212,7 +221,7 @@ class FeatureViewerApp:
 
     def on_closing(self): 
         if self.update_job_id: self.master.after_cancel(self.update_job_id)
-        for canvas_attr in ['canvas_raw', 'canvas_dynamic_vis', 'canvas_s2_single_crop']: 
+        for canvas_attr in ['canvas_raw', 'canvas_dynamic_vis', 'canvas_s2_single_crop', 'canvas_tracking_2d', 'canvas_tracking_3d']: 
             if hasattr(self, canvas_attr) and getattr(self, canvas_attr):
                 try: getattr(self, canvas_attr).get_tk_widget().destroy()
                 except tk.TclError: pass
@@ -229,7 +238,7 @@ class FeatureViewerApp:
         self.status_label = ttk.Label(top_controls_frame, text="Load."); self.status_label.pack(side=tk.LEFT, padx=5, expand=True, fill=tk.X) 
         toggle_frame = ttk.Frame(top_controls_frame); toggle_frame.pack(side=tk.RIGHT, padx=5)
         ttk.Label(toggle_frame, text="Show:").pack(side=tk.LEFT)
-        for mode_disp, mode_val in [("S1", "S1"), ("S2", "S2"), ("S3", "S3"), ("S4", "S4")]: 
+        for mode_disp, mode_val in [("S1", "S1"), ("Tracking", "Tracking"), ("S2", "S2"), ("S3", "S3"), ("S4", "S4")]: 
             ttk.Radiobutton(toggle_frame, text=mode_disp, variable=self.active_visualization_mode, value=mode_val, command=self.on_mode_change).pack(side=tk.LEFT)
         paned_window = ttk.PanedWindow(main_frame, orient=tk.HORIZONTAL); paned_window.pack(fill=tk.BOTH, expand=True, pady=5)
         controls_frame_outer = ttk.Labelframe(paned_window, text="Params", padding="10"); paned_window.add(controls_frame_outer, weight=1) 
@@ -256,6 +265,9 @@ class FeatureViewerApp:
         self.create_s1_unsubtracted_param_controls(self.s1_unsubtracted_params_frame)
         self.s1_comparison_params_frame = ttk.Labelframe(self.s1_params_frame_main, text="S1 Particle Comparison Params", padding=5)
         self.create_s1_comparison_param_controls(self.s1_comparison_params_frame)
+
+        self.tracking_params_frame_main = ttk.Frame(self.controls_frame_inner)
+        self.create_tracking_param_controls(self.tracking_params_frame_main)
         
         self.s2_params_frame_main = ttk.Frame(self.controls_frame_inner)
         self.create_s2_param_controls(self.s2_params_frame_main)
@@ -271,13 +283,34 @@ class FeatureViewerApp:
         ttk.Button(param_buttons, text="Update", command=self.process_and_display_safe).pack(side=tk.LEFT, expand=True, fill=tk.X, padx=(2,0))
         
         self.vis_notebook = ttk.Notebook(paned_window); paned_window.add(self.vis_notebook, weight=3)
-        main_vis_tab = ttk.Frame(self.vis_notebook); self.vis_notebook.add(main_vis_tab, text=" Frame Overview ")
+        self.main_vis_tab = ttk.Frame(self.vis_notebook); self.vis_notebook.add(self.main_vis_tab, text=" Frame Overview ")
         self.fig_raw, self.ax_raw = plt.subplots(); self.ax_raw.set_title("Raw Input"); self.ax_raw.set_axis_off()
-        self.canvas_raw = FigureCanvasTkAgg(self.fig_raw, master=main_vis_tab); self.canvas_raw.get_tk_widget().pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=2); self.canvas_raw.draw()
+        self.canvas_raw = FigureCanvasTkAgg(self.fig_raw, master=self.main_vis_tab); self.canvas_raw.get_tk_widget().pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=2); self.canvas_raw.draw()
         self.fig_dynamic_vis = plt.figure(); self.ax_dynamic_vis = None 
-        self.canvas_dynamic_vis = FigureCanvasTkAgg(self.fig_dynamic_vis, master=main_vis_tab); self.canvas_dynamic_vis.get_tk_widget().pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=2); self.canvas_dynamic_vis.draw()
+        self.canvas_dynamic_vis = FigureCanvasTkAgg(self.fig_dynamic_vis, master=self.main_vis_tab); self.canvas_dynamic_vis.get_tk_widget().pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=2); self.canvas_dynamic_vis.draw()
+        
+        self.tracking_vis_tab = ttk.Frame(self.vis_notebook)
+        self.setup_tracking_tab(self.tracking_vis_tab)
+        
         self.s2_single_crop_tab = ttk.Frame(self.vis_notebook) 
         self.setup_s2_single_crop_tab(self.s2_single_crop_tab)
+
+    def setup_tracking_tab(self, parent_tab_frame):
+        tracking_paned = ttk.PanedWindow(parent_tab_frame, orient=tk.VERTICAL); tracking_paned.pack(fill=tk.BOTH, expand=True)
+        
+        self.tracking_summary_text = scrolledtext.ScrolledText(tracking_paned, wrap=tk.WORD, height=6, state=tk.DISABLED)
+        tracking_paned.add(self.tracking_summary_text, weight=1)
+        
+        tracking_plots_frame = ttk.Frame(tracking_paned); tracking_paned.add(tracking_plots_frame, weight=5)
+        
+        self.fig_tracking_2d, self.ax_tracking_2d = plt.subplots(); self.ax_tracking_2d.set_title("2D Tracks"); self.ax_tracking_2d.set_axis_off()
+        self.canvas_tracking_2d = FigureCanvasTkAgg(self.fig_tracking_2d, master=tracking_plots_frame)
+        self.canvas_tracking_2d.get_tk_widget().pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=2)
+        
+        self.fig_tracking_3d = plt.figure(); self.ax_tracking_3d = self.fig_tracking_3d.add_subplot(111, projection='3d')
+        self.ax_tracking_3d.set_title("3D Tracks"); self.ax_tracking_3d.set_axis_off()
+        self.canvas_tracking_3d = FigureCanvasTkAgg(self.fig_tracking_3d, master=tracking_plots_frame)
+        self.canvas_tracking_3d.get_tk_widget().pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=2)
 
     def setup_s2_single_crop_tab(self, parent_tab_frame):
         s2_crop_selector_frame = ttk.Frame(parent_tab_frame, padding=5); s2_crop_selector_frame.pack(fill=tk.X)
@@ -293,20 +326,46 @@ class FeatureViewerApp:
 
     def on_mode_change(self):
         mode = self.active_visualization_mode.get()
-        self.global_params_frame.pack(fill=tk.X, expand=True, pady=5, padx=5)
-        self.s1_params_frame_main.pack_forget(); self.s2_params_frame_main.pack_forget(); self.s3_s4_params_main_frame.pack_forget()
-        self.s1_fg_image_selector_label.pack_forget(); self.s1_fg_image_selector.pack_forget(); self.s2_status_label.pack_forget()
-        try: self.vis_notebook.index(self.s2_single_crop_tab); self.vis_notebook.forget(self.s2_single_crop_tab) 
-        except tk.TclError: pass 
+        
+        # Hide all parameter frames first
+        self.global_params_frame.pack_forget()
+        self.s1_params_frame_main.pack_forget()
+        self.tracking_params_frame_main.pack_forget()
+        self.s2_params_frame_main.pack_forget()
+        self.s3_s4_params_main_frame.pack_forget()
+        
+        # Hide context-specific widgets
+        self.s1_fg_image_selector_label.pack_forget()
+        self.s1_fg_image_selector.pack_forget()
+        self.s2_status_label.pack_forget()
+        self.canvas_raw.get_tk_widget().pack_forget()
+        self.canvas_dynamic_vis.get_tk_widget().pack_forget()
+        
+        for tab in [self.s2_single_crop_tab, self.tracking_vis_tab, self.main_vis_tab]:
+            try: self.vis_notebook.index(tab); self.vis_notebook.forget(tab) 
+            except tk.TclError: pass 
         
         if mode == "S1":
+            self.vis_notebook.add(self.main_vis_tab, text=" Frame Overview ")
+            self.canvas_raw.get_tk_widget().pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=2)
+            self.canvas_dynamic_vis.get_tk_widget().pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=2)
+            self.global_params_frame.pack(fill=tk.X, expand=True, pady=5, padx=5)
             self.s1_params_frame_main.pack(fill=tk.X, expand=True)
             self.s1_bpwa_params_frame.pack(fill=tk.X, expand=True, pady=3)
             self.s1_subtracted_params_frame.pack(fill=tk.X, expand=True, pady=3); self.s1_wellmask_params_frame.pack(fill=tk.X, expand=True, pady=3)
             self.s1_unsubtracted_params_frame.pack(fill=tk.X, expand=True, pady=3); self.s1_comparison_params_frame.pack(fill=tk.X, expand=True, pady=3)
             self.load_button.config(text="Load S1 Dir"); self.s1_fg_image_selector_label.pack(side=tk.LEFT, padx=(10,2), before=self.status_label)
             self.s1_fg_image_selector.pack(side=tk.LEFT, padx=2, before=self.status_label); self.s1_fg_image_selector.config(state="readonly" if self.s1_image_directory_path and not self.s1_image_file_list_df.empty else "disabled")
+        elif mode == "Tracking":
+            self.vis_notebook.add(self.tracking_vis_tab, text=" Tracking Visualization ")
+            self.tracking_params_frame_main.pack(fill=tk.X, expand=True)
+            self.load_button.config(text="Load S1 Particle CSV")
         elif mode == "S2":
+            self.vis_notebook.add(self.main_vis_tab, text=" Frame Overview ")
+            self.vis_notebook.add(self.s2_single_crop_tab, text=" S2 Crop Inspector ") 
+            self.canvas_raw.get_tk_widget().pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=2)
+            self.canvas_dynamic_vis.get_tk_widget().pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=2)
+            self.global_params_frame.pack(fill=tk.X, expand=True, pady=5, padx=5)
             self.s1_params_frame_main.pack(fill=tk.X, expand=True) 
             self.s1_bpwa_params_frame.pack(fill=tk.X, expand=True, pady=3) 
             self.s1_subtracted_params_frame.pack(fill=tk.X, expand=True, pady=3)
@@ -316,9 +375,13 @@ class FeatureViewerApp:
             self.s2_params_frame_main.pack(fill=tk.X, expand=True) 
             self.load_button.config(text="Load S2 Dir (uses S1 FG)"); self.s1_fg_image_selector_label.pack(side=tk.LEFT, padx=(10,2), before=self.status_label); self.s1_fg_image_selector.pack(side=tk.LEFT, padx=2, before=self.status_label)
             self.s1_fg_image_selector.config(state="readonly" if self.s1_image_directory_path and not self.s1_image_file_list_df.empty else "disabled")
-            self.s2_status_label.pack(side=tk.LEFT, padx=(10,0), after=self.s1_fg_image_selector); self.vis_notebook.add(self.s2_single_crop_tab, text=" S2 Crop Inspector ") 
+            self.s2_status_label.pack(side=tk.LEFT, padx=(10,0), after=self.s1_fg_image_selector)
             self.s2_selected_sharp_particle_var.set(""); self.update_s2_single_crop_display() 
         elif mode in ["S3", "S4"]:
+            self.vis_notebook.add(self.main_vis_tab, text=" Frame Overview ")
+            self.canvas_raw.get_tk_widget().pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=2)
+            self.canvas_dynamic_vis.get_tk_widget().pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=2)
+            self.global_params_frame.pack(fill=tk.X, expand=True, pady=5, padx=5)
             self.s3_s4_params_main_frame.pack(fill=tk.X, expand=True)
             self.s3_s4_main_body_seg_params_frame.pack(fill=tk.X, expand=True, pady=3)
             if mode == "S3": self.s3_egg_params_frame.pack(fill=tk.X, expand=True, pady=3)
@@ -326,10 +389,9 @@ class FeatureViewerApp:
             self.load_button.config(text="Load Img (S3/S4)")
         
         self.update_global_threshold_param_visibility(); 
-        # ADDED: Call the new visibility manager for S2 crop params
-        if mode == "S2":
-            self._update_s2_crop_param_visibility()
+        if mode == "S2": self._update_s2_crop_param_visibility()
         if mode != "S1" and mode !="S2": self.s1_image_directory_path = None; self.s1_image_file_list_df = pd.DataFrame(); self.s1_fg_image_selector['values'] = []; self.s1_selected_fg_filepath_var.set("")
+        if mode != "Tracking": self.s1_particle_df_for_tracking = pd.DataFrame()
         self.update_raw_image_display(); self.schedule_update()
     
     def on_s1_fg_image_selected(self, event=None): self.update_raw_image_display(); self.schedule_update()
@@ -358,7 +420,6 @@ class FeatureViewerApp:
             if mode == 'fixed': self.param_widgets[fixed_widget_name].pack(fill=tk.X, pady=2, padx=5)
             else: self.param_widgets[fixed_widget_name].pack_forget()
 
-    # ADDED: New function to manage visibility of S2 crop-specific parameters.
     def _update_s2_crop_param_visibility(self, *args):
         mode_var = self.param_vars.get('s2_intermediate_crop_mode')
         if not mode_var: return
@@ -421,7 +482,6 @@ class FeatureViewerApp:
         label_text = re.sub(r"S1 Bpwa Peak\s*", "", label_text, flags=re.IGNORECASE)   
         label_text = re.sub(r"S1 Bpwa Match\s*", "", label_text, flags=re.IGNORECASE) 
         label_text = re.sub(r"S1 Bpwa\s*", "", label_text, flags=re.IGNORECASE) 
-        # MODIFIED: Clean up S2 labels better
         label_text = re.sub(r"S2\s*(Intermediate|Final|Enable|Black Mask|)\s*", "", label_text, flags=re.IGNORECASE)
         label_text = re.sub(r"S\d\s*(Sub|Unsub|Comp|Well Mask|Enable|Viewer|)\s*", "", label_text, flags=re.IGNORECASE)
         
@@ -429,7 +489,6 @@ class FeatureViewerApp:
         ttk.Label(container, text=label_text.strip() + ":", width=28, anchor="w").pack(side=tk.LEFT, padx=(0,5))
         tk_var = self.param_vars.get(name) 
         if param_type == 'choice':
-            # MODIFIED: Added callback for S2 crop mode selector
             cmd = self.schedule_update 
             if name == 'viewer_thresholding_mode': cmd = self.update_global_threshold_param_visibility
             if name == 's2_intermediate_crop_mode': cmd = self._update_s2_crop_param_visibility
@@ -442,7 +501,6 @@ class FeatureViewerApp:
             ttk.Button(container, text="+", command=lambda p_name=name: self._adjust_param_value(p_name, 1), width=2).pack(side=tk.LEFT)
         elif param_type == 'bool': ttk.Checkbutton(container, variable=tk_var, command=self.schedule_update).pack(side=tk.LEFT)
         
-        # MODIFIED: Prevent auto-packing of conditional S2 widgets
         conditional_s2_widgets = [
             's2_intermediate_crop_square_size', 's2_intermediate_crop_rotational_padding',
             's2_final_crop_settings_centroid_square_size', 's2_final_crop_settings_rotational_padding'
@@ -495,8 +553,17 @@ class FeatureViewerApp:
             's1_bpwa_match_adjustment_method': {'options': ['global_shift', 'histogram_matching'], 'type': 'choice'},
             's1_bpwa_match_target_peak_offset_after_shift': {'min': -20, 'max': 20, 'type': 'int', 'step': 1},
         }
+        
+    def _get_tracking_param_specs(self):
+        return {
+            'tracking_enabled': {'type': 'bool'},
+            'tracking_pixel_size_um': {'min': 0.1, 'max': 10.0, 'type': 'float', 'res': 0.1},
+            'tracking_magnification': {'min': 0.1, 'max': 10.0, 'type': 'float', 'res': 0.001},
+            'tracking_search_range_mm': {'min': 0.01, 'max': 5.0, 'type': 'float', 'res': 0.01},
+            'tracking_memory_frames': {'min': 0, 'max': 20, 'type': 'int', 'step': 1},
+            'tracking_min_track_length': {'min': 2, 'max': 100, 'type': 'int', 'step': 1},
+        }
 
-    # MODIFIED: Updated S2 parameter specifications
     def _get_s2_param_specs(self):
         return {
             's2_intermediate_crop_mode': {'options': ['rotational_rectangle', 'centroid_square', 'bounding_box'], 'type': 'choice'},
@@ -585,8 +652,18 @@ class FeatureViewerApp:
         ordered_params = ['s1_comp_search_radius_factor', 's1_comp_default_particle_area']
         for name in ordered_params:
             if name in self.default_params: self._create_generic_param_control(parent_frame, name, s1_specs[name], self.current_params.get(name, self.default_params[name]))
-
-    # MODIFIED: Updated S2 parameter control creation
+    
+    def create_tracking_param_controls(self, parent_frame):
+        ttk.Label(parent_frame, text="Tracking Parameters", font='Helvetica 10 bold').pack(fill=tk.X, pady=(5,2))
+        tracking_specs = self._get_tracking_param_specs()
+        ordered_tracking_params = [
+            'tracking_enabled', 'tracking_pixel_size_um', 'tracking_magnification',
+            'tracking_search_range_mm', 'tracking_memory_frames', 'tracking_min_track_length'
+        ]
+        for name in ordered_tracking_params:
+            if name in self.default_params:
+                self._create_generic_param_control(parent_frame, name, tracking_specs[name], self.current_params.get(name, self.default_params[name]))
+    
     def create_s2_param_controls(self, parent_frame):
         ttk.Label(parent_frame, text="S2 Quality Filter Params", font='Helvetica 10 bold').pack(fill=tk.X, pady=(5,2))
         s2_specs = self._get_s2_param_specs()
@@ -643,8 +720,38 @@ class FeatureViewerApp:
         self.update_global_threshold_param_visibility() 
 
     def dispatch_load_action(self):
-        if self.active_visualization_mode.get() in ["S1", "S2"]: self._load_s1_directory()
+        mode = self.active_visualization_mode.get()
+        if mode == "Tracking": self._load_tracking_csv()
+        elif mode in ["S1", "S2"]: self._load_s1_directory()
         else: self._load_s3_s4_image()
+
+    def _load_tracking_csv(self):
+        path = filedialog.askopenfilename(
+            title="Select Stage 1 Particle CSV for Tracking",
+            filetypes=(("CSV files", "*.csv"), ("All files", "*.*"))
+        )
+        if not path:
+            self.status_label.config(text="Tracking CSV selection cancelled.")
+            return
+        
+        self.status_label.config(text=f"Loading CSV: {os.path.basename(path)}...")
+        self.master.update_idletasks()
+        try:
+            df = pd.read_csv(path)
+            if df.empty:
+                raise ValueError("Loaded CSV file is empty.")
+            required_cols = ['X', 'Y', 'source_image_filename']
+            if not all(col in df.columns for col in required_cols):
+                raise ValueError(f"CSV missing required columns: {', '.join(required_cols)}")
+            
+            self.s1_particle_df_for_tracking = df
+            self.status_label.config(text=f"Loaded {len(df)} particles from {os.path.basename(path)}")
+            self.schedule_update()
+
+        except Exception as e:
+            messagebox.showerror("CSV Load Error", f"Failed to load or validate CSV:\n{e}")
+            self.status_label.config(text="Failed to load CSV.")
+            self.s1_particle_df_for_tracking = pd.DataFrame()
 
     def _load_s1_directory(self): 
         current_mode = self.active_visualization_mode.get()
@@ -691,15 +798,14 @@ class FeatureViewerApp:
             fn = self.s1_selected_fg_filepath_var.get()
             if fn:
                 path = os.path.join(self.s1_image_directory_path, fn)
-                if os.path.exists(path): img_show_raw_uint8 = core_load_image(path, 'gray'); img_show = skimage.util.img_as_float(img_show_raw_uint8); title = f"{mode} FG: {fn}"
-                else: title = f"{mode} FG: Not found"
-            else: title = f"{mode}: Select FG frame"
+                if os.path.exists(path): img_show_raw_uint8 = core_load_image(path, 'gray'); img_show = skimage.util.img_as_float(img_show_raw_uint8); title = f"Sample Frame: {fn}"
+                else: title = f"{mode}: FG Not found"
+            else: title = f"{mode}: Select Dir"
         elif self.image_array_gray_float is not None and mode in ["S3","S4"]: img_show = self.image_array_gray_float; title = f"Input: {os.path.basename(self.image_path or 'No Img')}"
         if img_show is not None: self.ax_raw.imshow(img_show, cmap='gray', vmin=0.0, vmax=1.0)
         else: self.ax_raw.imshow(np.zeros((100,100)), cmap='gray') 
         self.ax_raw.set_title(title, fontsize=8); self.ax_raw.set_axis_off(); self.canvas_raw.draw()
 
-    # MODIFIED: Updated to collect new S2 parameters
     def collect_current_params(self):
         gui_params = {name: var.get() for name, var in self.param_vars.items()}
         
@@ -728,7 +834,8 @@ class FeatureViewerApp:
         s1_bpwa_collected_cfg['brightness_matching'] = s1_bpwa_match_collected
         self.current_params['s1_black_plate_well_analysis_effective'] = s1_bpwa_collected_cfg
         
-        # MODIFIED: Assemble the effective S2 config from the UI, including the new crop settings.
+        self.current_params['tracking_effective'] = {k.replace('tracking_', ''):v for k,v in gui_params.items() if k.startswith('tracking_')}
+
         self.current_params['s2_effective'] = {
             'intermediate_crop': {
                 'mode': gui_params.get('s2_intermediate_crop_mode'), 
@@ -768,8 +875,12 @@ class FeatureViewerApp:
         if active_mode in ["S1", "S2"]:
             if self.s1_image_directory_path and not self.s1_image_file_list_df.empty and self.s1_selected_fg_filepath_var.get(): valid_input = True
             else: self.status_label.config(text=f"{active_mode}: Load dir & select FG frame.")
+        elif active_mode == "Tracking":
+            if not self.s1_particle_df_for_tracking.empty: valid_input = True
+            else: self.status_label.config(text="Tracking: Load S1 particle CSV.")
         elif self.image_array_gray_float is not None: valid_input = True 
         else: self.status_label.config(text="S3/S4: Load image.")
+
         if not valid_input:
             if self.update_job_id: self.master.after_cancel(self.update_job_id); self.update_job_id = None
             if self.fig_dynamic_vis: 
@@ -786,6 +897,7 @@ class FeatureViewerApp:
             return
         self.status_label.config(text="Processing..."); self.master.update_idletasks()
         if active_mode == "S2": self.s2_status_text_var.set("S2 Status: Processing...")
+        if active_mode == "Tracking": self.tracking_summary_text.config(state=tk.NORMAL); self.tracking_summary_text.delete(1.0, tk.END); self.tracking_summary_text.insert(tk.END, "Processing CSV for tracking..."); self.tracking_summary_text.config(state=tk.DISABLED); self.master.update_idletasks()
         try: self.process_and_display(); self.status_label.config(text=f"Ready. Mode: {active_mode}.")
         except DataValidationError as dve: logger.error(f"Data Validation Error: {dve}"); messagebox.showerror("Data Error", f"{dve}"); self.status_label.config(text=f"Data Error: {dve}")
         except Exception as e: logger.exception("Proc Error"); messagebox.showerror("Error", f"{e}"); self.status_label.config(text=f"Error: {e}")
@@ -998,6 +1110,61 @@ class FeatureViewerApp:
                     except Exception: pass
             self.fig_dynamic_vis.tight_layout(rect=[0, 0, 1, 0.96])
         
+        elif mode == "Tracking":
+            tracking_eff = params['tracking_effective']
+            if not tracking_eff.get('enabled'):
+                self.tracking_summary_text.config(state=tk.NORMAL); self.tracking_summary_text.delete(1.0, tk.END); self.tracking_summary_text.insert(tk.END, "Tracking is disabled in parameters. Enable it to see results."); self.tracking_summary_text.config(state=tk.DISABLED)
+                self.ax_tracking_2d.clear(); self.ax_tracking_2d.set_title("2D Tracks (Disabled)"); self.ax_tracking_2d.set_axis_off(); self.canvas_tracking_2d.draw()
+                self.ax_tracking_3d.clear(); self.ax_tracking_3d.set_title("3D Tracks (Disabled)"); self.ax_tracking_3d.set_axis_off(); self.canvas_tracking_3d.draw()
+                return
+            
+            temp_s1_csv_path = os.path.join(self.temp_dir.name, "s1_for_tracking_viewer.csv")
+            self.s1_particle_df_for_tracking.to_csv(temp_s1_csv_path, index=False)
+
+            processed_data = _process_particle_coordinates_for_tracking(
+                temp_s1_csv_path, 
+                tracking_eff['pixel_size_um'], 
+                tracking_eff['magnification']
+            )
+            
+            tracked_data = _track_particles_3d(
+                processed_data, 
+                tracking_eff['search_range_mm'], 
+                tracking_eff['memory_frames'], 
+                tracking_eff['min_track_length']
+            )
+
+            num_total_particles = len(processed_data)
+            num_tracks = 0
+            num_tracked_particles = 0
+            if not tracked_data.empty:
+                num_tracks = tracked_data['tracked_particle'].nunique()
+                num_tracked_particles = len(tracked_data)
+            
+            percent_tracked = (num_tracked_particles / num_total_particles * 100) if num_total_particles > 0 else 0
+            
+            summary_str = (
+                f"Total Particles from CSV: {num_total_particles}\n"
+                f"Number of Tracks Found: {num_tracks}\n"
+                f"Particles in Tracks: {num_tracked_particles} ({percent_tracked:.1f}% of total)"
+            )
+            self.tracking_summary_text.config(state=tk.NORMAL); self.tracking_summary_text.delete(1.0, tk.END); self.tracking_summary_text.insert(tk.END, summary_str); self.tracking_summary_text.config(state=tk.DISABLED)
+            
+            self.ax_tracking_2d.clear(); self.ax_tracking_3d.clear()
+            self.ax_tracking_2d.set_title("2D Particle Tracks (X vs Y)", fontsize=9); self.ax_tracking_2d.set_xlabel("X (mm)", fontsize=8); self.ax_tracking_2d.set_ylabel("Y (mm)", fontsize=8)
+            self.ax_tracking_3d.set_title("3D Particle Tracks", fontsize=9); self.ax_tracking_3d.set_xlabel("X (mm)", fontsize=8); self.ax_tracking_3d.set_ylabel("Y (mm)", fontsize=8); self.ax_tracking_3d.set_zlabel("Z (mm)", fontsize=8)
+
+            if not tracked_data.empty:
+                base_cmap = plt.cm.get_cmap('tab20')
+                unique_particles = sorted(tracked_data['tracked_particle'].unique())
+                colors = {pid: base_cmap(i % 20) for i, pid in enumerate(unique_particles)}
+                
+                for particle_no, track in tracked_data.groupby('tracked_particle'):
+                    self.ax_tracking_2d.plot(track['x'], track['y'], color=colors[particle_no], linewidth=1)
+                    self.ax_tracking_3d.plot(track['x'], track['y'], track['z'], color=colors[particle_no], linewidth=1)
+            
+            self.canvas_tracking_2d.draw(); self.canvas_tracking_3d.draw()
+
         elif mode in ["S3", "S4"]: 
             self.ax_dynamic_vis = self.fig_dynamic_vis.add_subplot(111) 
             s3_s4_processing_params = params['s3_s4_segmentation_and_feature_params']
@@ -1032,7 +1199,7 @@ class FeatureViewerApp:
                     else: self.ax_dynamic_vis.imshow(img_f_original, cmap='gray')
             self.fig_dynamic_vis.tight_layout()
         self.canvas_dynamic_vis.draw()
-
+    
     def update_s2_sharp_particle_selector(self):
         if not self.s2_final_sharp_particles_df_for_viewer.empty:
             df = self.s2_final_sharp_particles_df_for_viewer
@@ -1048,7 +1215,6 @@ class FeatureViewerApp:
 
     def on_s2_sharp_particle_selected(self, event=None): self.update_s2_single_crop_display()
 
-    # MODIFIED: Updated to handle rotational cropping for the final crop display.
     def update_s2_single_crop_display(self):
         self.ax_s2_single_crop.clear(); self.s2_sharp_particle_attributes_text.config(state=tk.NORMAL); self.s2_sharp_particle_attributes_text.delete(1.0, tk.END)
         selected_particle_str = self.s2_selected_sharp_particle_var.get()
@@ -1069,7 +1235,6 @@ class FeatureViewerApp:
                 orig_gray_img = convert_to_grayscale(orig_color_img)
                 if orig_color_img is None or orig_gray_img is None: raise ValueError("Could not load original frame for S2 crop.")
                 
-                # ADDED: Build final cropper config dynamically from UI
                 final_crop_mode = self.param_vars['s2_intermediate_crop_mode'].get()
                 final_cropper_cfg = {'mode': final_crop_mode}
                 if final_crop_mode == 'centroid_square':
@@ -1079,7 +1244,6 @@ class FeatureViewerApp:
                 
                 final_cropper = ParticleCropper(final_cropper_cfg)
                 
-                # The `particle_attrs` Series contains all required columns (X, Y, rot_rect_*, etc.)
                 final_crop_gray, _ = final_cropper.crop_single_particle_from_image(orig_color_img, orig_gray_img, particle_attrs, output_dir_for_crop=None)
 
                 if final_crop_gray is not None:
