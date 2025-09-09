@@ -5,152 +5,173 @@ sample_subdir_name: "D:/sizeselection/gen1_collimated_750us/" # Example, will be
 
 # Logging Configuration
 logging:
-  level: "DEBUG" 
-  console_level: "INFO" 
+  level: "DEBUG"
+  console_level: "INFO"
   format: "%(asctime)s - %(levelname)s - %(name)s - %(module)s.%(funcName)s - %(message)s"
   date_format: "%Y-%m-%d %H:%M:%S"
-  log_file: "pipeline_run.log" 
-  
+  log_file: "pipeline_run.log"
+
 # System and Image Parameters
 system:
-  image_width_px: 4504 
-  image_height_px: 4504 
-  source_image_illumination_type: "collimated" 
+  image_width_px: 4504
+  image_height_px: 4504
+  source_image_illumination_type: "collimated"
   thresholding:
-    mode: "otsu" 
-    otsu_threshold_multiplier: 0.9 
-    fixed_threshold_value: 70 
-  
-# Stage 1: Initial Detection
+    mode: "otsu"
+    otsu_threshold_multiplier: 0.9
+    fixed_threshold_value: 70
+  # Segmentation parameters for Stage 2 & 4
+  segmentation:
+    enable_unsharp_masking: false
+    unsharp_mask_sigma: 1.0
+    unsharp_mask_amount: 1.0
+    min_noise_size: 50
+    closing_selem_size: 3
+    min_significant_area: 300
+
+# Stage 1: Detection & Pre-Filtering
 stage_01_initial_detection:
-  bg_offset_val: 180 
-  well_masking: # This is the existing well_masking (circular, potentially auto-centered)
+  bg_offset_val: 180
+  well_masking:
     create_mask: True
     auto_center_mask: True
-    radius_px: 2000 
-    radius_fraction: 0.75 
-
-  # NEW: Parameters for black plate well identification and brightness adjustment
+    radius_px: 2000
+    radius_fraction: 0.75
   black_plate_well_analysis:
-    enable_brightness_adjustment: true # Master switch for the new brightness adjustment logic
-    
-    # Parameters for create_well_mask_black_plate
-    well_identification: 
-      low_threshold_value: 10 # For separating well from very dark plate background
-      min_expected_diameter_px: 1500 # Adjust based on your setup (magnification, well size)
-      max_expected_diameter_px: 4000 # Adjust based on your setup
-      min_circularity: 0.75          # How circular the detected well should be (0 to 1)
-
-    # Parameters for calculate_well_brightness_peak (used by calc_avg_well_brightness and match_well_brightness)
+    enable_brightness_adjustment: true
+    well_identification:
+      low_threshold_value: 10
+      min_expected_diameter_px: 1500
+      max_expected_diameter_px: 4000
+      min_circularity: 0.75
     brightness_peak_calculation:
-      min_intensity_for_peak_search: 75 # Helps guide peak finding if using argmax, less critical for percentile
-      percentile_for_peak_proxy: 75     # Use median of top (100-percentile)% brightest pixels in well
-
-    # Parameters for match_well_brightness
+      min_intensity_for_peak_search: 75
+      percentile_for_peak_proxy: 75
     brightness_matching:
-      max_peak_difference_allowed: 15   # Max allowed diff between FG & BG well peaks before attempting adjustment
-      adjustment_method: "global_shift" # "global_shift" or "histogram_matching" (current hist_match is basic)
-      # For global_shift method:
-      target_peak_offset_after_shift: 3 # Aim to make adjusted BG well peak this many values dimmer than FG (or target)
-      # For histogram_matching (if developed further):
-      # hist_match_percentile_range: [2, 98] # Percentiles to use for intensity rescaling during hist matching
-
-  # Parameters for SUBTRACTED IMAGE ANALYSIS (original particle_analysis block)
-  particle_analysis: 
+      max_peak_difference_allowed: 15
+      adjustment_method: "global_shift"
+      target_peak_offset_after_shift: 3
+  particle_analysis:
     apply_convolution: False
-    convolution_kernel: 
+    convolution_kernel:
       - [0,  0,  0,  0,  0]
       - [0, -1, -1, -1,  0]
       - [0, -1, 10, -1,  0]
       - [0, -1, -1, -1,  0]
       - [0,  0,  0,  0,  0]
-    min_microorganism_area: 500 
-    microorganism_blur_kernel: 5 
-    filter_by_shape: False 
-  # Parameters for UNSUBTRACTED (original FG) image analysis
+    min_microorganism_area: 500
+    microorganism_blur_kernel: 5
   unsubtracted_particle_analysis:
-    min_particle_area: 1000     
-    local_otsu_roi_size: 150   
-  # Parameters for compare_detected_particles
+    min_particle_area: 1000
+    local_otsu_roi_size: 150
   particle_comparison:
     search_radius_factor: 2.0
-    default_particle_area: 2000 
-  wim_image_analysis_frames:
-    frame1_delay: 0
-    frame2_delay: 2
-    frame3_delay: 5
-  debug_outputs_wim_style:
-    enabled: False 
-    output_subdir_suffix: "_wim_particle_detection_debug"
-
-  # NEW: Parameters for 3D particle tracking
+    default_particle_area: 2000
   tracking:
     enabled: true
     pixel_size_um: 2.74
-    magnification: 0.638 # Optotune TS1-0638-70-EL
+    magnification: 0.638
     search_range_mm: 0.55
     memory_frames: 5
     min_track_length: 10
 
-# Stage 2: Quality Filter
-stage_02_quality_filter:
-  intermediate_crop:
-    # MODIFIED: 'rotational_rectangle' is now the default mode.
-    mode: "rotational_rectangle" 
-    # ADDED: Padding for the new default mode.
-    rotational_padding: 10
-    # MODIFIED: square_size is now only needed if mode is 'centroid_square'.
-    square_size: 150 # Kept for 'centroid_square' mode
-    bbox_column_mapping: {x: "bounding_x", y: "bounding_y", w: "bounding_w", h: "bounding_h"}
-  black_mask_check: {min_area_ratio: 0.05}
-  sharpness_metrics: ["variance_laplacian", "tenengrad_variance", "energy_laplacian", "energy_gradient"]
-  final_sharp_object_filter: {combined_sharpness_min: 0.25}
-  # MODIFIED: Replaced 'final_sharp_crop_size' with a more flexible dictionary.
-  final_sharp_crop_settings:
-    centroid_square_size: 150
-    rotational_padding: 10
-  filters_enabled: {black_mask_artifact: true, on_crop_boundary: true, final_sharpness: true}     
+# Stage 2: Universal Characterization
+stage_02_characterization:
+  # Parameters for cropping each particle from the full frame.
+  # This is a critical step for all subsequent high-precision measurements.
+  # Stage 2: Universal Characterization
+stage_02_characterization:
+  cropping:
+    # Available modes: 'rotational_rectangle', 'centroid_square', 'bounding_box'
+    mode: "rotational_rectangle" # You can now switch this safely
 
-# Stage 3: ML Classification (unchanged from previous step)
-stage_03_ml_classification:
+    # --- Settings for 'rotational_rectangle' mode ---
+    rotational_padding: 30 # pixels added to each side
+
+    # --- Settings for 'centroid_square' mode ---
+    square_size: 150
+    # Padding around the S1 bounding box before the final square crop is taken.
+    # This prevents cutting off particle ends.
+    centroid_pre_crop_padding: 20
+
+    # --- Settings for 'bounding_box' mode ---
+    # Padding added around the simple bounding box.
+    bbox_padding: 15
+
+  # Parameters for quality feature calculations.
+  quality_features:
+    # Configuration for detecting black corner mask artifacts in crops.
+    black_mask_check:
+      min_area_ratio: 0.05
+
+  # Parameters for advanced shape and texture descriptors.
+  shape_descriptors:
+    # List of harmonic orders for Elliptic Fourier Descriptors (EFD).
+    # More harmonics capture more detail but add more features. [10] is a good start.
+    efd_harmonics: [10]
+    # Configuration for Local Binary Pattern (LBP) texture analysis.
+    # Radii at which to calculate LBP. Multiple radii capture texture at different scales.
+    lbp_radii: [1, 3]
+    # Number of points to use in the LBP calculation circle. 8 is standard.
+    lbp_points: 8
+
+# Stage 3: Filtering & Classification
+stage_03_filtering_and_classification:
+  # --- NEW SECTION for controlling debug outputs ---
+  debug_output:
+    save_rejected_images: true # Set to false to disable saving rejected crops
+
+  # ML Model files
   model_filename: "rf_fem_classifier.joblib"
   scaler_filename: "rf_fem_scaler.joblib"
-  image_extensions: [".png", ".tif", ".tiff", ".jpg", ".jpeg"] 
-  feature_extraction_params:
-    main_body_segmentation:
-      enable_unsharp_masking: false 
-      unsharp_mask_sigma: 1.0       
-      unsharp_mask_amount: 1.0      
-      min_noise_size: 50
-      closing_selem_size: 3 
-      min_significant_area: 300 
-    egg_detection:
-      gaussian_sigma: 1.0          
-      egg_posterior_pixel_fraction: 0.4 
-      egg_threshold_quantile: 0.8 
-      egg_min_area: 50             
-      egg_max_area: 5000           
-      egg_min_solidity: 0.60       
-      egg_max_solidity: 0.99       
-      egg_min_eccentricity: 0.2    
-      orientation_diff_tolerance_deg: 85
-  training_params: # ... (unchanged)
-    good_data_subdir: "good" 
-    bad_data_subdir: "bad"   
+  
+  # ML based filtering
+  ml_filter:
+    min_probability_threshold: 0.35 # Example of a less stringent threshold
+
+  # Quality flags filtering
+  quality_flags_filter:
+    filter_on_boundary: true # This filter is pending implementation
+    filter_black_mask: true
+  
+  # Sharpness based filtering
+  sharpness_filter:
+    enabled: true
+    metric: "variance_laplacian"
+    min_threshold: 80 
+
+   # Training parameters (if a training script is invoked)
+  training_params:
+    good_data_subdir: "good"
+    bad_data_subdir: "bad"
     test_split_size: 0.25
     random_state: 42
     rf_param_grid:
       n_estimators: [50, 100, 200]
-      max_depth: [null, 10, 20] 
+      max_depth: [null, 10, 20]
       min_samples_split: [2, 5]
       min_samples_leaf: [1, 3]
       class_weight: ["balanced", null]
-    grid_search_cv_folds: 3
-    grid_search_scoring: "f1_weighted" 
-  post_ml_filters: # ... (unchanged)
-    deduplication: {enabled: true, proximity_threshold_pixels: 100, max_adjacent_frame_difference: 2}
-    boundary_recheck: {enabled: true}
+      
+    # --- NEW SECTION ---
+    # List of feature prefixes to exclude from the model training.
+    # The model will not be trained on any column starting with these strings.
+    # To include all features, make this an empty list: exclude_feature_prefixes: []
+    exclude_feature_prefixes:
+      - "efd_"
+      - "lbp_"
+      # You could also add others here in the future, e.g., "s1_"
 
-# Stage 4: Detailed Morphological Characterization (unchanged)
-stage_04_morphological_characterization:
-  enabled: true
+# Stage 4: Biological Analysis
+stage_04_biological_analysis:
+  # Parameters specific to high-level analysis, e.g., egg detection
+  egg_detection:
+      gaussian_sigma: 1.0
+      egg_posterior_pixel_fraction: 0.4
+      egg_threshold_quantile: 0.8
+      egg_min_area: 50
+      egg_max_area: 5000
+      egg_min_solidity: 0.60
+      egg_max_solidity: 0.99
+      egg_min_eccentricity: 0.2
+      orientation_diff_tolerance_deg: 85
