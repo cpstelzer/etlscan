@@ -1,7 +1,7 @@
 # config/pipeline_config.yml
 # Global Settings
-project_base_dir: "D:/sandbox/" # CHANGE THIS to your project's root
-sample_subdir_name: "D:/sizeselection/gen1_collimated_750us/" # Example, will be overridden by run_pipeline.py
+project_base_dir: "C:/sandbox/" # CHANGE THIS to your project's root
+sample_subdir_name: "C:/sizeselection/test/" # Example, will be overridden by run_pipeline.py
 
 # Logging Configuration
 logging:
