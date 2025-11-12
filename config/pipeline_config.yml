@@ -15,6 +15,7 @@ logging:
 system:
   image_width_px: 4504
   image_height_px: 4504
+  recording_fps: 25  # Hz; used for automatic background offset calculations
   source_image_illumination_type: "collimated"
   thresholding:
     mode: "otsu"
@@ -31,6 +32,7 @@ system:
 
 # Stage 1: Detection & Pre-Filtering
 stage_01_initial_detection:
+  BG_frame_offset_mode: "fixed"  # Set to "automatic" to derive the offset from frame metadata
   bg_offset_val: 180
   well_masking:
     create_mask: True
@@ -79,8 +81,6 @@ stage_01_initial_detection:
 stage_02_characterization:
   # Parameters for cropping each particle from the full frame.
   # This is a critical step for all subsequent high-precision measurements.
-  # Stage 2: Universal Characterization
-stage_02_characterization:
   cropping:
     # Available modes: 'rotational_rectangle', 'centroid_square', 'bounding_box'
     mode: "rotational_rectangle" # You can now switch this safely
@@ -140,7 +140,7 @@ stage_03_filtering_and_classification:
     metric: "variance_laplacian"
     min_threshold: 80 
 
-   # Training parameters (if a training script is invoked)
+  # Training parameters (if a training script is invoked)
   training_params:
     good_data_subdir: "good"
     bad_data_subdir: "bad"
