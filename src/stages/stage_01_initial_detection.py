@@ -73,6 +73,85 @@ def _filter_image_df(df: pd.DataFrame) -> pd.DataFrame: # Unchanged
     else: logger.warning("No images with fd_mm == 0 found for filtering rule.")
     return df
 
+def _determine_bg_offset_for_fg_bg_pairs(
+    images_df_filtered: pd.DataFrame,
+    minimum_offset: int,
+    fallback_offset: int,
+    *,
+    tolerance: float = 1e-6
+) -> int:
+    """Return an offset that pairs FG and BG frames with matching fd_mm.
+
+    Parameters
+    ----------
+    images_df_filtered:
+        DataFrame of parsed image metadata, already filtered/sorted.
+    minimum_offset:
+        Minimum offset (in frames) allowed when searching for a match.
+    fallback_offset:
+        Offset from the configuration to use if no automatic match is found.
+    tolerance:
+        Absolute tolerance for comparing floating-point fd_mm values.
+
+    Returns
+    -------
+    int
+        The offset to use when selecting background frames.
+    """
+
+    if images_df_filtered.empty:
+        logger.warning("BG offset auto-mode: no frames available; using fallback offset.")
+        return fallback_offset
+
+    if "fd_mm" not in images_df_filtered:
+        logger.warning("BG offset auto-mode: fd_mm column missing; using fallback offset.")
+        return fallback_offset
+
+    num_frames = len(images_df_filtered)
+    if num_frames <= max(minimum_offset, 0):
+        logger.warning(
+            "BG offset auto-mode: insufficient frames (%d) for minimum offset %d; using fallback offset.",
+            num_frames,
+            minimum_offset,
+        )
+        return fallback_offset
+
+    fd_values = images_df_filtered["fd_mm"].to_numpy(dtype=float)
+    min_offset = max(minimum_offset, 1)
+    best_offset = None
+    best_match_ratio = -1.0
+
+    for offset in range(min_offset, num_frames):
+        bg_fd_values = np.roll(fd_values, -offset)
+        matches = np.isclose(fd_values, bg_fd_values, atol=tolerance)
+        match_ratio = matches.mean()
+
+        if np.all(matches):
+            logger.info(
+                "BG offset auto-mode: selected offset %d (perfect fd_mm match across %d frames).",
+                offset,
+                num_frames,
+            )
+            return offset
+
+        if match_ratio > best_match_ratio:
+            best_match_ratio = match_ratio
+            best_offset = offset
+
+    if best_offset is not None and best_match_ratio > 0.0:
+        logger.info(
+            "BG offset auto-mode: using offset %d with %.1f%% fd_mm match rate (no perfect match found).",
+            best_offset,
+            best_match_ratio * 100,
+        )
+        return best_offset
+
+    logger.warning(
+        "BG offset auto-mode: could not find suitable offset; reverting to fallback (%d).",
+        fallback_offset,
+    )
+    return fallback_offset
+
 def _analyze_single_subtracted_image_global_thresh( # Unchanged
     image_to_analyze_gray_uint8: np.ndarray,
     config_stage1_particle_analysis: Dict[str, Any],
@@ -355,7 +434,12 @@ def run_stage_01_initial_detection(
     unsubtracted_analysis_config = config_s1.get('unsubtracted_particle_analysis', {})
     local_otsu_roi_size = unsubtracted_analysis_config.get('local_otsu_roi_size', 150)
     particle_comparison_config = config_s1.get('particle_comparison', {})
-    bg_offset = config_s1.get('bg_offset_val', 110)
+    bg_offset_mode = config_s1.get('BG_frame_offset_mode', 'fixed')
+    bg_offset_default = config_s1.get('bg_offset_val', 110)
+
+    recording_fps = max(float(system_cfg.get('recording_fps', 0)) or 0.0, 0.0)
+    min_offset_for_auto = max(int(round(recording_fps * 5)), 1)
+
     
     general_well_masking_cfg = config_s1.get('well_masking', {})
     
@@ -365,6 +449,22 @@ def run_stage_01_initial_detection(
     if images_df_filtered.empty: return None
     
     all_fused_particles_for_sample_list: List[pd.DataFrame] = []
+
+    if bg_offset_mode == 'automatic':
+        bg_offset = _determine_bg_offset_for_fg_bg_pairs(
+            images_df_filtered,
+            min_offset_for_auto,
+            bg_offset_default
+        )
+    else:
+        bg_offset = bg_offset_default
+
+    logger.info(
+        "Stage 1: Using background frame offset %d (mode=%s, minimum_auto_offset=%d)",
+        bg_offset,
+        bg_offset_mode,
+        min_offset_for_auto,
+    )
 
     for idx_frame_list, fg_row in images_df_filtered.iterrows():
         bg_index_in_list = (idx_frame_list + bg_offset) % len(images_df_filtered)
