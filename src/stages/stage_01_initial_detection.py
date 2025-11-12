@@ -75,7 +75,7 @@ def _filter_image_df(df: pd.DataFrame) -> pd.DataFrame: # Unchanged
 
 def _determine_bg_offset_for_fg_bg_pairs(
     images_df_filtered: pd.DataFrame,
-    minimum_offset: int,
+    minimum_offset: Optional[int],
     fallback_offset: int,
     *,
     tolerance: float = 1e-6
@@ -108,6 +108,10 @@ def _determine_bg_offset_for_fg_bg_pairs(
         return fallback_offset
 
     num_frames = len(images_df_filtered)
+    if minimum_offset is None:
+        logger.warning("BG offset auto-mode: minimum offset not provided; using fallback offset.")
+        return fallback_offset
+
     if num_frames <= max(minimum_offset, 0):
         logger.warning(
             "BG offset auto-mode: insufficient frames (%d) for minimum offset %d; using fallback offset.",
@@ -122,15 +126,19 @@ def _determine_bg_offset_for_fg_bg_pairs(
     best_match_ratio = -1.0
 
     for offset in range(min_offset, num_frames):
-        bg_fd_values = np.roll(fd_values, -offset)
-        matches = np.isclose(fd_values, bg_fd_values, atol=tolerance)
+        fg_fd_values = fd_values[:-offset]
+        bg_fd_values = fd_values[offset:]
+        if fg_fd_values.size == 0 or bg_fd_values.size == 0:
+            continue
+
+        matches = np.isclose(fg_fd_values, bg_fd_values, atol=tolerance)
         match_ratio = matches.mean()
 
-        if np.all(matches):
+        if matches.size and np.all(matches):
             logger.info(
                 "BG offset auto-mode: selected offset %d (perfect fd_mm match across %d frames).",
                 offset,
-                num_frames,
+                matches.size,
             )
             return offset
 
@@ -437,12 +445,21 @@ def run_stage_01_initial_detection(
     bg_offset_mode = config_s1.get('BG_frame_offset_mode', 'fixed')
     bg_offset_default = config_s1.get('bg_offset_val', 110)
 
-    recording_fps = max(float(system_cfg.get('recording_fps', 0)) or 0.0, 0.0)
-    min_offset_for_auto = max(int(round(recording_fps * 5)), 1)
+    recording_fps_raw = system_cfg.get('recording_fps')
+    try:
+        recording_fps = float(recording_fps_raw)
+    except (TypeError, ValueError):
+        recording_fps = 0.0
 
-    
+    recording_fps = max(recording_fps, 0.0)
+    min_offset_for_auto: Optional[int]
+    if recording_fps > 0:
+        min_offset_for_auto = max(int(round(recording_fps * 5)), 1)
+    else:
+        min_offset_for_auto = None
+
     general_well_masking_cfg = config_s1.get('well_masking', {})
-    
+
     images_df = _parse_image_filenames(image_dir_path)
     if images_df is None or images_df.empty: return None
     images_df_filtered = _filter_image_df(images_df.copy())
@@ -450,20 +467,32 @@ def run_stage_01_initial_detection(
     
     all_fused_particles_for_sample_list: List[pd.DataFrame] = []
 
+    effective_mode = bg_offset_mode
     if bg_offset_mode == 'automatic':
-        bg_offset = _determine_bg_offset_for_fg_bg_pairs(
-            images_df_filtered,
-            min_offset_for_auto,
-            bg_offset_default
-        )
+        if min_offset_for_auto is None:
+            logger.warning(
+                "Stage 1: Automatic background offset requested but system.recording_fps is missing or invalid; "
+                "falling back to configured offset %d.",
+                bg_offset_default,
+            )
+            bg_offset = bg_offset_default
+            effective_mode = 'fixed-fallback'
+        else:
+            bg_offset = _determine_bg_offset_for_fg_bg_pairs(
+                images_df_filtered,
+                min_offset_for_auto,
+                bg_offset_default
+            )
     else:
         bg_offset = bg_offset_default
 
+    min_offset_display = min_offset_for_auto if min_offset_for_auto is not None else 'N/A'
     logger.info(
-        "Stage 1: Using background frame offset %d (mode=%s, minimum_auto_offset=%d)",
+        "Stage 1: Using background frame offset %s (mode=%s, minimum_auto_offset=%s, recording_fps=%.3f)",
         bg_offset,
-        bg_offset_mode,
-        min_offset_for_auto,
+        effective_mode,
+        min_offset_display,
+        recording_fps,
     )
 
     for idx_frame_list, fg_row in images_df_filtered.iterrows():
