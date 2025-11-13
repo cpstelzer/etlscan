@@ -83,7 +83,7 @@ stage_02_characterization:
   # This is a critical step for all subsequent high-precision measurements.
   cropping:
     # Toggle saving of all particle crops from Stage 2.
-    save_all_particle_crops: false
+    save_all_particle_crops: true
     # Available modes: 'rotational_rectangle', 'centroid_square', 'bounding_box'
     mode: "rotational_rectangle" # You can now switch this safely
 
@@ -115,7 +115,7 @@ stage_02_characterization:
     lbp_points: 8
 
   focussed_particles:
-    enabled: false
+    enabled: true
     frame_column: "frame"
     track_column: "track_id"
     sharpness_column: "variance_laplacian"
