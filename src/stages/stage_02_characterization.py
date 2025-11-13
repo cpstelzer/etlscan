@@ -42,13 +42,16 @@ def run_stage_02_characterization(
         logger.warning(f"No particles loaded from Stage 1 CSV: {input_s1_csv_path}. Aborting Stage 2.")
         return None
 
-    all_crops_dir = os.path.join(output_dir_stage2, "stage2_all_particle_crops")
-    os.makedirs(all_crops_dir, exist_ok=True)
-
     cropping_config = s2_config.get('cropping', {})
     if not cropping_config:
         logger.warning("Cropping configuration not found in 'stage_02_characterization'. Using defaults.")
         cropping_config = {'mode': 'rotational_rectangle', 'rotational_padding': 10}
+
+    save_all_particle_crops = bool(cropping_config.get('save_all_particle_crops', True))
+    all_crops_dir = None
+    if save_all_particle_crops:
+        all_crops_dir = os.path.join(output_dir_stage2, "stage2_all_particle_crops")
+        os.makedirs(all_crops_dir, exist_ok=True)
         
     try:
         cropper = ParticleCropper(cropping_config)
@@ -91,15 +94,17 @@ def run_stage_02_characterization(
             
             crop_gray, saved_crop_path = cropper.crop_single_particle_from_image(
                 main_img_color, main_img_gray, s1_particle_row,
-                output_dir_for_crop=all_crops_dir,
+                output_dir_for_crop=all_crops_dir if save_all_particle_crops else None,
                 crop_filename_prefix=crop_filename_prefix
             )
 
-            if crop_gray is None or saved_crop_path is None:
+            if crop_gray is None:
                 logger.warning(f"Failed to crop particle at index {original_index}. Skipping.")
                 continue
-            
-            particle_features['crop_filename'] = os.path.basename(saved_crop_path)
+
+            particle_features['crop_filename'] = (
+                os.path.basename(saved_crop_path) if saved_crop_path else None
+            )
             
             crop_float_orig = skimage.util.img_as_float(crop_gray)
             raw_mask, filled_mask, _ = segment_main_body_from_image_float(crop_float_orig, system_config)
