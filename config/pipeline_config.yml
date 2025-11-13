@@ -106,9 +106,6 @@ stage_02_characterization:
 
   # Parameters for advanced shape and texture descriptors.
   shape_descriptors:
-    # List of harmonic orders for Elliptic Fourier Descriptors (EFD).
-    # More harmonics capture more detail but add more features. [10] is a good start.
-    efd_harmonics: [10]
     # Configuration for Local Binary Pattern (LBP) texture analysis.
     # Radii at which to calculate LBP. Multiple radii capture texture at different scales.
     lbp_radii: [1, 3]
@@ -158,7 +155,6 @@ stage_03_filtering_and_classification:
     # The model will not be trained on any column starting with these strings.
     # To include all features, make this an empty list: exclude_feature_prefixes: []
     exclude_feature_prefixes:
-      - "efd_"
       - "lbp_"
       # You could also add others here in the future, e.g., "s1_"
 
