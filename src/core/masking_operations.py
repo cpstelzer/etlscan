@@ -123,7 +123,7 @@ def mask_well_area(
 
 
 def detect_black_mask_artifact(
-    image_path: str, # Original wum function took path, can be adapted for array
+    image_path: Optional[str], # Original wum function took path, can be adapted for array
     image_gray: Optional[np.ndarray] = None,
     min_area_ratio: float = 0.05
     ) -> bool:
@@ -133,7 +133,7 @@ def detect_black_mask_artifact(
     Adapted from wellscanner_util_module.detect_black_mask.
 
     Args:
-        image_path (str): Path to the image file (used for logging and if image_gray is None).
+        image_path (Optional[str]): Path to the image file (used for logging and if image_gray is None).
         image_gray (Optional[np.ndarray]): Pre-loaded grayscale image. If None, loads from image_path.
         min_area_ratio (float): Minimum area ratio of black component to total image area.
 
@@ -143,27 +143,31 @@ def detect_black_mask_artifact(
     from .image_io_operations import load_image # Local import to avoid circular dependency at module level
 
     img_to_process = image_gray
+    path_for_logging = image_path or "<in-memory crop>"
     if img_to_process is None:
+        if image_path is None:
+            logger.warning("No image path or array provided for black mask detection.")
+            return False
         if not os.path.exists(image_path): # Check existence before loading
             logger.warning(f"Image file not found at {image_path} for black mask detection.")
             return False
         img_to_process = load_image(image_path, mode='gray')
 
     if img_to_process is None:
-        logger.warning(f"Cannot load image {image_path} for black mask detection.")
-        return False 
+        logger.warning(f"Cannot load image {path_for_logging} for black mask detection.")
+        return False
 
     try:
         h, w = img_to_process.shape
         total_area = float(h * w) 
         if total_area == 0:
-            logger.warning(f"Image {os.path.basename(image_path)} has zero area.")
+            logger.warning(f"Image {os.path.basename(path_for_logging)} has zero area.")
             return False
 
         binary_black_pixels_mask = (img_to_process == 0)
-        
+
         if not np.any(binary_black_pixels_mask):
-            logger.debug(f"No black pixels found in {os.path.basename(image_path)}.")
+            logger.debug(f"No black pixels found in {os.path.basename(path_for_logging)}.")
             return False
 
         num_labels, labels_map, stats, _ = cv2.connectedComponentsWithStats(
@@ -171,7 +175,7 @@ def detect_black_mask_artifact(
         )
 
         min_pixel_area_threshold = min_area_ratio * total_area
-        logger.debug(f"Black mask check for {os.path.basename(image_path)}: "
+        logger.debug(f"Black mask check for {os.path.basename(path_for_logging)}: "
                      f"Threshold area = {min_pixel_area_threshold:.0f} pixels.")
 
         for label_idx in range(1, num_labels):
@@ -191,11 +195,11 @@ def detect_black_mask_artifact(
                 if is_corner_component:
                     logger.debug(f"Component L{label_idx} (area {area_comp}) meets corner criteria. Black mask DETECTED.")
                     return True
-        
-        logger.debug(f"No qualifying black mask component found in {os.path.basename(image_path)}. Black mask NOT detected.")
+
+        logger.debug(f"No qualifying black mask component found in {os.path.basename(path_for_logging)}. Black mask NOT detected.")
         return False
     except Exception as e:
-        logger.exception(f"Error during black mask detection for {image_path}: {e}")
+        logger.exception(f"Error during black mask detection for {path_for_logging}: {e}")
         return False
 
 

@@ -2,7 +2,7 @@
 import numpy as np
 import pandas as pd
 import logging
-from typing import Dict, Any
+from typing import Dict, Any, Optional
 
 from src.core.sharpness_assessment import calculate_sharpness_metrics
 from src.core.masking_operations import detect_black_mask_artifact
@@ -11,7 +11,7 @@ logger = logging.getLogger(__name__)
 
 def calculate_quality_features(
     image_crop_gray: np.ndarray,
-    saved_crop_path: str,
+    saved_crop_path: Optional[str],
     config: Dict[str, Any]
 ) -> Dict[str, Any]:
     """
@@ -19,7 +19,7 @@ def calculate_quality_features(
 
     Args:
         image_crop_gray (np.ndarray): The grayscale cropped image of the particle.
-        saved_crop_path (str): The full path to where the crop image was saved.
+        saved_crop_path (Optional[str]): Full path to the saved crop image if it exists.
         config (Dict[str, Any]): The configuration dictionary for Stage 2.
 
     Returns:
@@ -35,6 +35,7 @@ def calculate_quality_features(
     black_mask_config = config.get('black_mask_check', {})
     has_artifact = detect_black_mask_artifact(
         image_path=saved_crop_path,
+        image_gray=image_crop_gray,
         min_area_ratio=black_mask_config.get('min_area_ratio', 0.05)
     )
     features['has_black_mask_artifact'] = has_artifact

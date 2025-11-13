@@ -82,6 +82,8 @@ stage_02_characterization:
   # Parameters for cropping each particle from the full frame.
   # This is a critical step for all subsequent high-precision measurements.
   cropping:
+    # Toggle saving of all particle crops from Stage 2.
+    save_all_particle_crops: true
     # Available modes: 'rotational_rectangle', 'centroid_square', 'bounding_box'
     mode: "rotational_rectangle" # You can now switch this safely
 
