@@ -114,6 +114,19 @@ stage_02_characterization:
     # Number of points to use in the LBP calculation circle. 8 is standard.
     lbp_points: 8
 
+  focussed_particles:
+    enabled: false
+    frame_column: "frame"
+    track_column: "track_id"
+    sharpness_column: "variance_laplacian"
+    min_sharpness_fraction: 0.3
+    min_prominence_fraction: 0.05
+    smooth_window: 3
+    sharpness_min_threshold: 80
+    max_tracks_to_plot: 15
+    save_plots: true
+    crop_filename_prefix: null
+
 # Stage 3: Filtering & Classification
 stage_03_filtering_and_classification:
   # --- NEW SECTION for controlling debug outputs ---
