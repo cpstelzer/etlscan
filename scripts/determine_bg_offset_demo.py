@@ -5,16 +5,28 @@ frames using the same logic as the stage 01 processing pipeline, and then calls
 ``_determine_bg_offset_for_fg_bg_pairs`` directly to display the automatically
 chosen background offset(s).  It is intended to help diagnose issues with the
 background pairing heuristics.
+
+To run this script, navigate to well_plate_analyzer/scripts and execute:
+python determine_bg_offset_demo.py --input-batch-directory /path/to/image_directory
+
 """
 
 from __future__ import annotations
 
 import argparse
 import logging
+import sys
 from pathlib import Path
 from typing import Iterable, Optional
 
 import pandas as pd
+
+# Allow the script to be executed directly from the ``scripts`` directory without
+# requiring callers to modify ``PYTHONPATH`` manually.  This mirrors the
+# repository root so imports like ``src.*`` resolve correctly.
+REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
 
 from src.stages.stage_01_initial_detection import (
     _determine_bg_offset_for_fg_bg_pairs,

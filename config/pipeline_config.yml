@@ -1,7 +1,7 @@
 # config/pipeline_config.yml
 # Global Settings
 project_base_dir: "C:/sandbox/" # CHANGE THIS to your project's root
-sample_subdir_name: "C:/sizeselection/test/" # Example, will be overridden by run_pipeline.py
+sample_subdir_name: "C:/wellscanner/test/" # Example, will be overridden by run_pipeline.py
 
 # Logging Configuration
 logging:
@@ -32,7 +32,7 @@ system:
 
 # Stage 1: Detection & Pre-Filtering
 stage_01_initial_detection:
-  BG_frame_offset_mode: "fixed"  # Set to "automatic" to derive the offset from frame metadata
+  BG_frame_offset_mode: "automatic"  # Set to "automatic" to derive the offset from frame metadata
   bg_offset_val: 180
   well_masking:
     create_mask: True
