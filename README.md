@@ -1,180 +1,114 @@
-# Well Plate Analyzer: Automated Image Processing Pipeline
+# Well Plate Analyzer
 
-This project provides an automated pipeline for processing images from well plate experiments, focusing on detecting, analyzing, and classifying microinvertebrates or other particles of interest. The pipeline is designed to be modular, configurable, and extensible.
+Automated pipeline for processing well-plate microscopy batches. The system ingests raw frame sequences, tracks organisms, measures morphology, and produces curated review packages. The runtime flow is organized into four stages that can be executed independently or sequentially via the pipeline runner.
 
-It includes stages for:
-1.  * Initial Particle Detection: Background subtraction and basic particle identification from series of images.
-2.  * Quality Filtering: Cropping, artifact detection (e.g., black masks, boundary-cropped objects), sharpness assessment, and filtering to identify high-quality particle images.
-3.  * ML Classification: Training a machine learning model (Random Forest) and using it to classify filtered particles, for instance, to identify "ideal" female specimens carrying eggs (FEMs).
+## Pipeline overview
 
-## Project Structure
+| Stage | Module | Highlights |
+| --- | --- | --- |
+| 1. Detection & tracking | `src/stages/stage_01_initial_detection.py` | Scans the input sample directory, performs background subtraction, extracts particle tracks, and writes the initial CSV of candidates. |
+| 2. Universal characterization | `src/stages/stage_02_characterization.py` | Re-crops every tracked particle, re-segments the organism, and aggregates sharpness, morphology, and quality metrics along with the normalized particle crops. |
+| 3. Filtering & classification | `src/stages/stage_03_filtering_and_classification.py` | Applies configurable quality/sharpness gates, loads the RandomForest model & scaler from `models/`, and emits the list of accepted particles. |
+| 4. Biological analysis & visualization | `src/stages/stage_04_biological_analysis.py` | Revisits the Stage 02 crops for the accepted particles, estimates egg metrics, and renders annotated review panels through `src/visualization/feature_visualization.py`. |
+
+Supporting tooling:
+
+- `scripts/train_model.py` retrains the Stage 03 RandomForest classifier using the Stage 02 feature set.
+- `scripts/determine_bg_offset_demo.py` surfaces Stage 01 background tuning helpers for diagnostics.
+
+## Project structure
 
 ```
 well_plate_analyzer/
 ├── config/
-│   └── pipeline_config.yml       # Main configuration for all stages
+│   └── pipeline_config.yml       # Global runtime configuration
 ├── data/
-│   ├── input/                    # Raw input images per sample (e.g., data/input/SAMPLE_ID/)
-│   │   └── SAMPLE_ID/
-│   │       └── *.png
-│   ├── training_data/            # Data for training the ML model
-│   │   ├── good/                 # Images of "good" examples for classification
-│   │   └── bad/                  # Images of "bad" examples for classification
-│   └── output/                   # Processed outputs per sample (e.g., data/output/SAMPLE_ID/)
-│       └── SAMPLE_ID/
-│           ├── stage1_initial_detection/
-│           ├── stage2_quality_filter/
-│           └── stage3_ml_classification/
-├── models/                       # Saved machine learning models and scalers
+│   ├── input/<batch>/<sample>/   # Raw PNG sequences per sample
+│   ├── output/<batch>/<sample>/  # Pipeline outputs organized by stage
+│   └── training_data/            # Crops used by scripts/train_model.py
+├── models/                       # Trained RF model + scaler artifacts
 ├── scripts/
-│   └── run_pipeline.py           # Main script to execute the pipeline
-├── src/                          # Source code
-│   ├── core/                     # Core image processing, analysis, and ML feature extraction logic
-│   ├── stages/                   # Modules for each pipeline stage
-│   ├── utils/                    # Utility functions (config, logging, paths, I/O)
-│   └── visualization/            # Visualization code
-├── requirements.txt              # Python package dependencies
-├── .gitignore                    # Specifies intentionally untracked files
-└── README.md                     # This file
+│   ├── run_pipeline.py           # Batch-oriented stage runner
+│   ├── train_model.py            # Standalone RF trainer
+│   └── determine_bg_offset_demo.py
+├── src/
+│   ├── core/                     # Feature calculators, segmentation, particle ops
+│   ├── stages/                   # Stage implementations (01–04)
+│   ├── utils/                    # Config loading, logging, path helpers, I/O
+│   └── visualization/            # Plotting/overlay helpers used by Stage 04
+├── requirements.txt
+└── README.md
 ```
 
-## Prerequisites
+## Prerequisites & installation
 
-* Python 3.7+
-* Dependencies listed in `requirements.txt`.
-
-## Installation
-
-1.  * Clone the repository (if applicable):
-    ```
-    git clone <repository_url>
-    cd well_plate_analyzer
-    ```
-
-2.  * Create a virtual environment (recommended):
-    ```
-    python -m venv venv
-    source venv/bin/activate  # On Windows: venv\Scripts\activate
-    ```
-
-3.  * Install dependencies:
-    ```
-    pip install -r requirements.txt
-    ```
+1. Install Python 3.8+.
+2. Create and activate a virtual environment (recommended).
+3. Install dependencies: `pip install -r requirements.txt`.
 
 ## Configuration
 
-The main configuration for the pipeline is located in `config/pipeline_config.yml`.
-Key parameters to review and adjust:
+The YAML file at `config/pipeline_config.yml` controls the entire pipeline. Key entries:
 
-* `project_base_dir`: **Crucial!** Set this to the absolute path of the `well_plate_analyzer` directory on your system.
-* `sample_subdir_name`: Default sample ID, usually overridden by command-line arguments.
-* Logging settings.
-* Parameters for each stage (`stage_01_initial_detection`, `stage_02_quality_filter`, `stage_03_ml_classification`), including:
-    -Thresholds for particle detection and filtering.
-    -Image processing parameters (blurring, masking, cropping).
-    -Sharpness metrics and criteria.
-    -ML model training parameters and feature extraction settings.
+- `project_base_dir`: absolute path to the repository root.
+- Stage-specific blocks (`stage_01_initial_detection`, `stage_02_characterization`, `stage_03_filtering_and_classification`, `stage_04_biological_analysis`) that tune detection, cropping, filtering, classifier thresholds, and visualization options.
+- Paths to the trained RF model (`models/rf_fem_classifier.joblib`), scaler, and feature-name list consumed by Stage 03.
 
-## Data Preparation
+## Preparing data
 
-1.  * Input Images:
-    -Place raw images for each sample in a subdirectory under `data/input/`. For example, images for a sample named "MySample01" should go into `data/input/MySample01/`.
-    -Images are expected to be PNG files following a specific naming convention (e.g., `YYYYMMDD_plateX_wellY_f<frame_num>_dpt<dpt_val>_fd<fd_val>mm.png`) for Stage 1 processing. This pattern is defined in `src/stages/stage_01_initial_detection.py` and can be adjusted if needed.
+1. **Input batches** – Arrange raw PNG frames under a batch directory such as `data/input/batch_20240101/`. Each immediate child directory (e.g., `batch_20240101/sample_A`) is treated as an individual sample run.
+2. **Training crops (optional)** – To retrain the classifier, provide curated crops in `data/training_data/good/` and `data/training_data/bad/`. The `train_model.py` script will consume these using the same Stage 02 feature definitions.
 
-2.  * ML Training Data (for Stage 3 training):
-    -Place example images for ML model training into `data/training_data/good/` and `data/training_data/bad/` (or as configured in `pipeline_config.yml`). These are typically cropped images of the objects you want to classify.
+## Running the pipeline
 
-## Running the Pipeline
-
-The main script to run the pipeline is `scripts/run_pipeline.py`.
-
-**Basic Usage:**
+The entry point is `scripts/run_pipeline.py`. It expects a batch directory containing one or more sample subdirectories.
 
 ```
-python scripts/run_pipeline.py --sample_id "YOUR_SAMPLE_ID"
+python scripts/run_pipeline.py \
+    --input_batch_dir data/input/batch_20240101 \
+    --stages all \
+    --config config/pipeline_config.yml
 ```
-Replace `"YOUR_SAMPLE_ID"` with the name of the sample subdirectory in `data/input/`. This will run all stages of the pipeline.
 
-**Command-line Arguments:**
+Important CLI options:
 
-* `--config FILE_PATH`: Path to the configuration YAML file (defaults to `config/pipeline_config.yml`).
-* `--sample_id SAMPLE_NAME`: **Required.** The identifier of the sample to process.
-* `--stages STAGES_LIST`: Comma-separated list of stages to run (e.g., "1", "1,2", "3", "all"). Defaults to "all".
-    -`1`: Initial Particle Detection
-    -`2`: Quality Filtering & Sharp Object Extraction
-    -`3`: ML Classification (prediction by default)
-    -`train_ml`: Only train the ML model (part of Stage 3).
-* `--force_retrain_ml`: If specified with Stage 3 or `train_ml`, forces retraining of the ML model even if a saved model exists.
+- `--input_batch_dir`: **Required.** Path to the parent directory that contains the sample folders.
+- `--config`: Optional path to a custom YAML config (defaults to `config/pipeline_config.yml`).
+- `--stages`: Comma-separated list from `{1,2,3,4}` or `all` to control which stage modules run. Dependencies are enforced, so Stage n requires outputs from Stage n−1.
 
-**Examples:**
+For classifier retraining run:
 
-* **Run all stages for a sample "SampleA":**
-    ```
-    python scripts/run_pipeline.py --sample_id "SampleA"
-    ```
+```
+python scripts/train_model.py --config config/pipeline_config.yml \
+    --training_data_dir data/training_data
+```
 
-* **Run only Stage 1 for "SampleB":**
-    ```
-    python scripts/run_pipeline.py --sample_id "SampleB" --stages "1"
-    ```
+## Output layout
 
-* **Train the ML model (using data in `data/training_data/`):**
-    ```
-    # --sample_id is formally required but less critical for train-only mode; provide a dummy or relevant context.
-    python scripts/run_pipeline.py --sample_id "ML_Training_Run" --stages "train_ml"
-    ```
+For an input batch named `batch_20240101` and sample `sample_A`, outputs land in `data/output/batch_20240101/sample_A/` with stage-specific folders:
 
-* **Run Stage 3 prediction for "SampleA" using an existing model, and force retraining first:**
-    ```
-    python scripts/run_pipeline.py --sample_id "SampleA" --stages "3" --force_retrain_ml
-    ```
-    (This will first train the model, then run prediction for "SampleA" using the newly trained model).
-    Alternatively, to run all stages including retraining:
-    ```
-    python scripts/run_pipeline.py --sample_id "SampleA" --stages "all" --force_retrain_ml
-    ```
+- `stage1_detection/`
+  - `{sample}_stage1_tracked_particles.csv` – per-frame detection metadata and particle IDs.
+- `stage2_characterization/`
+  - `{sample}_stage2_all_particle_features.csv` – full feature table for every tracked particle.
+  - `stage2_all_particle_crops/` – normalized crops reused by later stages.
+- `stage3_filtering_classification/`
+  - `{sample}_stage3_classified_good_particles.csv` – records of particles that passed quality filters and model scoring.
+- `stage4_biological_analysis/`
+  - `{sample}_stage4_final_analysis.csv` plus visualization artifacts for downstream review.
 
-## Output
+RF model files updated by `train_model.py` are stored under `models/` and automatically reused by Stage 03.
 
-Processed data and results for each sample will be saved in subdirectories under `data/output/SAMPLE_ID/`. Each stage creates its own subdirectory:
+## Customization
 
-* `data/output/SAMPLE_ID/stage1_initial_detection/`:
-    -`{SAMPLE_ID}_stage1_particles.csv`: CSV file with initially detected particles and their basic properties.
-* `data/output/SAMPLE_ID/stage2_quality_filter/`:
-    -`{SAMPLE_ID}_stage2_analyzed_particles.csv`: Comprehensive CSV with detailed analysis (sharpness, artifact flags) for all particles from Stage 1.
-    -`{SAMPLE_ID}_stage2_sharply_filtered_particles.csv`: CSV file listing only the particles that passed the final sharpness criteria.
-    -`sharp_object_final_crops/`: Directory containing cropped images of these "sharp" particles.
-    -`temp_intermediate_particle_crops/`: Temporary directory for intermediate crops used during analysis (can be deleted after run).
-* `data/output/SAMPLE_ID/stage3_ml_classification/ideal_fems_ML_classified/`:
-    -`{SAMPLE_ID}_stage3_accepted_fem_features.csv`: CSV file with features of particles classified as "ideal" (or positive class).
-    -`accepted_images/`: Directory containing copies of the images classified as "ideal".
-    -`visualizations/`: Directory containing visualizations (image with overlays) for the "ideal" images.
-
-Trained ML models and scalers are saved in the `models/` directory (e.g., `rf_fem_classifier.joblib`, `rf_fem_scaler.joblib`, `rf_fem_classifier_feature_names.txt`).
-
-## Customization and Extension
-
-* **Configuration:** Modify `config/pipeline_config.yml` to tune parameters for any stage.
-* **Core Logic:** The image processing algorithms are in `src/core/`. These can be modified or extended.
-* **New Stages:** New processing stages can be added by creating a new module in `src/stages/` and integrating it into `scripts/run_pipeline.py`.
-* **ML Model:** The current implementation uses RandomForest. This can be replaced or augmented with other classifiers by modifying `src/stages/stage_03_ml_classification.py`.
-* **Feature Extraction:** ML features are defined in `src/core/ml_feature_extractor.py`. New features can be added here.
+- Adjust detection, segmentation, and filtering logic via the stage-specific sections in the YAML config.
+- Extend feature extraction by editing `src/core/feature_calculators/` or `src/core/particle_operations.py`. The Stage 02 module automatically serializes any new measurements into the per-particle CSVs for downstream consumption.
+- Swap the classification model by modifying `src/stages/stage_03_filtering_and_classification.py` while preserving the contract of reading Stage 02 CSVs and writing the accepted subset CSV.
+- Enhance downstream visuals by updating `src/visualization/feature_visualization.py` and the Stage 04 module that invokes it.
 
 ## Troubleshooting
 
-* Check the log output in the console for detailed error messages. Logging level and format are configurable.
-* Ensure `project_base_dir` in `config/pipeline_config.yml` is correctly set to the root of the `well_plate_analyzer` directory.
-* Verify that input data paths and file naming conventions match expectations.
-* If ML training fails, check the training data quality and quantity in `data/training_data/`.
-
-## Original Modules Source
-
-This refactored pipeline is based on the logic from the following original Python files:
-* `wellcounter_imaging_module.py`
-* `wellscanner_util_module.py`
-* `ws_background_subtraction.txt` (likely `ws_background_subtraction.py`)
-* `ws_extract_sharp_objects.txt` (likely `ws_extract_sharp_objects.py`)
-* `ws_identify_ideal_fems.txt` (likely `ws_identify_ideal_fems.py`)
-
-The goal of the refactor was to improve modularity, configurability, and maintainability."
+- Ensure `project_base_dir` in the config reflects the absolute repository path; many helpers derive relative locations from it.
+- Confirm that sample directories contain PNG frames named according to the acquisition convention expected by Stage 01.
+- If Stage 03 cannot load the classifier, rerun `scripts/train_model.py` to regenerate the `models/` artifacts.
+- Review the log output (configured via `src/utils/setup_logging`) for detailed error messages per stage.
