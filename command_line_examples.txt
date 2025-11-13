@@ -1,0 +1,1 @@
+python scripts/run_pipeline.py --input_batch_dir C:/wellscanner/test --stages 1,2 --config config/pipeline_config.yml
