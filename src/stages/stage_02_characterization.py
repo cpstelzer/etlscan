@@ -28,6 +28,13 @@ from src.core.feature_calculators.shape_descriptors import calculate_shape_descr
 
 logger = logging.getLogger(__name__)
 
+FOCUS_Z_COLUMN = 'z_mm'
+FOCUS_X_PIXEL_COLUMN = 'X'
+FOCUS_Y_PIXEL_COLUMN = 'Y'
+FOCUS_X_MM_COLUMN = 'x_mm'
+FOCUS_Y_MM_COLUMN = 'y_mm'
+FOCUS_SHOW_PLOTS = False
+
 def run_stage_02_characterization(
     input_s1_csv_path: str,
     image_dir_path: str,
@@ -275,8 +282,8 @@ def plot_track_with_collage(
     ax_z.tick_params(axis='y', labelcolor='tab:orange')
 
     maxima_frames: List[Tuple[int, int, Optional[int], Optional[int]]] = []
-    x_pix_col = focus_cfg.get('x_pixel_column', 'X')
-    y_pix_col = focus_cfg.get('y_pixel_column', 'Y')
+    x_pix_col = FOCUS_X_PIXEL_COLUMN
+    y_pix_col = FOCUS_Y_PIXEL_COLUMN
 
     for idx, peak_position in enumerate(peak_idx):
         peak_row = track_df.iloc[peak_position]
@@ -345,7 +352,7 @@ def plot_track_with_collage(
     plt.tight_layout()
     try:
         plt.savefig(outpath, dpi=150)
-        if focus_cfg.get('show_plots', False):
+        if FOCUS_SHOW_PLOTS:
             plt.show()
     finally:
         plt.close(fig)
@@ -394,12 +401,11 @@ def plot_3d_reconstructed(
     track_col: str,
     frame_col: str,
     z_col: str,
-    focus_cfg: dict,
     outpath: str,
     n_tracks: Optional[int]
 ) -> Optional[str]:
-    x_mm_col = focus_cfg.get('x_mm_column', 'x_mm')
-    y_mm_col = focus_cfg.get('y_mm_column', 'y_mm')
+    x_mm_col = FOCUS_X_MM_COLUMN
+    y_mm_col = FOCUS_Y_MM_COLUMN
 
     if x_mm_col not in df.columns or y_mm_col not in df.columns:
         logger.debug('Skipping 3D plot because x_mm/y_mm columns are missing.')
@@ -515,7 +521,7 @@ def run_focussed_particles_analysis(
     frame_col = focus_cfg.get('frame_column', 'frame')
     track_col = focus_cfg.get('track_column', 'track_id')
     sharp_col = focus_cfg.get('sharpness_column', 'variance_laplacian')
-    z_col = focus_cfg.get('z_column', 'z_mm')
+    z_col = FOCUS_Z_COLUMN
 
     required_cols = {frame_col, track_col, sharp_col, z_col}
     missing_cols = [col for col in required_cols if col not in comprehensive_df.columns]
@@ -562,7 +568,6 @@ def run_focussed_particles_analysis(
             track_col,
             frame_col,
             z_col,
-            focus_cfg,
             os.path.join(focus_plots_dir, 'reconstructed_trajectories_3d.png'),
             max_tracks
         )

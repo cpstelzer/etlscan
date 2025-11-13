@@ -119,18 +119,12 @@ stage_02_characterization:
     frame_column: "frame"
     track_column: "track_id"
     sharpness_column: "variance_laplacian"
-    z_column: "z_mm"
-    x_pixel_column: "X"
-    y_pixel_column: "Y"
-    x_mm_column: "x_mm"
-    y_mm_column: "y_mm"
     min_sharpness_fraction: 0.3
     min_prominence_fraction: 0.05
     smooth_window: 3
     sharpness_min_threshold: 80
     max_tracks_to_plot: 15
     save_plots: true
-    show_plots: false
     crop_filename_prefix: null
 
 # Stage 3: Filtering & Classification
