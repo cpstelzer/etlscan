@@ -79,13 +79,8 @@ def main():
         print(f"FATAL: Error during setup: {e}")
         sys.exit(1)
 
-    output_file_setting = config.get('output_file_dir') if config else None
-    if output_file_setting and os.path.isabs(output_file_setting):
-        batch_output_csv_dir = output_file_setting
-    elif output_file_setting:
-        batch_output_csv_dir = os.path.join(get_project_base_dir(), output_file_setting)
-    else:
-        batch_output_csv_dir = os.path.join(get_project_base_dir(), 'data', 'output')
+    project_base_dir = get_project_base_dir()
+    batch_output_csv_dir = project_base_dir
     os.makedirs(batch_output_csv_dir, exist_ok=True)
         
     stages_to_run_str = args.stages.lower()
@@ -112,7 +107,7 @@ def main():
 
     aggregated_final_particles: List[pd.DataFrame] = []
     combined_filename = f"{batch_dir_name}.csv"
-    batch_output_parent_dir = os.path.join(get_project_base_dir(), "data", "output", batch_dir_name)
+    batch_output_parent_dir = os.path.join(project_base_dir, "data", "output", batch_dir_name)
     os.makedirs(batch_output_parent_dir, exist_ok=True)
 
     total_pipeline_start_time = time.time()
