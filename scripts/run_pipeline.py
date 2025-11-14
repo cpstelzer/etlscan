@@ -28,6 +28,38 @@ from src.stages.stage_04_biological_analysis import run_stage_04_biological_anal
 
 logger = logging.getLogger(__name__)
 
+
+def _resolve_pipeline_log_directory(config: dict) -> str:
+    """Return the directory where the pipeline run log is stored."""
+    logging_config = config.get('logging', {}) if config else {}
+    log_file_setting = logging_config.get('log_file')
+    project_base_dir = get_project_base_dir()
+
+    log_file_path: Optional[str] = None
+    if log_file_setting and str(log_file_setting).lower() != 'null':
+        if os.path.isabs(log_file_setting):
+            log_file_path = log_file_setting
+        else:
+            log_file_path = os.path.join(project_base_dir, log_file_setting)
+    else:
+        log_file_path = os.path.join(project_base_dir, 'pipeline_run.log')
+
+    log_dir = os.path.dirname(log_file_path)
+    return log_dir if log_dir else project_base_dir
+
+
+def _write_batch_aggregation_csv(
+    aggregated_final_particles: List[pd.DataFrame],
+    destination_dir: str,
+    filename: str
+) -> Optional[str]:
+    """Persist the aggregated Stage 2 particles if any have been collected."""
+    if not aggregated_final_particles:
+        return None
+
+    combined_final_particles_df = pd.concat(aggregated_final_particles, ignore_index=True)
+    return save_dataframe_to_csv(combined_final_particles_df, destination_dir, filename)
+
 def main():
     parser = argparse.ArgumentParser(description="Run the Well Plate Analyzer pipeline.")
     parser.add_argument(
@@ -53,15 +85,20 @@ def main():
     args = parser.parse_args()
 
     # --- Setup ---
+    config = {}
+
     try:
         load_config(args.config)
         setup_logging()
+        config = get_config()
         logger.info(f"Configuration loaded from: {args.config}")
         logger.info(f"Pipeline run initiated for Input Batch Directory: {args.input_batch_dir}")
         logger.info(f"Stages to run: {args.stages}")
     except Exception as e:
         print(f"FATAL: Error during setup: {e}")
         sys.exit(1)
+
+    pipeline_log_dir = _resolve_pipeline_log_directory(config)
         
     stages_to_run_str = args.stages.lower()
     run_s1, run_s2, run_s3, run_s4 = False, False, False, False
@@ -81,6 +118,12 @@ def main():
         sys.exit(1)
 
     batch_dir_name = os.path.basename(os.path.normpath(args.input_batch_dir))
+    if not batch_dir_name:
+        sanitized_batch = args.input_batch_dir.strip().replace(os.sep, '_')
+        batch_dir_name = sanitized_batch if sanitized_batch else 'batch_final_particles'
+
+    aggregated_final_particles: List[pd.DataFrame] = []
+    combined_filename = f"{batch_dir_name}.csv"
     batch_output_parent_dir = os.path.join(get_project_base_dir(), "data", "output", batch_dir_name)
     os.makedirs(batch_output_parent_dir, exist_ok=True)
 
@@ -183,9 +226,54 @@ def main():
             logger.error(f"HALTED processing for {current_sample_id}: {e}")
         except Exception as e:
             logger.exception(f"An unexpected error HALTED processing for {current_sample_id}: {e}")
-        
+        finally:
+            final_particles_csv_path = os.path.join(s2_output_dir, 'final_particles.csv')
+            if os.path.exists(final_particles_csv_path):
+                final_particles_df = load_dataframe_from_csv(final_particles_csv_path)
+                if final_particles_df is not None and not final_particles_df.empty:
+                    final_particles_copy = final_particles_df.copy()
+                    if 'sample_id' in final_particles_copy.columns:
+                        final_particles_copy['sample_id'] = final_particles_copy['sample_id'].fillna(current_sample_id)
+                    else:
+                        final_particles_copy.insert(0, 'sample_id', current_sample_id)
+                    aggregated_final_particles.append(final_particles_copy)
+                    logger.info(
+                        f"Collected {len(final_particles_copy)} Stage 2 final particles for batch aggregation from {current_sample_id}."
+                    )
+
+                    saved_batch_csv_path = _write_batch_aggregation_csv(
+                        aggregated_final_particles,
+                        pipeline_log_dir,
+                        combined_filename
+                    )
+                    if saved_batch_csv_path:
+                        logger.info(
+                            f"Batch-level Stage 2 final particles updated at {saved_batch_csv_path}."
+                        )
+                else:
+                    logger.debug(
+                        f"Stage 2 final particles CSV for {current_sample_id} is empty. Skipping aggregation for this sample."
+                    )
+            else:
+                logger.debug(
+                    f"Stage 2 final particles CSV not found for {current_sample_id}. Skipping aggregation for this sample."
+                )
+
     total_pipeline_duration = time.time() - total_pipeline_start_time
     logger.info(f"--- Batch pipeline execution FINISHED in {total_pipeline_duration:.2f} seconds ---")
+
+    if aggregated_final_particles:
+        saved_batch_csv_path = _write_batch_aggregation_csv(
+            aggregated_final_particles,
+            pipeline_log_dir,
+            combined_filename
+        )
+        if saved_batch_csv_path:
+            logger.info(
+                f"Batch-level Stage 2 final particles saved to {saved_batch_csv_path}."
+            )
+    else:
+        logger.info("No Stage 2 final particles were collected; skipping batch-level aggregation.")
 
     logging.shutdown()
 
