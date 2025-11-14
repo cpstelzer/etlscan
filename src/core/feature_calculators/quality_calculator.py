@@ -40,7 +40,9 @@ def calculate_quality_features(
     has_artifact = detect_black_mask_artifact(
         image_path=saved_crop_path,
         image_gray=image_gray_for_artifact,
-        min_area_ratio=black_mask_config.get('min_area_ratio', 0.05)
+        min_area_ratio=black_mask_config.get('min_area_ratio', 0.05),
+        max_black_pixel_value=black_mask_config.get('max_black_pixel_value', 15),
+        min_edge_thickness_fraction=black_mask_config.get('min_edge_thickness_fraction', 0.2),
     )
     features['has_black_mask_artifact'] = has_artifact
 

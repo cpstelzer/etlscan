@@ -105,6 +105,8 @@ stage_02_characterization:
     # Configuration for detecting black corner mask artifacts in crops.
     black_mask_check:
       min_area_ratio: 0.05
+      max_black_pixel_value: 15
+      min_edge_thickness_fraction: 0.2
 
   # Parameters for advanced shape and texture descriptors.
   shape_descriptors:

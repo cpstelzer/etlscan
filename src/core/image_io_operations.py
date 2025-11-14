@@ -1,9 +1,17 @@
 # src/core/image_io_operations.py
-import cv2
+from __future__ import annotations
+
 import numpy as np
 import os
 import logging
 from typing import Optional, Tuple
+
+from PIL import Image
+
+try:  # pragma: no cover - depends on environment
+    import cv2  # type: ignore
+except Exception:  # noqa: BLE001 - keep optional dependency for headless envs
+    cv2 = None  # type: ignore
 
 from src.utils.common_exceptions import ImageProcessingError
 
@@ -24,18 +32,31 @@ def load_image(image_path: str, mode: str = 'color') -> Optional[np.ndarray]:
         logger.error(f"Image file not found: {image_path}")
         return None
     try:
+        if cv2 is not None:
+            if mode == 'gray':
+                img = cv2.imread(image_path, cv2.IMREAD_GRAYSCALE)
+            elif mode == 'color':
+                img = cv2.imread(image_path, cv2.IMREAD_COLOR)
+            else:
+                logger.error(f"Invalid image loading mode: {mode}. Must be 'color' or 'gray'.")
+                return None
+            if img is None:
+                logger.error(f"Failed to load image (cv2.imread returned None): {image_path}")
+                return None
+            logger.debug(f"Successfully loaded image: {image_path} in {mode} mode via OpenCV.")
+            return img
+
+        # PIL fallback for headless environments
+        pil_img = Image.open(image_path)
         if mode == 'gray':
-            img = cv2.imread(image_path, cv2.IMREAD_GRAYSCALE)
+            img = np.array(pil_img.convert('L'))
         elif mode == 'color':
-            img = cv2.imread(image_path, cv2.IMREAD_COLOR)
+            rgb = np.array(pil_img.convert('RGB'))
+            img = rgb[:, :, ::-1]  # Convert RGB -> BGR to match OpenCV convention
         else:
             logger.error(f"Invalid image loading mode: {mode}. Must be 'color' or 'gray'.")
             return None
-
-        if img is None:
-            logger.error(f"Failed to load image (cv2.imread returned None): {image_path}")
-            return None
-        logger.debug(f"Successfully loaded image: {image_path} in {mode} mode.")
+        logger.debug(f"Successfully loaded image: {image_path} in {mode} mode via PIL fallback.")
         return img
     except Exception as e:
         logger.exception(f"Exception during image loading for {image_path}: {e}")
@@ -61,11 +82,20 @@ def save_image(image_array: np.ndarray, output_path: str, filename: str) -> Opti
     full_image_path = os.path.join(output_path, filename)
 
     try:
-        success = cv2.imwrite(full_image_path, image_array)
-        if not success:
-            logger.error(f"Failed to save image (cv2.imwrite returned False): {full_image_path}")
-            return None
-        logger.debug(f"Image saved successfully to: {full_image_path}")
+        if cv2 is not None:
+            success = cv2.imwrite(full_image_path, image_array)
+            if not success:
+                logger.error(f"Failed to save image (cv2.imwrite returned False): {full_image_path}")
+                return None
+            logger.debug(f"Image saved successfully to: {full_image_path} via OpenCV.")
+            return full_image_path
+
+        pil_img_array = image_array
+        if image_array.ndim == 3 and image_array.shape[2] == 3:
+            pil_img_array = image_array[:, :, ::-1]  # Convert BGR -> RGB
+        pil_img = Image.fromarray(pil_img_array)
+        pil_img.save(full_image_path)
+        logger.debug(f"Image saved successfully to: {full_image_path} via PIL fallback.")
         return full_image_path
     except Exception as e:
         logger.exception(f"Exception during image saving to {full_image_path}: {e}")
@@ -83,7 +113,12 @@ def convert_to_grayscale(image_color: np.ndarray) -> Optional[np.ndarray]:
         return image_color
     if image_color.ndim == 3 and image_color.shape[2] == 3:
         try:
-            gray_img = cv2.cvtColor(image_color, cv2.COLOR_BGR2GRAY)
+            if cv2 is not None:
+                gray_img = cv2.cvtColor(image_color, cv2.COLOR_BGR2GRAY)
+            else:
+                coeffs = np.array([0.114, 0.587, 0.299], dtype=np.float32)
+                gray_img = np.tensordot(image_color, coeffs, axes=([2], [0]))
+                gray_img = gray_img.astype(np.uint8)
             logger.debug("Image converted to grayscale.")
             return gray_img
         except Exception as e:

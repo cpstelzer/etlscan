@@ -57,15 +57,21 @@ def run_demo(image_dir: Path, config_path: Path) -> Path:
         raise FileNotFoundError(f"Input directory not found: {image_dir}")
 
     config = load_config(str(config_path))
-    min_area_ratio = (
+    black_mask_cfg = (
         config.get("stage_02_characterization", {})
         .get("quality_features", {})
         .get("black_mask_check", {})
-        .get("min_area_ratio", 0.05)
     )
+    min_area_ratio = black_mask_cfg.get("min_area_ratio", 0.05)
+    max_black_pixel_value = black_mask_cfg.get("max_black_pixel_value", 15)
+    min_edge_thickness_fraction = black_mask_cfg.get("min_edge_thickness_fraction", 0.2)
 
     LOGGER.info(
-        "Using min_area_ratio=%.4f from %s", min_area_ratio, config_path
+        "Using min_area_ratio=%.4f, max_black_pixel_value=%d, and min_edge_thickness_fraction=%.2f from %s",
+        min_area_ratio,
+        max_black_pixel_value,
+        min_edge_thickness_fraction,
+        config_path,
     )
 
     image_files = list(_iter_image_files(image_dir))
@@ -81,6 +87,8 @@ def run_demo(image_dir: Path, config_path: Path) -> Path:
         has_artifact = detect_black_mask_artifact(
             image_path=str(image_path),
             min_area_ratio=min_area_ratio,
+            max_black_pixel_value=max_black_pixel_value,
+            min_edge_thickness_fraction=min_edge_thickness_fraction,
         )
         results.append(
             {
