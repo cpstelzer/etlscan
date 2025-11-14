@@ -4,6 +4,13 @@ Given a directory of images, this script loads the configured
 ``min_area_ratio`` from ``pipeline_config.yml`` and evaluates whether each
 image contains a black mask artifact.  The results are written to a CSV
 file within the same directory.
+
+`scripts/detect_black_mask_demo.py` evaluates every supported image in a directory with `detect_black_mask_artifact` and writes `black_mask_detection_results.csv` beside the inputs. Example:
+
+  ```
+  python scripts/detect_black_mask_demo.py data/sanity_checks/masks --config config/pipeline_config.yml
+  ```
+
 """
 
 from __future__ import annotations
