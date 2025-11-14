@@ -15,6 +15,12 @@ Supporting tooling:
 
 - `scripts/train_model.py` retrains the Stage 03 RandomForest classifier using the Stage 02 feature set.
 - `scripts/determine_bg_offset_demo.py` surfaces Stage 01 background tuning helpers for diagnostics.
+- `scripts/detect_black_mask_demo.py` evaluates every supported image in a directory with `detect_black_mask_artifact` and writes `black_mask_detection_results.csv` beside the inputs. Example:
+
+  ```
+  python scripts/detect_black_mask_demo.py data/sanity_checks/masks \
+      --config config/pipeline_config.yml
+  ```
 
 ## Project structure
 
