@@ -33,9 +33,13 @@ def calculate_quality_features(
 
     # 2. Black Mask Artifact Detection
     black_mask_config = config.get('black_mask_check', {})
+    # If a crop was not written to disk (e.g., save_all_particle_crops is False)
+    # we have to rely on the in-memory grayscale crop for the black mask check.
+    # Otherwise, allow the detector to read from disk to avoid redundant work.
+    image_gray_for_artifact = image_crop_gray if saved_crop_path is None else None
     has_artifact = detect_black_mask_artifact(
         image_path=saved_crop_path,
-        image_gray=image_crop_gray,
+        image_gray=image_gray_for_artifact,
         min_area_ratio=black_mask_config.get('min_area_ratio', 0.05)
     )
     features['has_black_mask_artifact'] = has_artifact
