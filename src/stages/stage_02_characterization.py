@@ -8,6 +8,7 @@ import skimage.util
 import math
 import glob
 import matplotlib
+import numbers
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 import matplotlib.image as mpimg
@@ -158,13 +159,62 @@ def run_stage_02_characterization(
     output_filename = f"{sample_id}_stage2_all_particle_features.csv"
     saved_csv_path = save_dataframe_to_csv(comprehensive_df, output_dir_stage2, output_filename)
 
-    run_focussed_particles_analysis(
+    filtered_df = run_focussed_particles_analysis(
         comprehensive_df,
         output_dir_stage2,
         sample_id,
         s2_config,
         all_crops_dir
     )
+
+    focus_cfg = s2_config.get('focussed_particles', {})
+    track_col = focus_cfg.get('track_column', 'track_id')
+
+    if filtered_df is not None and not filtered_df.empty:
+        final_particles_df = select_final_particles_by_area(
+            filtered_df,
+            track_col,
+            area_col='main_area_filled'
+        )
+
+        if not final_particles_df.empty:
+            final_particles_df = crop_and_save_final_particle_images(
+                final_particles_df,
+                image_dir_path,
+                cropper,
+                sample_id,
+                output_dir_stage2
+            )
+
+            save_dataframe_to_csv(
+                final_particles_df,
+                output_dir_stage2,
+                'final_particles.csv'
+            )
+
+            median_particle_df = select_median_particle_by_area(
+                final_particles_df,
+                area_col='main_area_filled'
+            )
+
+            if not median_particle_df.empty:
+                median_particle_df = crop_and_save_final_particle_images(
+                    median_particle_df,
+                    image_dir_path,
+                    cropper,
+                    sample_id,
+                    output_dir_stage2,
+                    subdir_name='final_median',
+                    crop_filename_column='median_crop_filename'
+                )
+
+                save_dataframe_to_csv(
+                    median_particle_df,
+                    os.path.join(output_dir_stage2, 'final_median'),
+                    'median_particle.csv'
+                )
+        else:
+            logger.info('No final particles selected after area-based filtering.')
 
     logger.info(f"--- Stage 2: Characterization for {sample_id} COMPLETED ---")
     return saved_csv_path
@@ -513,10 +563,10 @@ def run_focussed_particles_analysis(
     sample_id: str,
     stage2_config: dict,
     crops_dir: Optional[str]
-) -> None:
+) -> Optional[pd.DataFrame]:
     focus_cfg = stage2_config.get('focussed_particles', {})
     if not focus_cfg.get('enabled', False):
-        return
+        return None
 
     frame_col = focus_cfg.get('frame_column', 'frame')
     track_col = focus_cfg.get('track_column', 'track_id')
@@ -582,3 +632,149 @@ def run_focussed_particles_analysis(
         len(filtered_df),
         diagnostics_df.shape[0]
     )
+    return filtered_df
+
+
+def select_final_particles_by_area(
+    filtered_df: pd.DataFrame,
+    track_col: str,
+    area_col: str
+) -> pd.DataFrame:
+    if filtered_df is None or filtered_df.empty:
+        columns = list(filtered_df.columns) if filtered_df is not None else None
+        return pd.DataFrame(columns=columns)
+
+    if area_col not in filtered_df.columns:
+        logger.warning(
+            "Cannot select final particles because '%s' column is missing in filtered dataframe.",
+            area_col
+        )
+        return pd.DataFrame(columns=filtered_df.columns)
+
+    if track_col not in filtered_df.columns:
+        logger.warning(
+            "Cannot select final particles because track column '%s' is missing in filtered dataframe.",
+            track_col
+        )
+        return pd.DataFrame(columns=filtered_df.columns)
+
+    working_df = filtered_df.copy()
+    working_df['_area_numeric'] = pd.to_numeric(working_df[area_col], errors='coerce')
+    valid_df = working_df.dropna(subset=[track_col, '_area_numeric'])
+
+    if valid_df.empty:
+        logger.info('No valid rows with both track id and %s for final particle selection.', area_col)
+        return pd.DataFrame(columns=filtered_df.columns)
+
+    idx = valid_df.groupby(track_col)['_area_numeric'].idxmax()
+    selected_df = working_df.loc[idx].drop(columns=['_area_numeric'])
+    return selected_df.reset_index(drop=True)
+
+
+def _format_track_label(row: pd.Series, fallback_suffix: int) -> str:
+    raw_track_id = row.get('track_id')
+    if pd.notna(raw_track_id):
+        try:
+            return f"track{int(raw_track_id)}"
+        except (ValueError, TypeError):
+            return f"track{raw_track_id}"
+
+    fallback_value = row.get('particle_id')
+    if pd.isna(fallback_value):
+        fallback_value = row.get('s1_original_index')
+    if pd.isna(fallback_value):
+        fallback_value = fallback_suffix
+
+    if isinstance(fallback_value, numbers.Number):
+        try:
+            fallback_value = int(fallback_value)
+        except (ValueError, TypeError, OverflowError):
+            fallback_value = str(fallback_value)
+
+    return f"untracked{fallback_value}"
+
+
+def select_median_particle_by_area(
+    final_particles_df: pd.DataFrame,
+    area_col: str
+) -> pd.DataFrame:
+    if final_particles_df is None or final_particles_df.empty:
+        columns = list(final_particles_df.columns) if final_particles_df is not None else None
+        return pd.DataFrame(columns=columns)
+
+    if area_col not in final_particles_df.columns:
+        logger.warning(
+            "Cannot select median particle because '%s' column is missing in final particles dataframe.",
+            area_col
+        )
+        return pd.DataFrame(columns=final_particles_df.columns)
+
+    working_df = final_particles_df.copy()
+    working_df['_area_numeric'] = pd.to_numeric(working_df[area_col], errors='coerce')
+    valid_df = working_df.dropna(subset=['_area_numeric']).copy()
+
+    if valid_df.empty:
+        logger.info('No valid rows with %s for median particle selection.', area_col)
+        return pd.DataFrame(columns=final_particles_df.columns)
+
+    median_value = valid_df['_area_numeric'].median()
+    valid_df['_median_diff'] = (valid_df['_area_numeric'] - median_value).abs()
+    idx = valid_df['_median_diff'].idxmin()
+
+    selected_row = working_df.loc[[idx]].drop(columns=['_area_numeric'])
+    return selected_row.reset_index(drop=True)
+
+
+def crop_and_save_final_particle_images(
+    final_particles_df: pd.DataFrame,
+    image_dir_path: str,
+    cropper: ParticleCropper,
+    sample_id: str,
+    output_dir_stage2: str,
+    subdir_name: str = 'final_particles',
+    crop_filename_column: str = 'final_crop_filename'
+) -> pd.DataFrame:
+    if final_particles_df.empty:
+        return final_particles_df
+
+    final_dir = os.path.join(output_dir_stage2, subdir_name)
+    os.makedirs(final_dir, exist_ok=True)
+
+    updated_df = final_particles_df.copy()
+    updated_df[crop_filename_column] = None
+
+    groupby_obj = updated_df.groupby('source_image_filename', dropna=False)
+    for image_filename, group in groupby_obj:
+        if not isinstance(image_filename, str) or not image_filename:
+            logger.warning('Skipping final particle crops for rows with invalid source image filename.')
+            continue
+
+        full_image_path = os.path.join(image_dir_path, image_filename)
+        main_img_color = load_image(full_image_path, mode='color')
+        main_img_gray = convert_to_grayscale(main_img_color)
+
+        if main_img_color is None or main_img_gray is None:
+            logger.warning('Failed to load image %s for final particle crops.', full_image_path)
+            continue
+
+        frame_num = extract_frame_from_filename(image_filename)
+        if frame_num is None:
+            logger.warning('Could not parse frame from filename %s for final particle crops.', image_filename)
+            continue
+
+        for idx, row in group.iterrows():
+            track_label = _format_track_label(row, fallback_suffix=idx)
+            crop_filename_prefix = f"{sample_id}_{track_label}_frame{frame_num}"
+
+            _, saved_crop_path = cropper.crop_single_particle_from_image(
+                main_img_color,
+                main_img_gray,
+                row,
+                output_dir_for_crop=final_dir,
+                crop_filename_prefix=crop_filename_prefix
+            )
+
+            if saved_crop_path:
+                updated_df.at[idx, crop_filename_column] = os.path.basename(saved_crop_path)
+
+    return updated_df.reset_index(drop=True)
