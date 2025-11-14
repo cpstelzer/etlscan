@@ -191,28 +191,6 @@ def run_stage_02_characterization(
                 output_dir_stage2,
                 'final_particles.csv'
             )
-
-            median_particle_df = select_median_particle_by_area(
-                final_particles_df,
-                area_col='main_area_filled'
-            )
-
-            if not median_particle_df.empty:
-                median_particle_df = crop_and_save_final_particle_images(
-                    median_particle_df,
-                    image_dir_path,
-                    cropper,
-                    sample_id,
-                    output_dir_stage2,
-                    subdir_name='final_median',
-                    crop_filename_column='median_crop_filename'
-                )
-
-                save_dataframe_to_csv(
-                    median_particle_df,
-                    os.path.join(output_dir_stage2, 'final_median'),
-                    'median_particle.csv'
-                )
         else:
             logger.info('No final particles selected after area-based filtering.')
 
@@ -694,54 +672,21 @@ def _format_track_label(row: pd.Series, fallback_suffix: int) -> str:
     return f"untracked{fallback_value}"
 
 
-def select_median_particle_by_area(
-    final_particles_df: pd.DataFrame,
-    area_col: str
-) -> pd.DataFrame:
-    if final_particles_df is None or final_particles_df.empty:
-        columns = list(final_particles_df.columns) if final_particles_df is not None else None
-        return pd.DataFrame(columns=columns)
-
-    if area_col not in final_particles_df.columns:
-        logger.warning(
-            "Cannot select median particle because '%s' column is missing in final particles dataframe.",
-            area_col
-        )
-        return pd.DataFrame(columns=final_particles_df.columns)
-
-    working_df = final_particles_df.copy()
-    working_df['_area_numeric'] = pd.to_numeric(working_df[area_col], errors='coerce')
-    valid_df = working_df.dropna(subset=['_area_numeric']).copy()
-
-    if valid_df.empty:
-        logger.info('No valid rows with %s for median particle selection.', area_col)
-        return pd.DataFrame(columns=final_particles_df.columns)
-
-    median_value = valid_df['_area_numeric'].median()
-    valid_df['_median_diff'] = (valid_df['_area_numeric'] - median_value).abs()
-    idx = valid_df['_median_diff'].idxmin()
-
-    selected_row = working_df.loc[[idx]].drop(columns=['_area_numeric'])
-    return selected_row.reset_index(drop=True)
-
-
 def crop_and_save_final_particle_images(
     final_particles_df: pd.DataFrame,
     image_dir_path: str,
     cropper: ParticleCropper,
     sample_id: str,
-    output_dir_stage2: str,
-    subdir_name: str = 'final_particles',
-    crop_filename_column: str = 'final_crop_filename'
+    output_dir_stage2: str
 ) -> pd.DataFrame:
     if final_particles_df.empty:
         return final_particles_df
 
-    final_dir = os.path.join(output_dir_stage2, subdir_name)
+    final_dir = os.path.join(output_dir_stage2, 'final_particles')
     os.makedirs(final_dir, exist_ok=True)
 
     updated_df = final_particles_df.copy()
-    updated_df[crop_filename_column] = None
+    updated_df['final_crop_filename'] = None
 
     groupby_obj = updated_df.groupby('source_image_filename', dropna=False)
     for image_filename, group in groupby_obj:
@@ -775,6 +720,6 @@ def crop_and_save_final_particle_images(
             )
 
             if saved_crop_path:
-                updated_df.at[idx, crop_filename_column] = os.path.basename(saved_crop_path)
+                updated_df.at[idx, 'final_crop_filename'] = os.path.basename(saved_crop_path)
 
     return updated_df.reset_index(drop=True)
