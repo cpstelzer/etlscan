@@ -2,6 +2,7 @@
 # Global Settings
 project_base_dir: "C:/sandbox/" # CHANGE THIS to your project's root
 sample_subdir_name: "C:/wellscanner/test/" # Example, will be overridden by run_pipeline.py
+output_file_dir: "C:/sandbox/data/output/batch_final_particles" # Directory for aggregated Stage 2 CSVs
 
 # Logging Configuration
 logging:

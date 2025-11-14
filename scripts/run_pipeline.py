@@ -29,25 +29,6 @@ from src.stages.stage_04_biological_analysis import run_stage_04_biological_anal
 logger = logging.getLogger(__name__)
 
 
-def _resolve_pipeline_log_directory(config: dict) -> str:
-    """Return the directory where the pipeline run log is stored."""
-    logging_config = config.get('logging', {}) if config else {}
-    log_file_setting = logging_config.get('log_file')
-    project_base_dir = get_project_base_dir()
-
-    log_file_path: Optional[str] = None
-    if log_file_setting and str(log_file_setting).lower() != 'null':
-        if os.path.isabs(log_file_setting):
-            log_file_path = log_file_setting
-        else:
-            log_file_path = os.path.join(project_base_dir, log_file_setting)
-    else:
-        log_file_path = os.path.join(project_base_dir, 'pipeline_run.log')
-
-    log_dir = os.path.dirname(log_file_path)
-    return log_dir if log_dir else project_base_dir
-
-
 def _write_batch_aggregation_csv(
     aggregated_final_particles: List[pd.DataFrame],
     destination_dir: str,
@@ -98,7 +79,14 @@ def main():
         print(f"FATAL: Error during setup: {e}")
         sys.exit(1)
 
-    pipeline_log_dir = _resolve_pipeline_log_directory(config)
+    output_file_setting = config.get('output_file_dir') if config else None
+    if output_file_setting and os.path.isabs(output_file_setting):
+        batch_output_csv_dir = output_file_setting
+    elif output_file_setting:
+        batch_output_csv_dir = os.path.join(get_project_base_dir(), output_file_setting)
+    else:
+        batch_output_csv_dir = os.path.join(get_project_base_dir(), 'data', 'output')
+    os.makedirs(batch_output_csv_dir, exist_ok=True)
         
     stages_to_run_str = args.stages.lower()
     run_s1, run_s2, run_s3, run_s4 = False, False, False, False
@@ -243,7 +231,7 @@ def main():
 
                     saved_batch_csv_path = _write_batch_aggregation_csv(
                         aggregated_final_particles,
-                        pipeline_log_dir,
+                        batch_output_csv_dir,
                         combined_filename
                     )
                     if saved_batch_csv_path:
@@ -265,7 +253,7 @@ def main():
     if aggregated_final_particles:
         saved_batch_csv_path = _write_batch_aggregation_csv(
             aggregated_final_particles,
-            pipeline_log_dir,
+            batch_output_csv_dir,
             combined_filename
         )
         if saved_batch_csv_path:
