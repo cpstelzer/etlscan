@@ -14,7 +14,13 @@ from src.utils import (
     get_config, load_dataframe_from_csv, save_dataframe_to_csv, get_models_dir
 )
 from src.utils.common_exceptions import MLModelError, ConfigError, DataValidationError
-from src.core.sharpness_assessment import normalize_and_combine_sharpness
+from src.stages.stage_02_characterization import (
+    filter_focused_frames,
+    select_final_particles_by_area,
+    plot_example_tracks_with_collages,
+    plot_3d_reconstructed,
+    plot_diagnostics_summary,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -128,31 +134,99 @@ def run_stage_03_filtering_and_classification(
         current_df = current_df[~rejected_mask]
         logger.info(f"Filter (Boundary Touch): {len(current_df)} particles remain.")
          
-    # b. Sharpness Filter
-    sharpness_filter_config = s3_config.get('sharpness_filter', {})
-    if sharpness_filter_config.get('enabled', True):
-        metric = sharpness_filter_config.get('metric', 'combined_sharpness')
-        threshold = sharpness_filter_config.get('min_threshold', 0.25)
-        
-        if metric == 'combined_sharpness' and 'combined_sharpness' not in current_df.columns:
-            logger.info("Calculating 'combined_sharpness' for filtering...")
-            current_df = normalize_and_combine_sharpness(current_df, config.get('stage_02_characterization', {}).get('sharpness_metrics', []))
+    # b. Focus-based pruning (moved from Stage 2)
+    focus_cfg = config.get('stage_02_characterization', {}).get('focussed_particles', {})
+    if focus_cfg.get('enabled', False):
+        frame_col = focus_cfg.get('frame_column', 'frame')
+        track_col = focus_cfg.get('track_column', 'track_id')
+        sharp_col = focus_cfg.get('sharpness_column', 'variance_laplacian')
+        z_col = focus_cfg.get('z_column', 'z_mm')
+        area_col = focus_cfg.get('area_column', 'main_area_filled')
 
-        if metric in current_df.columns:
-            rejected_mask = current_df[metric].fillna(0) < threshold
-            if save_rejected:
-                _save_rejected_crops(current_df[rejected_mask], s2_crops_dir, os.path.join(output_dir_stage3, "rejected_by_sharpness"), f"sharpness < {threshold}")
-            current_df = current_df[~rejected_mask]
-            logger.info(f"Filter (Sharpness): {len(current_df)} particles remain.")
+        required_cols = [frame_col, track_col, sharp_col, z_col]
+        missing_cols = [col for col in required_cols if col not in current_df.columns]
+        if missing_cols:
+            logger.warning(
+                "Skipping focus-based pruning because required columns are missing: %s",
+                ', '.join(missing_cols)
+            )
+        else:
+            focus_dir = output_dir_stage3
+            focus_plots_dir = os.path.join(output_dir_stage3, 'focussed_particles')
+            os.makedirs(focus_plots_dir, exist_ok=True)
 
-    # c. ML Filter (the last step)
+            filtered_focus_df, diagnostics_df = filter_focused_frames(
+                current_df,
+                track_col,
+                frame_col,
+                sharp_col,
+                focus_cfg
+            )
+
+            save_dataframe_to_csv(filtered_focus_df, focus_dir, 'filtered_in_focus.csv')
+            save_dataframe_to_csv(diagnostics_df, focus_dir, 'diagnostics_selected_peaks.csv')
+
+            if focus_cfg.get('save_plots', True):
+                prefix = focus_cfg.get('crop_filename_prefix') or sample_id
+                max_tracks = focus_cfg.get('max_tracks_to_plot')
+
+                plot_example_tracks_with_collages(
+                    current_df,
+                    track_col,
+                    frame_col,
+                    sharp_col,
+                    z_col,
+                    focus_cfg,
+                    s2_crops_dir,
+                    prefix,
+                    focus_plots_dir,
+                    max_tracks
+                )
+
+                plot_3d_reconstructed(
+                    current_df,
+                    filtered_focus_df,
+                    track_col,
+                    frame_col,
+                    z_col,
+                    os.path.join(focus_plots_dir, 'reconstructed_trajectories_3d.png'),
+                    max_tracks
+                )
+
+                plot_diagnostics_summary(
+                    diagnostics_df,
+                    os.path.join(focus_plots_dir, 'diagnostics_summary.png')
+                )
+
+            current_df = select_final_particles_by_area(
+                filtered_focus_df,
+                track_col,
+                area_col
+            )
+
+            save_dataframe_to_csv(current_df, output_dir_stage3, 'final_particles.csv')
+
+            logger.info(
+                "Focus-based pruning complete: %d particles remain after per-track selection.",
+                len(current_df)
+            )
+
+    # c. ML Filter (temporarily disabled via config)
     ml_filter_config = s3_config.get('ml_filter', {})
-    threshold = ml_filter_config.get('min_probability_threshold', 0.5)
-    rejected_mask = current_df['ml_predicted_proba'] < threshold
-    if save_rejected:
-        _save_rejected_crops(current_df[rejected_mask], s2_crops_dir, os.path.join(output_dir_stage3, "rejected_by_ml"), f"ML probability < {threshold}")
-    current_df = current_df[~rejected_mask]
-    logger.info(f"Filter (ML): {len(current_df)} particles remain.")
+    if ml_filter_config.get('enabled', True):
+        threshold = ml_filter_config.get('min_probability_threshold', 0.5)
+        rejected_mask = current_df['ml_predicted_proba'] < threshold
+        if save_rejected:
+            _save_rejected_crops(
+                current_df[rejected_mask],
+                s2_crops_dir,
+                os.path.join(output_dir_stage3, "rejected_by_ml"),
+                f"ML probability < {threshold}",
+            )
+        current_df = current_df[~rejected_mask]
+        logger.info(f"Filter (ML): {len(current_df)} particles remain.")
+    else:
+        logger.info("ML filter disabled via configuration; skipping probability thresholding.")
     
     # --- 4. Final Output ---
     final_good_particles_df = current_df.copy()
