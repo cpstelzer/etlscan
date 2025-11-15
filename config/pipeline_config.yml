@@ -141,6 +141,7 @@ stage_03_filtering_and_classification:
   
   # ML based filtering
   ml_filter:
+    enabled: false # Temporarily disable ML-based rejection while retaining configuration
     min_probability_threshold: 0.35 # Example of a less stringent threshold
 
   # Quality flags filtering
@@ -148,12 +149,6 @@ stage_03_filtering_and_classification:
     filter_on_boundary: true # Remove particles whose crops touch the crop boundary
     filter_black_mask: true
   
-  # Sharpness based filtering
-  sharpness_filter:
-    enabled: true
-    metric: "variance_laplacian"
-    min_threshold: 80 
-
   # Training parameters (if a training script is invoked)
   training_params:
     good_data_subdir: "good"
