@@ -179,41 +179,6 @@ def run_stage_02_characterization(
     output_filename = f"{sample_id}_stage2_all_particle_features.csv"
     saved_csv_path = save_dataframe_to_csv(comprehensive_df, output_dir_stage2, output_filename)
 
-    filtered_df = run_focussed_particles_analysis(
-        comprehensive_df,
-        output_dir_stage2,
-        sample_id,
-        s2_config,
-        all_crops_dir
-    )
-
-    focus_cfg = s2_config.get('focussed_particles', {})
-    track_col = focus_cfg.get('track_column', 'track_id')
-
-    if filtered_df is not None and not filtered_df.empty:
-        final_particles_df = select_final_particles_by_area(
-            filtered_df,
-            track_col,
-            area_col='main_area_filled'
-        )
-
-        if not final_particles_df.empty:
-            final_particles_df = crop_and_save_final_particle_images(
-                final_particles_df,
-                image_dir_path,
-                cropper,
-                sample_id,
-                output_dir_stage2
-            )
-
-            save_dataframe_to_csv(
-                final_particles_df,
-                output_dir_stage2,
-                'final_particles.csv'
-            )
-        else:
-            logger.info('No final particles selected after area-based filtering.')
-
     logger.info(f"--- Stage 2: Characterization for {sample_id} COMPLETED ---")
     return saved_csv_path
 
