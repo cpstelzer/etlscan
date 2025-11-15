@@ -145,7 +145,7 @@ stage_03_filtering_and_classification:
 
   # Quality flags filtering
   quality_flags_filter:
-    filter_on_boundary: true # This filter is pending implementation
+    filter_on_boundary: true # Remove particles whose crops touch the crop boundary
     filter_black_mask: true
   
   # Sharpness based filtering

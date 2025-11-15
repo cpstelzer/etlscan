@@ -21,7 +21,10 @@ from src.utils import (
 from src.utils.path_helpers import extract_frame_from_filename
 from src.utils.common_exceptions import ProcessingError, ConfigError, DataValidationError
 from src.core.image_io_operations import load_image, convert_to_grayscale
-from src.core.particle_operations import ParticleCropper
+from src.core.particle_operations import (
+    ParticleCropper,
+    detect_cropped_particle_on_boundary,
+)
 from src.core.segmentation import segment_main_body_from_image_float
 from src.core.feature_calculators.quality_calculator import calculate_quality_features
 from src.core.feature_calculators.morphology_calculator import calculate_detailed_body_morphology
@@ -77,6 +80,14 @@ def run_stage_02_characterization(
 
     all_particle_features = []
 
+    threshold_cfg = system_config.get('thresholding', {})
+    boundary_threshold_params = {
+        'thresholding_mode': threshold_cfg.get('mode', 'otsu'),
+        'otsu_threshold_multiplier': threshold_cfg.get('otsu_threshold_multiplier', 0.45),
+        'fixed_threshold_value': threshold_cfg.get('fixed_threshold_value', 70),
+    }
+    illumination_mode = str(system_config.get('source_image_illumination_type', 'darkfield')).strip().lower()
+
     s1_particles_df['s1_original_index'] = s1_particles_df.index
     
     for image_filename, group in s1_particles_df.groupby('source_image_filename'):
@@ -120,6 +131,15 @@ def run_stage_02_characterization(
             particle_features['crop_filename'] = (
                 os.path.basename(saved_crop_path) if saved_crop_path else None
             )
+
+            crop_identifier_for_logs = saved_crop_path or crop_filename_prefix or "unsaved_crop"
+            is_on_crop_boundary = detect_cropped_particle_on_boundary(
+                crop_gray,
+                crop_identifier_for_logs,
+                illumination_mode,
+                boundary_threshold_params,
+            )
+            particle_features['is_on_crop_boundary'] = bool(is_on_crop_boundary)
             
             crop_float_orig = skimage.util.img_as_float(crop_gray)
             raw_mask, filled_mask, _ = segment_main_body_from_image_float(crop_float_orig, system_config)
