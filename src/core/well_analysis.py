@@ -2,12 +2,11 @@
 import cv2
 import numpy as np
 import skimage.measure
-import skimage.io 
-import skimage.util 
+import skimage.io
 import logging
 import os 
 import shutil
-from typing import Optional, Tuple, Dict, Any, List
+from typing import Optional, Tuple, Dict, Any
 from skimage.exposure import rescale_intensity # For a potential adjustment method
 
 from src.utils.common_exceptions import ImageProcessingError, ConfigError, DataValidationError
@@ -124,75 +123,6 @@ def calculate_well_brightness_peak(
     peak_proxy = np.median(bright_well_pixels)
     logger.debug(f"calculate_well_brightness_peak: Determined peak proxy: {peak_proxy:.2f} (from pixels >= {lower_bound_intensity:.2f})")
     return float(peak_proxy)
-
-def calc_avg_well_brightness_from_dir(
-    image_dir_path: str,
-    config_well_analysis: Dict[str, Any], 
-    max_images_to_sample: Optional[int] = None 
-) -> Optional[float]:
-    """
-    Calculates the average well background brightness peak from a directory of images.
-    """
-    if not os.path.isdir(image_dir_path):
-        logger.error(f"calc_avg_well_brightness_from_dir: Image directory not found: {image_dir_path}")
-        return None
-
-    cfg_well_id = config_well_analysis.get('well_identification')
-    cfg_peak_calc = config_well_analysis.get('brightness_peak_calculation')
-
-    if not cfg_well_id or not cfg_peak_calc:
-        logger.error("calc_avg_well_brightness_from_dir: Missing 'well_identification' or 'brightness_peak_calculation' in config.")
-        return None
-
-    min_intensity_peak_search = cfg_peak_calc.get('min_intensity_for_peak_search', 75)
-    percentile_peak_proxy = cfg_peak_calc.get('percentile_for_peak_proxy', 75)
-
-    all_peaks: List[float] = []
-    image_files = sorted([
-        f for f in os.listdir(image_dir_path) 
-        if f.lower().endswith(('.png', '.jpg', '.jpeg', '.tif', '.tiff'))
-    ])
-
-    if not image_files:
-        logger.warning(f"calc_avg_well_brightness_from_dir: No image files found in {image_dir_path}.")
-        return None
-
-    if max_images_to_sample is not None and len(image_files) > max_images_to_sample:
-        logger.info(f"calc_avg_well_brightness_from_dir: Sampling {max_images_to_sample} images from {len(image_files)}.")
-        image_files_to_process = list(np.random.choice(image_files, size=max_images_to_sample, replace=False))
-    else:
-        image_files_to_process = image_files
-    
-    logger.info(f"calc_avg_well_brightness_from_dir: Processing {len(image_files_to_process)} images for average brightness.")
-
-    for filename in image_files_to_process:
-        full_path = os.path.join(image_dir_path, filename)
-        try:
-            img_uint8_loaded = skimage.io.imread(full_path, as_gray=True) # as_gray=True returns float
-            if img_uint8_loaded is None: continue
-            img_uint8 = skimage.util.img_as_ubyte(img_uint8_loaded) # Convert to uint8
-
-            well_mask, _ = create_well_mask_black_plate(img_uint8, cfg_well_id)
-            if well_mask is not None:
-                peak = calculate_well_brightness_peak(
-                    img_uint8, well_mask,
-                    min_intensity_peak_search, percentile_peak_proxy
-                )
-                if peak is not None:
-                    all_peaks.append(peak)
-            else:
-                logger.debug(f"calc_avg_well_brightness_from_dir: Could not create well mask for {filename}, skipping peak calculation.")
-        except Exception as e:
-            logger.warning(f"calc_avg_well_brightness_from_dir: Error processing {filename}: {e}")
-            continue 
-            
-    if not all_peaks:
-        logger.warning("calc_avg_well_brightness_from_dir: No well brightness peaks could be determined from any image.")
-        return None
-
-    average_peak = float(np.mean(all_peaks))
-    logger.info(f"calc_avg_well_brightness_from_dir: Calculated average well brightness peak: {average_peak:.2f} from {len(all_peaks)} images.")
-    return average_peak
 
 def match_well_brightness(
     fg_img_uint8: np.ndarray,

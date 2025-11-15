@@ -25,7 +25,6 @@ from src.core.region_props_calculator import find_contours, calculate_contour_me
 from src.core.segmentation import generate_binary_mask_from_float_image
 from src.core.well_analysis import (
     create_well_mask_black_plate,
-    calc_avg_well_brightness_from_dir,
     match_well_brightness
 )
 
