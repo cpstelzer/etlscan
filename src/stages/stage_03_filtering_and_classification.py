@@ -116,11 +116,17 @@ def run_stage_03_filtering_and_classification(
         current_df = current_df[~rejected_mask]
         logger.info(f"Filter (Black Mask): {len(current_df)} particles remain.")
     
-    # Boundary filter placeholder
     if quality_filter_config.get('filter_on_boundary', True) and 'is_on_crop_boundary' in current_df.columns:
-         # This column is not yet produced by Stage 2, so this block will be skipped.
-         # Once implemented, the logic would be identical to the black mask filter.
-         pass
+        rejected_mask = current_df['is_on_crop_boundary'].fillna(False).astype(bool)
+        if save_rejected:
+            _save_rejected_crops(
+                current_df[rejected_mask],
+                s2_crops_dir,
+                os.path.join(output_dir_stage3, "rejected_by_boundary"),
+                "crop touches boundary",
+            )
+        current_df = current_df[~rejected_mask]
+        logger.info(f"Filter (Boundary Touch): {len(current_df)} particles remain.")
          
     # b. Sharpness Filter
     sharpness_filter_config = s3_config.get('sharpness_filter', {})
