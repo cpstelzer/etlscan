@@ -100,7 +100,7 @@ def perform_egg_analysis(
 
 def run_stage_04_biological_analysis(
     input_s3_csv_path: str,
-    s2_crops_dir: str,
+    stage3_crops_dir: str,
     output_dir_stage4: str,
     sample_id: str
 ) -> Optional[str]:
@@ -134,7 +134,7 @@ def run_stage_04_biological_analysis(
             logger.warning(f"Row {index} is missing 'crop_filename'. Skipping.")
             continue
             
-        crop_path = os.path.join(s2_crops_dir, crop_filename)
+        crop_path = os.path.join(stage3_crops_dir, crop_filename)
         if not os.path.exists(crop_path):
             logger.warning(f"Crop file not found: {crop_path}. Skipping.")
             continue

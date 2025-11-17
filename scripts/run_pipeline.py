@@ -135,7 +135,10 @@ def main():
         # Expected output file paths
         s1_final_csv_path = os.path.join(s1_output_dir, f"{current_sample_id}_stage1_tracked_particles.csv")
         s2_final_csv_path = os.path.join(s2_output_dir, f"{current_sample_id}_stage2_all_particle_features.csv")
-        s3_final_csv_path = os.path.join(s3_output_dir, f"{current_sample_id}_stage3_classified_good_particles.csv")
+        s2_final_particles_csv_path = os.path.join(s2_output_dir, 'final_particles.csv')
+        s2_final_particles_crops_dir = os.path.join(s2_output_dir, 'final_particles')
+        s3_final_csv_path = os.path.join(s3_output_dir, 'focussed_and_filtered.csv')
+        s3_filtered_crops_dir = os.path.join(s3_output_dir, 'focussed_and_filtered')
         s2_all_crops_dir_path = os.path.join(s2_output_dir, "stage2_all_particle_crops")
 
         try:
@@ -170,13 +173,19 @@ def main():
             # --- Stage 3: Filtering & Classification ---
             if run_s3:
                 logger.info(f">>> Starting Stage 3 for {current_sample_id} <<<")
-                if not os.path.exists(s2_final_csv_path):
-                    raise FileNotFoundError(f"Stage 2 output missing: {s2_final_csv_path}. Run Stage 2 first.")
-                
+                if not os.path.exists(s2_final_particles_csv_path):
+                    raise FileNotFoundError(
+                        f"Stage 2 final particles output missing: {s2_final_particles_csv_path}."
+                    )
+                if not os.path.isdir(s2_final_particles_crops_dir):
+                    raise FileNotFoundError(
+                        f"Stage 2 final particle crops directory missing: {s2_final_particles_crops_dir}."
+                    )
+
                 s3_result_path = run_stage_03_filtering_and_classification(
-                    input_s2_csv_path=s2_final_csv_path,
+                    input_final_particles_csv_path=s2_final_particles_csv_path,
                     output_dir_stage3=s3_output_dir,
-                    s2_crops_dir=s2_all_crops_dir_path,
+                    final_particles_crops_dir=s2_final_particles_crops_dir,
                     sample_id=current_sample_id
                 )
                 if not s3_result_path:
@@ -188,12 +197,14 @@ def main():
                 logger.info(f">>> Starting Stage 4 for {current_sample_id} <<<")
                 if not os.path.exists(s3_final_csv_path):
                     raise FileNotFoundError(f"Stage 3 output missing: {s3_final_csv_path}. Run Stage 3 first.")
-                if not os.path.isdir(s2_all_crops_dir_path):
-                    raise FileNotFoundError(f"Stage 2 particle crops directory missing: {s2_all_crops_dir_path}. Run Stage 2 first.")
+                if not os.path.isdir(s3_filtered_crops_dir):
+                    raise FileNotFoundError(
+                        f"Stage 3 filtered crops directory missing: {s3_filtered_crops_dir}."
+                    )
 
                 s4_result_path = run_stage_04_biological_analysis(
                     input_s3_csv_path=s3_final_csv_path,
-                    s2_crops_dir=s2_all_crops_dir_path,
+                    stage3_crops_dir=s3_filtered_crops_dir,
                     output_dir_stage4=s4_output_dir,
                     sample_id=current_sample_id
                 )
