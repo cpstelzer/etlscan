@@ -108,9 +108,12 @@ For an input batch named `batch_20240101` and sample `sample_A`, outputs land in
   - `{sample}_stage2_all_particle_features.csv` – full feature table for every tracked particle.
   - `stage2_all_particle_crops/` – normalized crops reused by later stages.
 - `stage3_filtering_classification/`
-  - `{sample}_stage3_classified_good_particles.csv` – records of particles that passed quality filters and model scoring. Contains `ml_probability` + `ml_label` columns that Stage 04 validates before running.
+  - `focussed_and_filtered.csv` – records of particles that passed quality filters and model scoring (only rows with `ml_label == 'accept'`). Includes `ml_probability` + `ml_label` columns that Stage 04 validates before running.
+  - `focussed_and_filtered/` – copy of every accepted crop to simplify manual review and Stage 04 feature consumption.
 - `stage4_biological_analysis/`
   - `{sample}_stage4_final_analysis.csv` plus visualization artifacts for downstream review.
+
+Each pipeline run also produces batch-level rollups at the project root: `<batch>.csv` aggregates all Stage 02 `final_particles.csv` tables, and `<batch>_stage3_focussed_and_filtered.csv` concatenates every Stage 03 `focussed_and_filtered.csv` so you can analyze the accepted particles across the full dataset without manually merging per-sample files.
 
 RF model files updated by `train_model.py` are stored under `models/` and automatically reused by Stage 03.
 
