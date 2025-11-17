@@ -1,1 +1,4 @@
 python scripts/run_pipeline.py --input_batch_dir C:/wellscanner/test --stages 1,2 --config config/pipeline_config.yml
+python scripts/train_model.py --config config/pipeline_config.yml --csv-files data/plate_a/focussed_and_filtered.csv data/plate_b/focussed_and_filtered.csv --label-column label
+python scripts/train_model.py --config config/pipeline_config.yml --csv-files data/plate_c/focussed_and_filtered.csv --labels-sidecar data/plate_labels.csv
+python scripts/train_model.py --config config/pipeline_config.yml --use-image-directories --good-image-dir data/training/good --bad-image-dir data/training/bad

@@ -2,12 +2,13 @@
 import os
 import sys
 import argparse
+import json
 import pandas as pd
 import numpy as np
 import logging
 import joblib
 import cv2
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, List, Tuple
 
 import matplotlib.pyplot as plt
 
@@ -120,20 +121,144 @@ def load_and_extract_from_directory(
             features = extract_features_for_single_image(image_path, system_config, s2_config)
             if features:
                 features_list.append(features)
-    
+
     df = pd.DataFrame(features_list)
     df['label'] = label
     return df
 
 
+def _load_label_sidecar(sidecar_path: str) -> Dict[str, Any]:
+    """Return a mapping from CSV base filename to label."""
+    if not os.path.exists(sidecar_path):
+        raise FileNotFoundError(f"Label sidecar not found: {sidecar_path}")
+
+    _, ext = os.path.splitext(sidecar_path)
+    ext = ext.lower()
+    if ext == '.json':
+        with open(sidecar_path, 'r') as f:
+            mapping = json.load(f)
+        if not isinstance(mapping, dict):
+            raise DataValidationError("Label sidecar JSON must contain an object mapping filename -> label.")
+        return mapping
+
+    mapping_df = pd.read_csv(sidecar_path)
+    column_candidates = [col for col in mapping_df.columns if col.lower() in {'source', 'filename', 'file', 'csv'}]
+    if not column_candidates or 'label' not in mapping_df.columns:
+        raise DataValidationError(
+            "Label sidecar CSV must contain a 'label' column and one of: source, filename, file, csv"
+        )
+    key_column = column_candidates[0]
+    return {str(row[key_column]): row['label'] for _, row in mapping_df.iterrows()}
+
+
+def _load_feature_table_from_csv(
+    csv_paths: List[str],
+    label_column: str,
+    labels_sidecar: Optional[str]
+) -> pd.DataFrame:
+    if not csv_paths:
+        raise DataValidationError("At least one focussed_and_filtered.csv file must be provided.")
+
+    label_lookup = {}
+    if labels_sidecar:
+        label_lookup = _load_label_sidecar(labels_sidecar)
+
+    frames = []
+    for csv_path in csv_paths:
+        if not os.path.exists(csv_path):
+            raise FileNotFoundError(f"CSV file not found: {csv_path}")
+        df = pd.read_csv(csv_path)
+        base_name = os.path.splitext(os.path.basename(csv_path))[0]
+
+        if label_column in df.columns:
+            df['label'] = df[label_column]
+            if label_column != 'label':
+                df = df.drop(columns=[label_column])
+        elif label_lookup:
+            if base_name not in label_lookup:
+                raise DataValidationError(
+                    f"Label sidecar does not contain an entry for {base_name} (from {csv_path})."
+                )
+            df['label'] = label_lookup[base_name]
+        else:
+            raise DataValidationError(
+                f"No label column '{label_column}' present in {csv_path} and no sidecar provided."
+            )
+
+        frames.append(df)
+
+    if not frames:
+        raise DataValidationError("No rows were loaded from the provided CSV files.")
+
+    combined = pd.concat(frames, ignore_index=True)
+    return combined
+
+
+def _normalize_feature_table(df: pd.DataFrame, label_column: str = 'label') -> Tuple[pd.DataFrame, pd.Series]:
+    if label_column not in df.columns:
+        raise DataValidationError(f"Label column '{label_column}' not found in data frame.")
+
+    y_raw = df[label_column]
+    y = pd.to_numeric(y_raw, errors='coerce')
+    if y.isna().any():
+        raise DataValidationError("Label column contains non-numeric values. Ensure labels are 0/1.")
+
+    X = df.drop(columns=[label_column])
+    id_like_cols = [
+        col for col in X.columns
+        if col.lower() in {'id', 'particle_id', 'sample_id', 'image_id', 'filename', 'file', 'source'}
+        or col.lower().endswith('_id')
+    ]
+    if id_like_cols:
+        X = X.drop(columns=id_like_cols)
+
+    numeric_X = X.select_dtypes(include=[np.number]).copy()
+    numeric_X.fillna(0, inplace=True)
+
+    if numeric_X.empty:
+        raise DataValidationError("No numeric feature columns remain after normalization.")
+
+    return numeric_X, y
+
+
 def main():
-    # ... (Setup and Data Loading sections are unchanged) ...
     parser = argparse.ArgumentParser(description="Train a new ML model on the rich feature set.")
     parser.add_argument(
         "--config",
         type=str,
         default=os.path.join(project_root, "config", "pipeline_config.yml"),
         help="Path to the pipeline configuration YAML file."
+    )
+    parser.add_argument(
+        "--csv-files",
+        nargs='+',
+        help="One or more focussed_and_filtered.csv files to use for training."
+    )
+    parser.add_argument(
+        "--label-column",
+        type=str,
+        default='label',
+        help="Name of the label column within the focussed_and_filtered.csv files."
+    )
+    parser.add_argument(
+        "--labels-sidecar",
+        type=str,
+        help="Optional JSON/CSV mapping from csv basename to label when no label column is present."
+    )
+    parser.add_argument(
+        "--use-image-directories",
+        action='store_true',
+        help="Enable legacy mode that extracts features directly from image directories."
+    )
+    parser.add_argument(
+        "--good-image-dir",
+        type=str,
+        help="Path to directory with GOOD training crops (legacy mode only)."
+    )
+    parser.add_argument(
+        "--bad-image-dir",
+        type=str,
+        help="Path to directory with BAD training crops (legacy mode only)."
     )
     args = parser.parse_args()
 
@@ -151,24 +276,30 @@ def main():
     system_config = config.get('system', {})
     training_params = s3_config.get('training_params', {})
     
-    training_data_dir = get_training_data_dir()
-    good_dir = os.path.join(training_data_dir, training_params.get('good_data_subdir', 'good'))
-    bad_dir = os.path.join(training_data_dir, training_params.get('bad_data_subdir', 'bad'))
+    if args.use_image_directories:
+        training_data_dir = get_training_data_dir()
+        good_dir = args.good_image_dir or os.path.join(
+            training_data_dir, training_params.get('good_data_subdir', 'good')
+        )
+        bad_dir = args.bad_image_dir or os.path.join(
+            training_data_dir, training_params.get('bad_data_subdir', 'bad')
+        )
 
-    good_df = load_and_extract_from_directory(good_dir, 1, system_config, s2_config)
-    bad_df = load_and_extract_from_directory(bad_dir, 0, system_config, s2_config)
+        good_df = load_and_extract_from_directory(good_dir, 1, system_config, s2_config)
+        bad_df = load_and_extract_from_directory(bad_dir, 0, system_config, s2_config)
 
-    if good_df.empty or bad_df.empty:
-        raise DataValidationError("One or both training directories are empty or failed processing. Cannot train.")
+        if good_df.empty or bad_df.empty:
+            raise DataValidationError("One or both training directories are empty or failed processing. Cannot train.")
 
-    full_df = pd.concat([good_df, bad_df], ignore_index=True)
-    
+        full_df = pd.concat([good_df, bad_df], ignore_index=True)
+    else:
+        if not args.csv_files:
+            raise DataValidationError("Provide --csv-files or enable --use-image-directories to supply training data.")
+        full_df = _load_feature_table_from_csv(args.csv_files, args.label_column, args.labels_sidecar)
+
     # --- Model Training ---
-    y = full_df['label']
-    X = full_df.drop(columns=['label'])
-    
-    X = X.select_dtypes(include=np.number)
-    X.fillna(0, inplace=True)
+    X, y = _normalize_feature_table(full_df, label_column='label')
+
     
     # --- MODIFICATION: Exclude features based on config ---
     prefixes_to_exclude = training_params.get('exclude_feature_prefixes', [])
