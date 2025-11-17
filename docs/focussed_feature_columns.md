@@ -54,10 +54,13 @@ that automated preprocessing can ignore them safely.
 - `energy_gradient`
 
 ## Stage 2 shape/texture descriptors
-Stage 2 generates 20 LBP histogram bins (two radii, ten bins each) by default.
-These columns are named sequentially as:
+Stage 2 generates Local Binary Pattern (LBP) histogram bins using the
+`stage_02_characterization.shape_descriptors` configuration. The number of bins
+equals `len(lbp_radii) * (lbp_points + 2)`, so increasing the number of radii or
+LBP points automatically expands the schema. These columns are named
+sequentially, e.g.:
 
-- `lbp_0` through `lbp_19`
+- `lbp_0` through `lbp_19` (default config with two radii and eight points)
 
 Boolean quality guards (`has_black_mask_artifact`, `is_on_crop_boundary`) are
 kept alongside these numeric features but are intentionally omitted from the
