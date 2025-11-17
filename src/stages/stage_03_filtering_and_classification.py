@@ -14,8 +14,57 @@ from src.utils import (
     save_dataframe_to_csv,
 )
 from src.utils.common_exceptions import ConfigError, MLModelError
+from src.utils import get_config, load_dataframe_from_csv, save_dataframe_to_csv
+from src.utils.common_exceptions import ConfigError, DataValidationError
 
 logger = logging.getLogger(__name__)
+
+
+NUMERIC_FEATURE_COLUMNS: List[str] = [
+    # Stage 1 geometric/positional columns
+    'frame', 'X', 'Y', 'x_mm', 'y_mm', 'z_mm', 'dioptries',
+    'local_threshold_value', 'bounding_x', 'bounding_y', 'bounding_w', 'bounding_h',
+    'rot_rect_width', 'rot_rect_height', 'rot_rect_angle', 'rot_rect_area',
+    's1_area', 's1_perimeter', 's1_orientation', 's1_aspect_ratio', 's1_solidity',
+    's1_eccentricity', 's1_feret_diameter', 's1_circularity', 's1_equivalent_diameter',
+    # Stage 2 morphology metrics
+    'main_area_raw', 'solidity', 'compactness_rect', 'extent_raw', 'eccentricity_raw',
+    'equivalent_diameter_raw', 'major_axis_length_raw', 'minor_axis_length_raw',
+    'main_area_filled', 'porosity', 'hu_moment1', 'moment_of_inertia_xx',
+    'moment_of_inertia_yy', 'moment_of_inertia_xy', 'type_factor',
+    'heywood_circularity_factor', 'elongation_factor', 'compactness_factor_ni',
+    # Stage 2 quality metrics
+    'variance_laplacian', 'tenengrad_variance', 'energy_laplacian', 'energy_gradient',
+]
+NUMERIC_FEATURE_COLUMNS.extend([f'lbp_{i}' for i in range(20)])
+
+METADATA_COLUMNS: List[str] = [
+    'SAMPLE_ID', 'source_image_filename', 'crop_filename', 'final_crop_filename', 'track_id'
+]
+METADATA_PREFIX = 'meta__'
+
+
+def _validate_required_feature_columns(df: pd.DataFrame) -> None:
+    """Ensure Stage 3 receives the expected numeric feature set."""
+
+    missing = [col for col in NUMERIC_FEATURE_COLUMNS if col not in df.columns]
+    if missing:
+        raise DataValidationError(
+            "Stage 3 cannot proceed because the following feature columns are missing: "
+            + ', '.join(sorted(missing))
+        )
+
+
+def _rename_metadata_columns(df: pd.DataFrame) -> pd.DataFrame:
+    """Prefix metadata/identifier columns so ML preprocessing can ignore them."""
+
+    rename_map = {}
+    for col in METADATA_COLUMNS:
+        if col in df.columns and not col.startswith(METADATA_PREFIX):
+            rename_map[col] = f"{METADATA_PREFIX}{col}"
+    if rename_map:
+        df = df.rename(columns=rename_map)
+    return df
 
 
 def _copy_filtered_crops(
@@ -141,6 +190,7 @@ def run_stage_03_filtering_and_classification(
         )
         return None
 
+    _validate_required_feature_columns(final_particles_df)
     logger.info("Loaded %d particles from Stage 2 final output.", len(final_particles_df))
 
     initial_particle_count = len(final_particles_df)
@@ -218,6 +268,8 @@ def run_stage_03_filtering_and_classification(
 
     stage3_crops_dir = os.path.join(output_dir_stage3, 'focussed_and_filtered')
     _copy_filtered_crops(filtered_df, final_particles_crops_dir, stage3_crops_dir)
+
+    filtered_df = _rename_metadata_columns(filtered_df)
 
     output_filename = 'focussed_and_filtered.csv'
     saved_csv_path = save_dataframe_to_csv(filtered_df, output_dir_stage3, output_filename)
