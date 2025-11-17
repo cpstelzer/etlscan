@@ -1,0 +1,114 @@
+import os
+from pathlib import Path
+
+import joblib
+import numpy as np
+import pandas as pd
+import pytest
+import yaml
+from sklearn.linear_model import LogisticRegression
+from sklearn.preprocessing import StandardScaler
+
+from src.stages.stage_03_filtering_and_classification import (
+    run_stage_03_filtering_and_classification,
+)
+from src.utils import config_loader
+
+
+@pytest.fixture(autouse=True)
+def _reset_config():
+    """Ensure each test starts with a clean configuration cache."""
+    config_loader._config = {}
+    yield
+    config_loader._config = {}
+
+
+def _write_config(tmp_path: Path) -> Path:
+    config_path = tmp_path / "pipeline_config.yml"
+    config_data = {
+        'project_base_dir': str(tmp_path),
+        'sample_subdir_name': 'sample_A',
+        'stage_03_filtering_and_classification': {
+            'model_filename': 'dummy_model.joblib',
+            'scaler_filename': 'dummy_scaler.joblib',
+            'ml_filter': {'min_probability_threshold': 0.25},
+            'quality_flags_filter': {
+                'filter_on_boundary': False,
+                'filter_black_mask': False,
+            },
+            'sharpness_filter': {
+                'enabled': False,
+            },
+        },
+    }
+    with open(config_path, 'w', encoding='utf-8') as handle:
+        yaml.safe_dump(config_data, handle)
+    return config_path
+
+
+def _write_dummy_model_artifacts(tmp_path: Path) -> None:
+    models_dir = tmp_path / 'models'
+    models_dir.mkdir(parents=True, exist_ok=True)
+
+    X = np.array(
+        [
+            [0.1, 0.2],
+            [0.2, 0.3],
+            [0.8, 0.9],
+            [0.9, 1.0],
+        ]
+    )
+    y = np.array([0, 0, 1, 1])
+
+    scaler = StandardScaler().fit(X)
+    model = LogisticRegression(max_iter=1000).fit(scaler.transform(X), y)
+
+    joblib.dump(model, models_dir / 'dummy_model.joblib')
+    joblib.dump(scaler, models_dir / 'dummy_scaler.joblib')
+
+    feature_file = models_dir / 'dummy_model_feature_names.txt'
+    with open(feature_file, 'w', encoding='utf-8') as handle:
+        handle.write('feature_a\n')
+        handle.write('feature_b\n')
+
+
+def test_stage3_writes_ml_columns(tmp_path: Path):
+    config_path = _write_config(tmp_path)
+    _write_dummy_model_artifacts(tmp_path)
+    config_loader.load_config(str(config_path))
+
+    stage2_df = pd.DataFrame(
+        {
+            'final_crop_filename': ['crop0.png', 'crop1.png'],
+            'has_black_mask_artifact': [False, False],
+            'is_on_crop_boundary': [False, False],
+            'variance_laplacian': [100, 120],
+            'feature_a': [0.95, 0.85],
+            'feature_b': [0.90, 0.80],
+        }
+    )
+
+    input_csv = tmp_path / 'stage2_final.csv'
+    stage2_df.to_csv(input_csv, index=False)
+
+    crops_dir = tmp_path / 'stage2_crops'
+    crops_dir.mkdir()
+    for crop_name in stage2_df['final_crop_filename']:
+        (crops_dir / crop_name).write_bytes(b'00')
+
+    stage3_output_dir = tmp_path / 'stage3'
+    stage3_output_dir.mkdir()
+
+    saved_csv = run_stage_03_filtering_and_classification(
+        str(input_csv),
+        str(stage3_output_dir),
+        str(crops_dir),
+        sample_id='sample_A',
+    )
+
+    assert saved_csv is not None
+    result_df = pd.read_csv(saved_csv)
+    assert 'ml_probability' in result_df.columns
+    assert 'ml_label' in result_df.columns
+    assert (result_df['ml_probability'] >= 0.25).all()
+    assert set(result_df['ml_label'].unique()) == {'accept'}

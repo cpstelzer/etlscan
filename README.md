@@ -8,8 +8,8 @@ Automated pipeline for processing well-plate microscopy batches. The system inge
 | --- | --- | --- |
 | 1. Detection & tracking | `src/stages/stage_01_initial_detection.py` | Scans the input sample directory, performs background subtraction, extracts particle tracks, and writes the initial CSV of candidates. |
 | 2. Universal characterization | `src/stages/stage_02_characterization.py` | Re-crops every tracked particle, re-segments the organism, and aggregates sharpness, morphology, and quality metrics along with the normalized particle crops. |
-| 3. Filtering & classification | `src/stages/stage_03_filtering_and_classification.py` | Applies configurable quality/sharpness gates, loads the RandomForest model & scaler from `models/`, and emits the list of accepted particles. |
-| 4. Biological analysis & visualization | `src/stages/stage_04_biological_analysis.py` | Revisits the Stage 02 crops for the accepted particles, estimates egg metrics, and renders annotated review panels through `src/visualization/feature_visualization.py`. |
+| 3. Filtering & classification | `src/stages/stage_03_filtering_and_classification.py` | Applies configurable quality/sharpness gates, scores every particle with the RandomForest model + scaler from `models/`, writes the `ml_probability`/`ml_label` columns, and emits the Stage 04-ready subset. |
+| 4. Biological analysis & visualization | `src/stages/stage_04_biological_analysis.py` | Revisits the Stage 02 crops for the accepted particles, validates that classifier metadata is present, estimates egg metrics, and renders annotated review panels through `src/visualization/feature_visualization.py`. |
 
 Supporting tooling:
 
@@ -59,7 +59,7 @@ The YAML file at `config/pipeline_config.yml` controls the entire pipeline. Key 
 - `project_base_dir`: absolute path to the repository root.
 - Stage-specific blocks (`stage_01_initial_detection`, `stage_02_characterization`, `stage_03_filtering_and_classification`, `stage_04_biological_analysis`) that tune detection, cropping, filtering, classifier thresholds, and visualization options.
 - `stage_02_characterization.quality_features.black_mask_check` exposes `min_area_ratio`, `max_black_pixel_value`, and `min_edge_thickness_fraction`, which control how aggressively `detect_black_mask_artifact` flags dark corner occlusions.
-- Paths to the trained RF model (`models/rf_fem_classifier.joblib`), scaler, and feature-name list consumed by Stage 03.
+- Paths to the trained RF model (`models/rf_fem_classifier.joblib`), scaler, and feature-name list consumed by Stage 03. These artifacts are required so Stage 03 can populate `ml_probability`/`ml_label`, which Stage 04 refuses to run without.
 
 ## Preparing data
 
@@ -83,6 +83,14 @@ Important CLI options:
 - `--config`: Optional path to a custom YAML config (defaults to `config/pipeline_config.yml`).
 - `--stages`: Comma-separated list from `{1,2,3,4}` or `all` to control which stage modules run. Dependencies are enforced, so Stage n requires outputs from Stage n−1.
 
+## ML classification workflow
+
+Stage 03 is split into three segments: (1) deterministic quality filters, (2) ML scoring, and (3) exporting/plotting helpers.
+
+1. **Model artifacts** – `scripts/train_model.py` learns a RandomForest using the Stage 02 feature set, writes `models/rf_fem_classifier.joblib`, `models/rf_fem_scaler.joblib`, and `models/rf_fem_classifier_feature_names.txt`. Stage 03 loads all three files via `get_models_dir()`; missing artifacts raise `MLModelError`.
+2. **Runtime scoring** – `stage_03_filtering_and_classification.run_stage_03_filtering_and_classification` automatically attaches `ml_probability` (positive-class score) and `ml_label` ("accept"/"reject" decision based on `ml_filter.min_probability_threshold`). The CSV written to `stage3_filtering_classification/focussed_and_filtered.csv` only contains rows where `ml_label == 'accept'`, but the probability column is preserved for downstream auditing.
+3. **Diagnostics** – Analysts can call `plot_probability_histogram` or `plot_roc_curve` from `src/visualization/feature_visualization.py` to summarize new runs. The helpers accept raw probability arrays / `(y_true, y_score)` pairs and emit PNGs beside other review artifacts.
+
 For classifier retraining run:
 
 ```
@@ -100,7 +108,7 @@ For an input batch named `batch_20240101` and sample `sample_A`, outputs land in
   - `{sample}_stage2_all_particle_features.csv` – full feature table for every tracked particle.
   - `stage2_all_particle_crops/` – normalized crops reused by later stages.
 - `stage3_filtering_classification/`
-  - `{sample}_stage3_classified_good_particles.csv` – records of particles that passed quality filters and model scoring.
+  - `{sample}_stage3_classified_good_particles.csv` – records of particles that passed quality filters and model scoring. Contains `ml_probability` + `ml_label` columns that Stage 04 validates before running.
 - `stage4_biological_analysis/`
   - `{sample}_stage4_final_analysis.csv` plus visualization artifacts for downstream review.
 

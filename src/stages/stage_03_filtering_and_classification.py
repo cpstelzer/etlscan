@@ -266,13 +266,49 @@ def run_stage_03_filtering_and_classification(
             "No crop filename column found in Stage 2 output; downstream stages may fail."
         )
 
+    ml_filter_cfg = s3_config.get('ml_filter', {})
+    probability_threshold = float(ml_filter_cfg.get('min_probability_threshold', 0.5))
+
+    try:
+        model, scaler, feature_names = _load_ml_artifacts(s3_config)
+    except MLModelError as exc:
+        logger.error("Failed to load ML artifacts for Stage 3: %s", exc)
+        raise
+
+    if not filtered_df.empty:
+        probabilities = _score_particles_with_model(filtered_df, model, scaler, feature_names)
+        filtered_df['ml_probability'] = probabilities
+        filtered_df['ml_label'] = np.where(
+            filtered_df['ml_probability'] >= probability_threshold, 'accept', 'reject'
+        )
+        _log_probability_summary(probabilities, sample_id, probability_threshold)
+        label_counts = filtered_df['ml_label'].value_counts(dropna=False).to_dict()
+        logger.info(
+            "Stage 3 ML label distribution before thresholding for %s: %s",
+            sample_id,
+            label_counts,
+        )
+    else:
+        filtered_df['ml_probability'] = pd.Series(dtype=float)
+        filtered_df['ml_label'] = pd.Series(dtype=str)
+
+    accepted_mask = filtered_df['ml_label'] == 'accept'
+    accepted_df = filtered_df.loc[accepted_mask].reset_index(drop=True)
+
+    if accepted_df.empty:
+        logger.warning(
+            "All particles rejected by Stage 3 ML filter for sample %s (threshold %.2f).",
+            sample_id,
+            probability_threshold,
+        )
+
     stage3_crops_dir = os.path.join(output_dir_stage3, 'focussed_and_filtered')
-    _copy_filtered_crops(filtered_df, final_particles_crops_dir, stage3_crops_dir)
+    _copy_filtered_crops(accepted_df, final_particles_crops_dir, stage3_crops_dir)
 
     filtered_df = _rename_metadata_columns(filtered_df)
 
     output_filename = 'focussed_and_filtered.csv'
-    saved_csv_path = save_dataframe_to_csv(filtered_df, output_dir_stage3, output_filename)
+    saved_csv_path = save_dataframe_to_csv(accepted_df, output_dir_stage3, output_filename)
 
     logger.info(
         "Stage 3 summary for %s -> start: %d, quality removed: %d, ML removed: %d, saved: %d",
