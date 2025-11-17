@@ -7,10 +7,10 @@ rows tied to each crop.  The recovered rows are combined into a single CSV that
 
 Usage example::
 
-    python scripts/build_manual_labels_csv.py \
-        --config config/pipeline_config.yml \
-        --stage3-root data/output/size_AS1_L1 \
-        --output-csv data/training_data/manual_labels.csv
+    python scripts/build_manual_labels_csv.py --config config/pipeline_config.yml \
+        --stage3-root C:/sandbox --good-dir C:/sandbox/data/training_data/good \
+            --bad-dir C:/sandbox/data/training_data/bad \
+                --output-csv C:/sandbox/data/training_data/manual_labels.csv
 
 The script expects manually curated crops in ``data/training_data/good`` and
 ``data/training_data/bad`` by default.  Each PNG name embeds the Stage-03 sample

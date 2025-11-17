@@ -1,3 +1,23 @@
+"""
+
+scripts/train_model.py will merge the labeled rows, normalize the numeric features, 
+sweep the RandomForest hyperparameters, and then save the trained model, scaler, 
+feature-importance chart, and feature-name list under models/. 
+
+These artifacts are what Stage 03 consumes during normal pipeline runs, so rerunning 
+the pipeline afterward will automatically pick up the new classifier. Keep your repo’s 
+config/pipeline_config.yml handy, because that file tells the trainer where to store/load 
+the artifacts and which Stage 02 feature definitions to use.
+
+If you later curate additional batches, simply append their Stage‑03 CSVs (or a regenerated 
+manual_labels.csv) to the --csv-files list so the trainer can see all labeled rows in one go.
+
+Usage example:
+python scripts/train_model.py --config config/pipeline_config.yml --csv-files C:/sandbox/data/training_data/manual_labels.csv --label-column label
+
+
+"""
+
 # scripts/train_model.py
 import os
 import sys
