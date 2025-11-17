@@ -4,8 +4,16 @@ import os
 import shutil
 from typing import List, Optional
 
+import joblib
 import pandas as pd
 
+from src.utils import (
+    get_config,
+    get_models_dir,
+    load_dataframe_from_csv,
+    save_dataframe_to_csv,
+)
+from src.utils.common_exceptions import ConfigError, MLModelError
 from src.utils import get_config, load_dataframe_from_csv, save_dataframe_to_csv
 from src.utils.common_exceptions import ConfigError, DataValidationError
 
@@ -96,107 +104,65 @@ def _copy_filtered_crops(
     )
 
 
-def _read_feature_names(feature_file: str) -> Optional[List[str]]:
-    if not os.path.exists(feature_file):
-        logger.warning(
-            "Feature-name list missing at %s. Falling back to numeric columns order.",
-            feature_file,
-        )
-        return None
-
-    with open(feature_file, "r", encoding="utf-8") as handle:
-        names = [line.strip() for line in handle if line.strip()]
-    if not names:
-        logger.warning(
-            "Feature-name list at %s is empty. Falling back to numeric columns order.",
-            feature_file,
-        )
-        return None
-    return names
-
-
-def _load_ml_artifacts(s3_config: dict) -> Tuple[object, object, Optional[List[str]]]:
+def _load_ml_artifacts(s3_config: dict) -> tuple:
+    """Load the ML model, scaler, and feature list used during training."""
     models_dir = get_models_dir()
-    model_filename = s3_config.get("model_filename", "rf_fem_classifier.joblib")
-    scaler_filename = s3_config.get("scaler_filename", "rf_fem_scaler.joblib")
+    model_filename = s3_config.get('model_filename', 'rf_fem_classifier.joblib')
+    scaler_filename = s3_config.get('scaler_filename', 'rf_fem_scaler.joblib')
     model_path = os.path.join(models_dir, model_filename)
     scaler_path = os.path.join(models_dir, scaler_filename)
-    feature_file = model_path.replace(".joblib", "_feature_names.txt")
+    feature_names_filename = f"{os.path.splitext(model_filename)[0]}_feature_names.txt"
+    feature_names_path = os.path.join(models_dir, feature_names_filename)
 
     if not os.path.exists(model_path):
-        raise MLModelError(f"Stage 3 model artifact missing: {model_path}")
+        raise MLModelError(
+            f"ML model file not found at {model_path}. Train the model or update the configuration."
+        )
     if not os.path.exists(scaler_path):
-        raise MLModelError(f"Stage 3 scaler artifact missing: {scaler_path}")
+        raise MLModelError(
+            f"Scaler file not found at {scaler_path}. Ensure training saved the scaler correctly."
+        )
+    if not os.path.exists(feature_names_path):
+        raise MLModelError(
+            "Feature names file missing. Expected at "
+            f"{feature_names_path}. Re-train or copy the feature list from training output."
+        )
 
-    logger.info("Loading Stage 3 classifier from %s", model_path)
-    model = joblib.load(model_path)
-    scaler = joblib.load(scaler_path)
-    feature_names = _read_feature_names(feature_file)
+    try:
+        model = joblib.load(model_path)
+    except Exception as exc:  # pragma: no cover - defensive logging
+        raise MLModelError(f"Failed to load ML model from {model_path}: {exc}") from exc
+
+    try:
+        scaler = joblib.load(scaler_path)
+    except Exception as exc:  # pragma: no cover - defensive logging
+        raise MLModelError(f"Failed to load scaler from {scaler_path}: {exc}") from exc
+
+    with open(feature_names_path, 'r', encoding='utf-8') as handle:
+        feature_names: List[str] = [line.strip() for line in handle if line.strip()]
+
+    if not feature_names:
+        raise MLModelError(
+            f"Feature names list at {feature_names_path} is empty; cannot align ML features."
+        )
+
     return model, scaler, feature_names
 
 
-def _prepare_feature_matrix(
-    df: pd.DataFrame,
-    feature_names: Optional[Sequence[str]],
-) -> Tuple[pd.DataFrame, List[str]]:
-    numeric_df = df.select_dtypes(include=[np.number]).copy()
-    numeric_df.fillna(0, inplace=True)
+def _prepare_ml_features(df: pd.DataFrame, feature_names: List[str]) -> pd.DataFrame:
+    """Align dataframe columns with feature names used during training."""
+    missing_columns = [col for col in feature_names if col not in df.columns]
+    if missing_columns:
+        sample_missing = ', '.join(missing_columns[:10])
+        logger.warning(
+            "Missing %d ML feature columns in Stage 2 output (showing up to 10): %s. Filling with zeros.",
+            len(missing_columns),
+            sample_missing,
+        )
 
-    if feature_names:
-        missing = [name for name in feature_names if name not in numeric_df.columns]
-        if missing:
-            logger.warning(
-                "%d configured features missing from Stage 2 CSV; filling with zeros: %s",
-                len(missing),
-                ", ".join(missing[:10]),
-            )
-        feature_df = numeric_df.reindex(columns=list(feature_names), fill_value=0)
-        ordered_names = list(feature_names)
-    else:
-        if numeric_df.empty:
-            raise MLModelError("No numeric columns available for ML scoring in Stage 3 input.")
-        ordered_names = numeric_df.columns.tolist()
-        feature_df = numeric_df
-
-    return feature_df, ordered_names
-
-
-def _score_particles_with_model(
-    df: pd.DataFrame,
-    model: object,
-    scaler: object,
-    feature_names: Optional[Sequence[str]],
-) -> pd.Series:
-    feature_df, ordered_names = _prepare_feature_matrix(df, feature_names)
-    logger.debug("Scoring particles with %d ML features.", len(ordered_names))
-    scaled_values = scaler.transform(feature_df.values)
-
-    if hasattr(model, "predict_proba"):
-        probabilities = model.predict_proba(scaled_values)[:, -1]
-    elif hasattr(model, "decision_function"):
-        decision_values = model.decision_function(scaled_values)
-        probabilities = 1 / (1 + np.exp(-decision_values))
-    else:
-        raise MLModelError("Loaded model lacks predict_proba/decision_function for probability scoring.")
-
-    return pd.Series(probabilities, index=df.index, name="ml_probability")
-
-
-def _log_probability_summary(probabilities: pd.Series, sample_id: str, threshold: float) -> None:
-    if probabilities.empty:
-        return
-    summary = {
-        "min": float(probabilities.min()),
-        "median": float(probabilities.median()),
-        "max": float(probabilities.max()),
-        "mean": float(probabilities.mean()),
-    }
-    logger.info(
-        "Stage 3 ML probability summary for %s (threshold %.2f): %s",
-        sample_id,
-        threshold,
-        summary,
-    )
+    aligned = df.reindex(columns=feature_names)
+    aligned = aligned.apply(pd.to_numeric, errors='coerce').fillna(0.0)
+    return aligned
 
 
 def run_stage_03_filtering_and_classification(
@@ -227,6 +193,7 @@ def run_stage_03_filtering_and_classification(
     _validate_required_feature_columns(final_particles_df)
     logger.info("Loaded %d particles from Stage 2 final output.", len(final_particles_df))
 
+    initial_particle_count = len(final_particles_df)
     filtered_df = final_particles_df.copy()
 
     if 'has_black_mask_artifact' in filtered_df.columns:
@@ -247,8 +214,49 @@ def run_stage_03_filtering_and_classification(
 
     filtered_df = filtered_df.reset_index(drop=True)
 
+    quality_removed_count = initial_particle_count - len(filtered_df)
+
     if filtered_df.empty:
         logger.warning("No particles remain after Stage 3 quality filtering.")
+
+    ml_rejected_count = 0
+
+    if not filtered_df.empty:
+        model, scaler, feature_names = _load_ml_artifacts(s3_config)
+        feature_matrix = _prepare_ml_features(filtered_df, feature_names)
+
+        try:
+            scaled_features = scaler.transform(feature_matrix)
+        except Exception as exc:  # pragma: no cover - defensive
+            raise MLModelError(f"Scaler failed to transform Stage 3 features: {exc}") from exc
+
+        if not hasattr(model, 'predict_proba'):
+            raise MLModelError("Loaded ML model does not support probability predictions.")
+
+        probabilities = model.predict_proba(scaled_features)[:, 1]
+        filtered_df['ml_probability'] = probabilities
+
+        ml_filter_config = s3_config.get('ml_filter', {})
+        probability_threshold = ml_filter_config.get('min_probability_threshold', 0.5)
+        filtered_df['ml_label'] = (filtered_df['ml_probability'] >= probability_threshold).astype(int)
+
+        ml_mask = filtered_df['ml_probability'] >= probability_threshold
+        ml_rejected_count = int((~ml_mask).sum())
+        filtered_df = filtered_df.loc[ml_mask].reset_index(drop=True)
+
+        if filtered_df.empty:
+            logger.warning(
+                "All particles (%d) were rejected by the ML filter (threshold=%.2f).",
+                ml_rejected_count,
+                probability_threshold,
+            )
+        else:
+            logger.info(
+                "Applied ML filter with threshold %.2f. %d particles rejected, %d remain.",
+                probability_threshold,
+                ml_rejected_count,
+                len(filtered_df),
+            )
 
     if 'final_crop_filename' in filtered_df.columns:
         filtered_df['crop_filename'] = filtered_df['final_crop_filename']
@@ -303,8 +311,11 @@ def run_stage_03_filtering_and_classification(
     saved_csv_path = save_dataframe_to_csv(accepted_df, output_dir_stage3, output_filename)
 
     logger.info(
-        "--- Stage 3: Filtering & Classification for %s COMPLETED. Saved %d particles. ---",
+        "Stage 3 summary for %s -> start: %d, quality removed: %d, ML removed: %d, saved: %d",
         sample_id,
-        len(accepted_df),
+        initial_particle_count,
+        quality_removed_count,
+        ml_rejected_count,
+        len(filtered_df),
     )
     return saved_csv_path
