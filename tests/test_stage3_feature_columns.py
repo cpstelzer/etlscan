@@ -2,6 +2,7 @@ import pandas as pd
 import pytest
 
 from src.stages.stage_03_filtering_and_classification import (
+    BASE_NUMERIC_FEATURE_COLUMNS,
     METADATA_COLUMNS,
     METADATA_PREFIX,
     _get_expected_numeric_feature_columns,
@@ -52,3 +53,38 @@ def test_lbp_columns_expand_with_config():
     df = pd.DataFrame({col: [0] for col in expected_columns})
     # Should not raise with the matching config
     _validate_required_feature_columns(df, config=custom_config)
+
+
+def _build_numeric_df(lbp_count: int) -> pd.DataFrame:
+    data = {col: [0] for col in BASE_NUMERIC_FEATURE_COLUMNS}
+    for i in range(lbp_count):
+        data[f'lbp_{i}'] = [i]
+    return pd.DataFrame(data)
+
+
+def test_validate_allows_superset_lbp_columns():
+    df = _build_numeric_df(lbp_count=36)
+    narrow_config = {
+        'stage_02_characterization': {
+            'shape_descriptors': {
+                'lbp_radii': [1],
+                'lbp_points': 8,
+            }
+        }
+    }
+    # Observed LBP columns exceed what the config expects; this should be allowed.
+    _validate_required_feature_columns(df, config=narrow_config)
+
+
+def test_validate_detects_missing_lbp_columns():
+    df = _build_numeric_df(lbp_count=3)
+    config = {
+        'stage_02_characterization': {
+            'shape_descriptors': {
+                'lbp_radii': [1],
+                'lbp_points': 4,  # Expect 6 columns
+            }
+        }
+    }
+    with pytest.raises(DataValidationError):
+        _validate_required_feature_columns(df, config=config)
