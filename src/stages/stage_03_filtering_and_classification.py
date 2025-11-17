@@ -5,6 +5,7 @@ import shutil
 from typing import List, Optional
 
 import joblib
+import numpy as np
 import pandas as pd
 
 from src.utils import (
@@ -188,6 +189,46 @@ def _prepare_ml_features(df: pd.DataFrame, feature_names: List[str]) -> pd.DataF
     return aligned
 
 
+def _score_particles_with_model(
+    df: pd.DataFrame,
+    model,
+    scaler,
+    feature_names: List[str],
+) -> np.ndarray:
+    """Scale Stage 3 features and compute positive-class probabilities."""
+
+    feature_matrix = _prepare_ml_features(df, feature_names)
+
+    try:
+        scaled_features = scaler.transform(feature_matrix)
+    except Exception as exc:  # pragma: no cover - defensive logging
+        raise MLModelError(f"Scaler failed to transform Stage 3 features: {exc}") from exc
+
+    if not hasattr(model, 'predict_proba'):
+        raise MLModelError("Loaded ML model does not support probability predictions.")
+
+    probabilities = model.predict_proba(scaled_features)[:, 1]
+    return probabilities
+
+
+def _log_probability_summary(
+    probabilities: np.ndarray, sample_id: str, threshold: float
+) -> None:
+    """Emit a concise summary of the ML probability distribution for diagnostics."""
+
+    if probabilities.size == 0:
+        return
+
+    summary = {
+        'min': float(np.min(probabilities)),
+        'max': float(np.max(probabilities)),
+        'mean': float(np.mean(probabilities)),
+        'median': float(np.median(probabilities)),
+        'threshold': float(threshold),
+    }
+    logger.info("Stage 3 ML probability summary for %s: %s", sample_id, summary)
+
+
 def run_stage_03_filtering_and_classification(
     input_final_particles_csv_path: str,
     output_dir_stage3: str,
@@ -243,63 +284,19 @@ def run_stage_03_filtering_and_classification(
         logger.warning("No particles remain after Stage 3 quality filtering.")
 
     ml_rejected_count = 0
-
-    if not filtered_df.empty:
-        model, scaler, feature_names = _load_ml_artifacts(s3_config)
-        feature_matrix = _prepare_ml_features(filtered_df, feature_names)
-
-        try:
-            scaled_features = scaler.transform(feature_matrix)
-        except Exception as exc:  # pragma: no cover - defensive
-            raise MLModelError(f"Scaler failed to transform Stage 3 features: {exc}") from exc
-
-        if not hasattr(model, 'predict_proba'):
-            raise MLModelError("Loaded ML model does not support probability predictions.")
-
-        probabilities = model.predict_proba(scaled_features)[:, 1]
-        filtered_df['ml_probability'] = probabilities
-
-        ml_filter_config = s3_config.get('ml_filter', {})
-        probability_threshold = ml_filter_config.get('min_probability_threshold', 0.5)
-        filtered_df['ml_label'] = (filtered_df['ml_probability'] >= probability_threshold).astype(int)
-
-        ml_mask = filtered_df['ml_probability'] >= probability_threshold
-        ml_rejected_count = int((~ml_mask).sum())
-        filtered_df = filtered_df.loc[ml_mask].reset_index(drop=True)
-
-        if filtered_df.empty:
-            logger.warning(
-                "All particles (%d) were rejected by the ML filter (threshold=%.2f).",
-                ml_rejected_count,
-                probability_threshold,
-            )
-        else:
-            logger.info(
-                "Applied ML filter with threshold %.2f. %d particles rejected, %d remain.",
-                probability_threshold,
-                ml_rejected_count,
-                len(filtered_df),
-            )
-
-    if 'final_crop_filename' in filtered_df.columns:
-        filtered_df['crop_filename'] = filtered_df['final_crop_filename']
-    elif 'crop_filename' not in filtered_df.columns:
-        filtered_df['crop_filename'] = None
-        logger.warning(
-            "No crop filename column found in Stage 2 output; downstream stages may fail."
-        )
-
     ml_filter_cfg = s3_config.get('ml_filter', {})
     probability_threshold = float(ml_filter_cfg.get('min_probability_threshold', 0.5))
 
-    try:
-        model, scaler, feature_names = _load_ml_artifacts(s3_config)
-    except MLModelError as exc:
-        logger.error("Failed to load ML artifacts for Stage 3: %s", exc)
-        raise
-
     if not filtered_df.empty:
-        probabilities = _score_particles_with_model(filtered_df, model, scaler, feature_names)
+        try:
+            model, scaler, feature_names = _load_ml_artifacts(s3_config)
+        except MLModelError as exc:
+            logger.error("Failed to load ML artifacts for Stage 3: %s", exc)
+            raise
+
+        probabilities = _score_particles_with_model(
+            filtered_df, model, scaler, feature_names
+        )
         filtered_df['ml_probability'] = probabilities
         filtered_df['ml_label'] = np.where(
             filtered_df['ml_probability'] >= probability_threshold, 'accept', 'reject'
@@ -311,12 +308,21 @@ def run_stage_03_filtering_and_classification(
             sample_id,
             label_counts,
         )
+        accepted_mask = filtered_df['ml_label'] == 'accept'
+        ml_rejected_count = int((~accepted_mask).sum())
+        accepted_df = filtered_df.loc[accepted_mask].reset_index(drop=True)
     else:
         filtered_df['ml_probability'] = pd.Series(dtype=float)
         filtered_df['ml_label'] = pd.Series(dtype=str)
+        accepted_df = filtered_df
 
-    accepted_mask = filtered_df['ml_label'] == 'accept'
-    accepted_df = filtered_df.loc[accepted_mask].reset_index(drop=True)
+    if 'final_crop_filename' in accepted_df.columns:
+        accepted_df['crop_filename'] = accepted_df['final_crop_filename']
+    elif 'crop_filename' not in accepted_df.columns:
+        accepted_df['crop_filename'] = None
+        logger.warning(
+            "No crop filename column found in Stage 2 output; downstream stages may fail."
+        )
 
     if accepted_df.empty:
         logger.warning(
@@ -328,7 +334,7 @@ def run_stage_03_filtering_and_classification(
     stage3_crops_dir = os.path.join(output_dir_stage3, 'focussed_and_filtered')
     _copy_filtered_crops(accepted_df, final_particles_crops_dir, stage3_crops_dir)
 
-    filtered_df = _rename_metadata_columns(filtered_df)
+    filtered_df = _rename_metadata_columns(accepted_df.copy())
 
     output_filename = 'focussed_and_filtered.csv'
     saved_csv_path = save_dataframe_to_csv(accepted_df, output_dir_stage3, output_filename)

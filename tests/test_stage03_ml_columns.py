@@ -1,6 +1,8 @@
 import os
 from pathlib import Path
 
+from pathlib import Path
+
 import joblib
 import numpy as np
 import pandas as pd
@@ -13,6 +15,9 @@ from src.stages.stage_03_filtering_and_classification import (
     run_stage_03_filtering_and_classification,
 )
 from src.utils import config_loader
+
+
+FIXTURE_STAGE2 = Path('tests/fixtures/sample_stage2_final.csv')
 
 
 @pytest.fixture(autouse=True)
@@ -77,16 +82,11 @@ def test_stage3_writes_ml_columns(tmp_path: Path):
     _write_dummy_model_artifacts(tmp_path)
     config_loader.load_config(str(config_path))
 
-    stage2_df = pd.DataFrame(
-        {
-            'final_crop_filename': ['crop0.png', 'crop1.png'],
-            'has_black_mask_artifact': [False, False],
-            'is_on_crop_boundary': [False, False],
-            'variance_laplacian': [100, 120],
-            'feature_a': [0.95, 0.85],
-            'feature_b': [0.90, 0.80],
-        }
-    )
+    stage2_df = pd.read_csv(FIXTURE_STAGE2).copy()
+    stage2_df = pd.concat([stage2_df] * 2, ignore_index=True)
+    stage2_df['final_crop_filename'] = ['crop0.png', 'crop1.png']
+    stage2_df['feature_a'] = [0.95, 0.85]
+    stage2_df['feature_b'] = [0.90, 0.80]
 
     input_csv = tmp_path / 'stage2_final.csv'
     stage2_df.to_csv(input_csv, index=False)
