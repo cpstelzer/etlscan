@@ -181,8 +181,14 @@ def _load_label_sidecar(sidecar_path: str) -> Dict[str, Any]:
 def _generate_label_key_candidates(csv_path: str, sidecar_dir: Optional[str]) -> List[str]:
     """Return possible keys that may match an entry in the sidecar for this CSV."""
     absolute_path = os.path.abspath(csv_path)
-    rel_to_cwd = os.path.relpath(absolute_path)
-    candidates = [absolute_path, rel_to_cwd]
+    candidates = [absolute_path]
+
+    try:
+        rel_to_cwd = os.path.relpath(absolute_path)
+        candidates.append(rel_to_cwd)
+    except ValueError:
+        # Different drives on Windows, ignore
+        rel_to_cwd = None
 
     if sidecar_dir:
         try:
