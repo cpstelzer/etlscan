@@ -20,7 +20,7 @@ from src.utils.common_exceptions import ConfigError, DataValidationError
 logger = logging.getLogger(__name__)
 
 
-NUMERIC_FEATURE_COLUMNS: List[str] = [
+BASE_NUMERIC_FEATURE_COLUMNS: List[str] = [
     # Stage 1 geometric/positional columns
     'frame', 'X', 'Y', 'x_mm', 'y_mm', 'z_mm', 'dioptries',
     'local_threshold_value', 'bounding_x', 'bounding_y', 'bounding_w', 'bounding_h',
@@ -36,7 +36,6 @@ NUMERIC_FEATURE_COLUMNS: List[str] = [
     # Stage 2 quality metrics
     'variance_laplacian', 'tenengrad_variance', 'energy_laplacian', 'energy_gradient',
 ]
-NUMERIC_FEATURE_COLUMNS.extend([f'lbp_{i}' for i in range(20)])
 
 METADATA_COLUMNS: List[str] = [
     'SAMPLE_ID', 'source_image_filename', 'crop_filename', 'final_crop_filename', 'track_id'
@@ -44,10 +43,34 @@ METADATA_COLUMNS: List[str] = [
 METADATA_PREFIX = 'meta__'
 
 
-def _validate_required_feature_columns(df: pd.DataFrame) -> None:
+def _get_expected_numeric_feature_columns(config: Optional[dict] = None) -> List[str]:
+    """Return the numeric schema, expanding LBP columns from the Stage 2 config."""
+
+    if config is None:
+        config = get_config()
+
+    stage2_config = config.get('stage_02_characterization', {})
+    shape_config = stage2_config.get('shape_descriptors', {})
+    lbp_radii = shape_config.get('lbp_radii', [1, 3])
+    lbp_points = shape_config.get('lbp_points', 8)
+
+    expected_columns = list(BASE_NUMERIC_FEATURE_COLUMNS)
+
+    if lbp_radii and lbp_points is not None:
+        lbp_feature_count = len(lbp_radii) * (lbp_points + 2)
+        expected_columns.extend([f'lbp_{i}' for i in range(lbp_feature_count)])
+
+    return expected_columns
+
+
+def _validate_required_feature_columns(
+    df: pd.DataFrame,
+    config: Optional[dict] = None,
+) -> None:
     """Ensure Stage 3 receives the expected numeric feature set."""
 
-    missing = [col for col in NUMERIC_FEATURE_COLUMNS if col not in df.columns]
+    expected_columns = _get_expected_numeric_feature_columns(config)
+    missing = [col for col in expected_columns if col not in df.columns]
     if missing:
         raise DataValidationError(
             "Stage 3 cannot proceed because the following feature columns are missing: "
@@ -190,7 +213,7 @@ def run_stage_03_filtering_and_classification(
         )
         return None
 
-    _validate_required_feature_columns(final_particles_df)
+    _validate_required_feature_columns(final_particles_df, config=config)
     logger.info("Loaded %d particles from Stage 2 final output.", len(final_particles_df))
 
     initial_particle_count = len(final_particles_df)
