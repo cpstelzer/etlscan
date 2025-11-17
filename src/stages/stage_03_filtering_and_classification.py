@@ -14,9 +14,7 @@ from src.utils import (
     load_dataframe_from_csv,
     save_dataframe_to_csv,
 )
-from src.utils.common_exceptions import ConfigError, MLModelError
-from src.utils import get_config, load_dataframe_from_csv, save_dataframe_to_csv
-from src.utils.common_exceptions import ConfigError, DataValidationError
+from src.utils.common_exceptions import ConfigError, DataValidationError, MLModelError
 
 logger = logging.getLogger(__name__)
 
@@ -44,24 +42,54 @@ METADATA_COLUMNS: List[str] = [
 METADATA_PREFIX = 'meta__'
 
 
-def _get_expected_numeric_feature_columns(config: Optional[dict] = None) -> List[str]:
-    """Return the numeric schema, expanding LBP columns from the Stage 2 config."""
+def _get_lbp_feature_count_from_config(config: Optional[dict] = None) -> int:
+    """Return how many LBP columns Stage 2 should have produced."""
 
     if config is None:
         config = get_config()
 
     stage2_config = config.get('stage_02_characterization', {})
     shape_config = stage2_config.get('shape_descriptors', {})
-    lbp_radii = shape_config.get('lbp_radii', [1, 3])
+    lbp_radii = shape_config.get('lbp_radii', [1, 3]) or []
     lbp_points = shape_config.get('lbp_points', 8)
+
+    if not lbp_radii or lbp_points is None:
+        return 0
+
+    return len(lbp_radii) * (lbp_points + 2)
+
+
+def _get_expected_numeric_feature_columns(config: Optional[dict] = None) -> List[str]:
+    """Return the numeric schema, expanding LBP columns from the Stage 2 config."""
+
+    lbp_feature_count = _get_lbp_feature_count_from_config(config)
 
     expected_columns = list(BASE_NUMERIC_FEATURE_COLUMNS)
 
-    if lbp_radii and lbp_points is not None:
-        lbp_feature_count = len(lbp_radii) * (lbp_points + 2)
+    if lbp_feature_count:
         expected_columns.extend([f'lbp_{i}' for i in range(lbp_feature_count)])
 
     return expected_columns
+
+
+def _infer_lbp_feature_count_from_df(df: pd.DataFrame) -> int:
+    """Infer how many LBP columns exist in the Stage 2 output."""
+
+    lbp_columns = [col for col in df.columns if col.startswith('lbp_')]
+    if not lbp_columns:
+        return 0
+
+    indices: List[int] = []
+    for col in lbp_columns:
+        try:
+            indices.append(int(col.split('_')[1]))
+        except (IndexError, ValueError):
+            # Unexpected naming; fall back to counting columns instead of crashing.
+            continue
+
+    if indices:
+        return max(indices) + 1
+    return len(lbp_columns)
 
 
 def _validate_required_feature_columns(
@@ -71,12 +99,31 @@ def _validate_required_feature_columns(
     """Ensure Stage 3 receives the expected numeric feature set."""
 
     expected_columns = _get_expected_numeric_feature_columns(config)
-    missing = [col for col in expected_columns if col not in df.columns]
-    if missing:
+    missing_base = [col for col in BASE_NUMERIC_FEATURE_COLUMNS if col not in df.columns]
+    if missing_base:
         raise DataValidationError(
             "Stage 3 cannot proceed because the following feature columns are missing: "
-            + ', '.join(sorted(missing))
+            + ', '.join(sorted(missing_base))
         )
+
+    expected_lbp_count = len([col for col in expected_columns if col.startswith('lbp_')])
+    observed_lbp_count = _infer_lbp_feature_count_from_df(df)
+
+    if expected_lbp_count and observed_lbp_count < expected_lbp_count:
+        missing_lbp = [
+            f'lbp_{i}'
+            for i in range(expected_lbp_count)
+            if f'lbp_{i}' not in df.columns
+        ]
+        raise DataValidationError(
+            "Stage 3 cannot proceed because the following LBP columns are missing: "
+            + ', '.join(sorted(missing_lbp))
+        )
+
+    # Stage 2 outputs might contain additional lbp_* columns if it was run with a
+    # more detailed configuration than the one currently loaded. Those extras do
+    # not prevent Stage 3 from running because downstream ML alignment uses the
+    # persisted training feature list.
 
 
 def _rename_metadata_columns(df: pd.DataFrame) -> pd.DataFrame:
