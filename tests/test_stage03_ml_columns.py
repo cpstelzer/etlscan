@@ -36,7 +36,7 @@ def _write_config(tmp_path: Path) -> Path:
         'stage_03_filtering_and_classification': {
             'model_filename': 'dummy_model.joblib',
             'scaler_filename': 'dummy_scaler.joblib',
-            'ml_filter': {'min_probability_threshold': 0.25},
+            'ml_filter': {'min_probability_threshold': 0.5},
             'quality_flags_filter': {
                 'filter_on_boundary': False,
                 'filter_black_mask': False,
@@ -83,10 +83,10 @@ def test_stage3_writes_ml_columns(tmp_path: Path):
     config_loader.load_config(str(config_path))
 
     stage2_df = pd.read_csv(FIXTURE_STAGE2).copy()
-    stage2_df = pd.concat([stage2_df] * 2, ignore_index=True)
-    stage2_df['final_crop_filename'] = ['crop0.png', 'crop1.png']
-    stage2_df['feature_a'] = [0.95, 0.85]
-    stage2_df['feature_b'] = [0.90, 0.80]
+    stage2_df = pd.concat([stage2_df] * 4, ignore_index=True)
+    stage2_df['final_crop_filename'] = [f'crop{i}.png' for i in range(len(stage2_df))]
+    stage2_df['feature_a'] = [0.05, 0.15, 0.85, 0.95]
+    stage2_df['feature_b'] = [0.05, 0.15, 0.75, 0.85]
 
     input_csv = tmp_path / 'stage2_final.csv'
     stage2_df.to_csv(input_csv, index=False)
@@ -110,5 +110,27 @@ def test_stage3_writes_ml_columns(tmp_path: Path):
     result_df = pd.read_csv(saved_csv)
     assert 'ml_probability' in result_df.columns
     assert 'ml_label' in result_df.columns
-    assert (result_df['ml_probability'] >= 0.25).all()
+    assert (result_df['ml_probability'] >= 0.5).all()
     assert set(result_df['ml_label'].unique()) == {'accept'}
+    assert 0 < len(result_df) < len(stage2_df)
+
+    filtered_good_csv = stage3_output_dir / 'filtered_good.csv'
+    assert filtered_good_csv.exists()
+    assert filtered_good_csv.as_posix() == saved_csv
+
+    legacy_csv = stage3_output_dir / 'focussed_and_filtered.csv'
+    assert legacy_csv.exists()
+    legacy_df = pd.read_csv(legacy_csv)
+    assert 'ml_probability' not in legacy_df.columns
+    assert 'ml_label' not in legacy_df.columns
+    assert len(legacy_df) == len(stage2_df)
+
+    filtered_good_dir = stage3_output_dir / 'filtered_good'
+    legacy_dir = stage3_output_dir / 'focussed_and_filtered'
+    assert filtered_good_dir.is_dir()
+    assert legacy_dir.is_dir()
+    legacy_files = sorted(f.name for f in legacy_dir.iterdir())
+    filtered_files = sorted(f.name for f in filtered_good_dir.iterdir())
+    assert legacy_files
+    assert filtered_files
+    assert set(filtered_files).issubset(set(legacy_files))

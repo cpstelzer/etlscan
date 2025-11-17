@@ -88,7 +88,7 @@ Important CLI options:
 Stage 03 is split into three segments: (1) deterministic quality filters, (2) ML scoring, and (3) exporting/plotting helpers.
 
 1. **Model artifacts** – `scripts/train_model.py` learns a RandomForest using the Stage 02 feature set, writes `models/rf_fem_classifier.joblib`, `models/rf_fem_scaler.joblib`, and `models/rf_fem_classifier_feature_names.txt`. Stage 03 loads all three files via `get_models_dir()`; missing artifacts raise `MLModelError`.
-2. **Runtime scoring** – `stage_03_filtering_and_classification.run_stage_03_filtering_and_classification` automatically attaches `ml_probability` (positive-class score) and `ml_label` ("accept"/"reject" decision based on `ml_filter.min_probability_threshold`). The CSV written to `stage3_filtering_classification/focussed_and_filtered.csv` only contains rows where `ml_label == 'accept'`, but the probability column is preserved for downstream auditing.
+2. **Runtime scoring** – `stage_03_filtering_and_classification.run_stage_03_filtering_and_classification` automatically attaches `ml_probability` (positive-class score) and `ml_label` ("accept"/"reject" decision based on `ml_filter.min_probability_threshold`). The ML-accepted subset is written to `stage3_filtering_classification/filtered_good.csv`, while `stage3_filtering_classification/focussed_and_filtered.csv` now captures the focus/quality-filtered particles before ML classification for auditing or retraining workflows.
 3. **Diagnostics** – Analysts can call `plot_probability_histogram` or `plot_roc_curve` from `src/visualization/feature_visualization.py` to summarize new runs. The helpers accept raw probability arrays / `(y_true, y_score)` pairs and emit PNGs beside other review artifacts.
 
 For classifier retraining run:
@@ -108,9 +108,13 @@ For an input batch named `batch_20240101` and sample `sample_A`, outputs land in
   - `{sample}_stage2_all_particle_features.csv` – full feature table for every tracked particle.
   - `stage2_all_particle_crops/` – normalized crops reused by later stages.
 - `stage3_filtering_classification/`
-  - `{sample}_stage3_classified_good_particles.csv` – records of particles that passed quality filters and model scoring. Contains `ml_probability` + `ml_label` columns that Stage 04 validates before running.
+  - `filtered_good.csv` – records of particles that passed quality filters and model scoring (only rows with `ml_label == 'accept'`). Includes `ml_probability` + `ml_label` columns that Stage 04 validates before running.
+  - `filtered_good/` – copy of every accepted crop to simplify manual review and Stage 04 feature consumption.
+  - `focussed_and_filtered.csv` + `focussed_and_filtered/` – particles that passed Stage 03 focus/quality checks before ML scoring (no `ml_*` columns).
 - `stage4_biological_analysis/`
   - `{sample}_stage4_final_analysis.csv` plus visualization artifacts for downstream review.
+
+Each pipeline run also produces batch-level rollups at the project root: `<batch>.csv` aggregates all Stage 02 `final_particles.csv` tables, `<batch>_stage3_filtered_good.csv` concatenates every Stage 03 `filtered_good.csv`, and `<batch>_stage3_focussed_and_filtered.csv` gathers the pre-ML Stage 03 outputs for parity with prior releases.
 
 RF model files updated by `train_model.py` are stored under `models/` and automatically reused by Stage 03.
 

@@ -4,7 +4,7 @@ import argparse
 import logging
 import sys
 import time
-from typing import Optional, List
+from typing import Optional, List, Union
 import pandas as pd
 
 current_dir = os.path.dirname(os.path.abspath(__file__))
@@ -30,16 +30,25 @@ logger = logging.getLogger(__name__)
 
 
 def _write_batch_aggregation_csv(
-    aggregated_final_particles: List[pd.DataFrame],
+    aggregated_frames: List[pd.DataFrame],
     destination_dir: str,
-    filename: str
-) -> Optional[str]:
-    """Persist the aggregated Stage 2 particles if any have been collected."""
-    if not aggregated_final_particles:
-        return None
+    filenames: Union[str, List[str]],
+) -> List[Optional[str]]:
+    """Persist any aggregated particle records that have been collected."""
+    if not aggregated_frames:
+        return []
 
-    combined_final_particles_df = pd.concat(aggregated_final_particles, ignore_index=True)
-    return save_dataframe_to_csv(combined_final_particles_df, destination_dir, filename)
+    if isinstance(filenames, str):
+        filenames_to_write = [filenames]
+    else:
+        filenames_to_write = list(dict.fromkeys(filenames))
+
+    combined_df = pd.concat(aggregated_frames, ignore_index=True)
+    saved_paths: List[Optional[str]] = []
+    for filename in filenames_to_write:
+        saved_paths.append(save_dataframe_to_csv(combined_df, destination_dir, filename))
+
+    return saved_paths
 
 def main():
     parser = argparse.ArgumentParser(description="Run the Well Plate Analyzer pipeline.")
@@ -106,7 +115,11 @@ def main():
         batch_dir_name = sanitized_batch if sanitized_batch else 'batch_final_particles'
 
     aggregated_final_particles: List[pd.DataFrame] = []
+    aggregated_stage3_focussed_particles: List[pd.DataFrame] = []
+    aggregated_stage3_filtered_good_particles: List[pd.DataFrame] = []
     combined_filename = f"{batch_dir_name}.csv"
+    stage3_combined_filename = f"{batch_dir_name}_stage3_focussed_and_filtered.csv"
+    stage3_filtered_good_combined_filename = f"{batch_dir_name}_stage3_filtered_good.csv"
     batch_output_parent_dir = os.path.join(project_base_dir, "data", "output", batch_dir_name)
     os.makedirs(batch_output_parent_dir, exist_ok=True)
 
@@ -137,8 +150,10 @@ def main():
         s2_final_csv_path = os.path.join(s2_output_dir, f"{current_sample_id}_stage2_all_particle_features.csv")
         s2_final_particles_csv_path = os.path.join(s2_output_dir, 'final_particles.csv')
         s2_final_particles_crops_dir = os.path.join(s2_output_dir, 'final_particles')
-        s3_final_csv_path = os.path.join(s3_output_dir, 'focussed_and_filtered.csv')
-        s3_filtered_crops_dir = os.path.join(s3_output_dir, 'focussed_and_filtered')
+        s3_final_csv_path = os.path.join(s3_output_dir, 'filtered_good.csv')
+        s3_legacy_csv_path = os.path.join(s3_output_dir, 'focussed_and_filtered.csv')
+        s3_filtered_crops_dir = os.path.join(s3_output_dir, 'filtered_good')
+        s3_legacy_crops_dir = os.path.join(s3_output_dir, 'focussed_and_filtered')
         s2_all_crops_dir_path = os.path.join(s2_output_dir, "stage2_all_particle_crops")
 
         try:
@@ -195,16 +210,31 @@ def main():
             # --- Stage 4: Biological Analysis ---
             if run_s4:
                 logger.info(f">>> Starting Stage 4 for {current_sample_id} <<<")
-                if not os.path.exists(s3_final_csv_path):
-                    raise FileNotFoundError(f"Stage 3 output missing: {s3_final_csv_path}. Run Stage 3 first.")
-                if not os.path.isdir(s3_filtered_crops_dir):
+                stage3_csv_for_stage4 = (
+                    s3_final_csv_path
+                    if os.path.exists(s3_final_csv_path)
+                    else s3_legacy_csv_path
+                )
+                if not os.path.exists(stage3_csv_for_stage4):
                     raise FileNotFoundError(
-                        f"Stage 3 filtered crops directory missing: {s3_filtered_crops_dir}."
+                        "Stage 3 output missing: "
+                        f"{s3_final_csv_path} (preferred) / {s3_legacy_csv_path} (legacy). Run Stage 3 first."
+                    )
+
+                stage3_crops_for_stage4 = (
+                    s3_filtered_crops_dir
+                    if os.path.isdir(s3_filtered_crops_dir)
+                    else s3_legacy_crops_dir
+                )
+                if not os.path.isdir(stage3_crops_for_stage4):
+                    raise FileNotFoundError(
+                        "Stage 3 filtered crops directory missing: "
+                        f"{s3_filtered_crops_dir} (preferred) / {s3_legacy_crops_dir} (legacy)."
                     )
 
                 s4_result_path = run_stage_04_biological_analysis(
-                    input_s3_csv_path=s3_final_csv_path,
-                    stage3_crops_dir=s3_filtered_crops_dir,
+                    input_s3_csv_path=stage3_csv_for_stage4,
+                    stage3_crops_dir=stage3_crops_for_stage4,
                     output_dir_stage4=s4_output_dir,
                     sample_id=current_sample_id
                 )
@@ -235,15 +265,16 @@ def main():
                         f"Collected {len(final_particles_copy)} Stage 2 final particles for batch aggregation from {current_sample_id}."
                     )
 
-                    saved_batch_csv_path = _write_batch_aggregation_csv(
+                    saved_batch_csv_paths = _write_batch_aggregation_csv(
                         aggregated_final_particles,
                         batch_output_csv_dir,
                         combined_filename
                     )
-                    if saved_batch_csv_path:
-                        logger.info(
-                            f"Batch-level Stage 2 final particles updated at {saved_batch_csv_path}."
-                        )
+                    for saved_batch_csv_path in saved_batch_csv_paths:
+                        if saved_batch_csv_path:
+                            logger.info(
+                                f"Batch-level Stage 2 final particles updated at {saved_batch_csv_path}."
+                            )
                 else:
                     logger.debug(
                         f"Stage 2 final particles CSV for {current_sample_id} is empty. Skipping aggregation for this sample."
@@ -253,21 +284,118 @@ def main():
                     f"Stage 2 final particles CSV not found for {current_sample_id}. Skipping aggregation for this sample."
                 )
 
+            if os.path.exists(s3_final_csv_path):
+                stage3_filtered_df = load_dataframe_from_csv(s3_final_csv_path)
+                if stage3_filtered_df is not None and not stage3_filtered_df.empty:
+                    stage3_filtered_copy = stage3_filtered_df.copy()
+                    if 'sample_id' in stage3_filtered_copy.columns:
+                        stage3_filtered_copy['sample_id'] = stage3_filtered_copy['sample_id'].fillna(current_sample_id)
+                    else:
+                        stage3_filtered_copy.insert(0, 'sample_id', current_sample_id)
+                    aggregated_stage3_filtered_good_particles.append(stage3_filtered_copy)
+                    logger.info(
+                        f"Collected {len(stage3_filtered_copy)} Stage 3 ML-accepted particles for batch aggregation from {current_sample_id}."
+                    )
+
+                    saved_stage3_filtered_batch_paths = _write_batch_aggregation_csv(
+                        aggregated_stage3_filtered_good_particles,
+                        batch_output_csv_dir,
+                        stage3_filtered_good_combined_filename
+                    )
+                    for saved_stage3_batch_path in saved_stage3_filtered_batch_paths:
+                        if saved_stage3_batch_path:
+                            logger.info(
+                                f"Batch-level Stage 3 filtered_good particles updated at {saved_stage3_batch_path}."
+                            )
+                else:
+                    logger.debug(
+                        f"Stage 3 filtered_good CSV for {current_sample_id} is empty. Skipping aggregation for this sample."
+                    )
+            else:
+                logger.debug(
+                    "Stage 3 filtered_good CSV not found for %s at %s. Skipping aggregation for this sample.",
+                    current_sample_id,
+                    s3_final_csv_path,
+                )
+
+            if os.path.exists(s3_legacy_csv_path):
+                stage3_focussed_df = load_dataframe_from_csv(s3_legacy_csv_path)
+                if stage3_focussed_df is not None and not stage3_focussed_df.empty:
+                    stage3_focussed_copy = stage3_focussed_df.copy()
+                    if 'sample_id' in stage3_focussed_copy.columns:
+                        stage3_focussed_copy['sample_id'] = stage3_focussed_copy['sample_id'].fillna(current_sample_id)
+                    else:
+                        stage3_focussed_copy.insert(0, 'sample_id', current_sample_id)
+                    aggregated_stage3_focussed_particles.append(stage3_focussed_copy)
+                    logger.info(
+                        f"Collected {len(stage3_focussed_copy)} Stage 3 pre-ML particles for batch aggregation from {current_sample_id}."
+                    )
+
+                    saved_stage3_focussed_batch_paths = _write_batch_aggregation_csv(
+                        aggregated_stage3_focussed_particles,
+                        batch_output_csv_dir,
+                        stage3_combined_filename
+                    )
+                    for saved_stage3_batch_path in saved_stage3_focussed_batch_paths:
+                        if saved_stage3_batch_path:
+                            logger.info(
+                                f"Batch-level Stage 3 focussed_and_filtered particles updated at {saved_stage3_batch_path}."
+                            )
+                else:
+                    logger.debug(
+                        f"Stage 3 focussed_and_filtered CSV for {current_sample_id} is empty. Skipping aggregation for this sample."
+                    )
+            else:
+                logger.debug(
+                    "Stage 3 focussed_and_filtered CSV not found for %s at %s. Skipping aggregation for this sample.",
+                    current_sample_id,
+                    s3_legacy_csv_path,
+                )
+
     total_pipeline_duration = time.time() - total_pipeline_start_time
     logger.info(f"--- Batch pipeline execution FINISHED in {total_pipeline_duration:.2f} seconds ---")
 
     if aggregated_final_particles:
-        saved_batch_csv_path = _write_batch_aggregation_csv(
+        saved_batch_csv_paths = _write_batch_aggregation_csv(
             aggregated_final_particles,
             batch_output_csv_dir,
             combined_filename
         )
-        if saved_batch_csv_path:
-            logger.info(
-                f"Batch-level Stage 2 final particles saved to {saved_batch_csv_path}."
-            )
+        for saved_batch_csv_path in saved_batch_csv_paths:
+            if saved_batch_csv_path:
+                logger.info(
+                    f"Batch-level Stage 2 final particles saved to {saved_batch_csv_path}."
+                )
     else:
         logger.info("No Stage 2 final particles were collected; skipping batch-level aggregation.")
+
+    if aggregated_stage3_filtered_good_particles:
+        saved_stage3_filtered_batch_paths = _write_batch_aggregation_csv(
+            aggregated_stage3_filtered_good_particles,
+            batch_output_csv_dir,
+            stage3_filtered_good_combined_filename
+        )
+        for saved_stage3_batch_path in saved_stage3_filtered_batch_paths:
+            if saved_stage3_batch_path:
+                logger.info(
+                    f"Batch-level Stage 3 filtered_good particles saved to {saved_stage3_batch_path}."
+                )
+    else:
+        logger.info("No Stage 3 filtered_good particles were collected; skipping batch-level aggregation.")
+
+    if aggregated_stage3_focussed_particles:
+        saved_stage3_focussed_batch_paths = _write_batch_aggregation_csv(
+            aggregated_stage3_focussed_particles,
+            batch_output_csv_dir,
+            stage3_combined_filename
+        )
+        for saved_stage3_batch_path in saved_stage3_focussed_batch_paths:
+            if saved_stage3_batch_path:
+                logger.info(
+                    f"Batch-level Stage 3 focussed particles saved to {saved_stage3_batch_path}."
+                )
+    else:
+        logger.info("No Stage 3 focussed particles were collected; skipping batch-level aggregation.")
 
     logging.shutdown()
 
