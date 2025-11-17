@@ -6,8 +6,8 @@ import skimage.measure # For find_contours
 import numpy as np
 import os
 import matplotlib.pyplot as plt
-import matplotlib.patches as patches 
-from typing import Optional, Dict, Any 
+import matplotlib.patches as patches
+from typing import Optional, Dict, Any, Sequence
 import logging
 
 logger = logging.getLogger(__name__)
@@ -167,6 +167,94 @@ def visualize_ml_features(
         logger.exception(f"Error during visualization of '{image_path_or_array if isinstance(image_path_or_array, str) else 'image array'}': {e}")
     finally:
         if 'fig' in locals() and plt.fignum_exists(fig.number):
+            plt.close(fig)
+
+
+def plot_probability_histogram(
+    probabilities: Sequence[float],
+    output_path: str,
+    *,
+    labels: Optional[Sequence[str]] = None,
+    threshold: Optional[float] = None,
+    bins: int = 20,
+) -> None:
+    """Render a histogram of ML probabilities for a run."""
+    try:
+        if not probabilities:
+            logger.warning("No probabilities provided for histogram plot at %s", output_path)
+            return
+
+        probabilities_arr = np.asarray(probabilities, dtype=float)
+        fig, ax = plt.subplots(figsize=(6, 4))
+        ax.hist(probabilities_arr, bins=bins, color='steelblue', alpha=0.8)
+        ax.set_xlabel('Positive-class probability')
+        ax.set_ylabel('Particle count')
+        ax.set_title('Stage 3 classifier probability distribution')
+
+        if threshold is not None:
+            ax.axvline(threshold, color='crimson', linestyle='--', label=f'Threshold = {threshold:.2f}')
+
+        if labels is not None:
+            try:
+                label_counts = {}
+                for lbl in labels:
+                    label_counts[lbl] = label_counts.get(lbl, 0) + 1
+                annotation = ", ".join(f"{k}: {v}" for k, v in label_counts.items())
+                ax.text(0.02, 0.95, f"Counts: {annotation}", transform=ax.transAxes,
+                        va='top', ha='left', fontsize='x-small')
+            except Exception as exc:
+                logger.debug("Failed to annotate label counts on histogram: %s", exc)
+
+        if threshold is not None:
+            ax.legend(loc='upper right', fontsize='small')
+
+        plt.tight_layout()
+        os.makedirs(os.path.dirname(output_path), exist_ok=True)
+        plt.savefig(output_path, dpi=150)
+        logger.info("Probability histogram saved to %s", output_path)
+    except Exception as exc:
+        logger.exception("Failed to plot probability histogram: %s", exc)
+    finally:
+        if 'fig' in locals():
+            plt.close(fig)
+
+
+def plot_roc_curve(
+    y_true: Sequence[int],
+    y_scores: Sequence[float],
+    output_path: str,
+    *,
+    positive_label: int = 1,
+) -> None:
+    """Plot a ROC-style curve for the classifier on a held-out set."""
+    try:
+        from sklearn.metrics import roc_curve, auc
+
+        if not y_true or not y_scores:
+            logger.warning("Insufficient data for ROC plot at %s", output_path)
+            return
+
+        fpr, tpr, _ = roc_curve(y_true, y_scores, pos_label=positive_label)
+        roc_auc = auc(fpr, tpr)
+
+        fig, ax = plt.subplots(figsize=(5, 5))
+        ax.plot(fpr, tpr, color='darkorange', lw=2, label=f'ROC curve (AUC = {roc_auc:.3f})')
+        ax.plot([0, 1], [0, 1], color='navy', lw=1, linestyle='--')
+        ax.set_xlim([0.0, 1.0])
+        ax.set_ylim([0.0, 1.05])
+        ax.set_xlabel('False Positive Rate')
+        ax.set_ylabel('True Positive Rate')
+        ax.set_title('Stage 3 classifier ROC summary')
+        ax.legend(loc='lower right')
+        plt.tight_layout()
+
+        os.makedirs(os.path.dirname(output_path), exist_ok=True)
+        plt.savefig(output_path, dpi=150)
+        logger.info("ROC plot saved to %s", output_path)
+    except Exception as exc:
+        logger.exception("Failed to plot ROC curve: %s", exc)
+    finally:
+        if 'fig' in locals():
             plt.close(fig)
 
 

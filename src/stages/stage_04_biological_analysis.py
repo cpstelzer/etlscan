@@ -122,6 +122,28 @@ def run_stage_04_biological_analysis(
         logger.warning(f"No 'good' particles loaded from Stage 3 CSV: {input_s3_csv_path}. Aborting Stage 4.")
         return None
 
+    required_ml_columns = {"ml_probability", "ml_label"}
+    missing_ml_columns = required_ml_columns.difference(s3_good_particles_df.columns)
+    if missing_ml_columns:
+        raise ProcessingError(
+            f"Stage 4 requires ML columns {sorted(required_ml_columns)}, but the Stage 3 CSV is missing {sorted(missing_ml_columns)}."
+            " Re-run Stage 3 with ML classification enabled."
+        )
+
+    label_distribution = s3_good_particles_df['ml_label'].value_counts(dropna=False).to_dict()
+    probability_summary = {
+        'min': float(s3_good_particles_df['ml_probability'].min()),
+        'median': float(s3_good_particles_df['ml_probability'].median()),
+        'max': float(s3_good_particles_df['ml_probability'].max()),
+        'mean': float(s3_good_particles_df['ml_probability'].mean()),
+    }
+    logger.info(
+        "Stage 4 input ML label distribution for %s: %s | probability summary: %s",
+        sample_id,
+        label_distribution,
+        probability_summary,
+    )
+
     # --- MODIFIED: Create directory for visualizations ---
     output_visualizations_dir = os.path.join(output_dir_stage4, "visualizations")
     os.makedirs(output_visualizations_dir, exist_ok=True)

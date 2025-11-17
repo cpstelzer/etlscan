@@ -2,12 +2,20 @@
 import logging
 import os
 import shutil
-from typing import Optional
+from typing import List, Optional, Sequence, Tuple
+
+import joblib
+import numpy as np
 
 import pandas as pd
 
-from src.utils import get_config, load_dataframe_from_csv, save_dataframe_to_csv
-from src.utils.common_exceptions import ConfigError
+from src.utils import (
+    get_config,
+    get_models_dir,
+    load_dataframe_from_csv,
+    save_dataframe_to_csv,
+)
+from src.utils.common_exceptions import ConfigError, MLModelError
 
 logger = logging.getLogger(__name__)
 
@@ -46,6 +54,109 @@ def _copy_filtered_crops(
         copied_count,
         destination_dir,
         missing_count,
+    )
+
+
+def _read_feature_names(feature_file: str) -> Optional[List[str]]:
+    if not os.path.exists(feature_file):
+        logger.warning(
+            "Feature-name list missing at %s. Falling back to numeric columns order.",
+            feature_file,
+        )
+        return None
+
+    with open(feature_file, "r", encoding="utf-8") as handle:
+        names = [line.strip() for line in handle if line.strip()]
+    if not names:
+        logger.warning(
+            "Feature-name list at %s is empty. Falling back to numeric columns order.",
+            feature_file,
+        )
+        return None
+    return names
+
+
+def _load_ml_artifacts(s3_config: dict) -> Tuple[object, object, Optional[List[str]]]:
+    models_dir = get_models_dir()
+    model_filename = s3_config.get("model_filename", "rf_fem_classifier.joblib")
+    scaler_filename = s3_config.get("scaler_filename", "rf_fem_scaler.joblib")
+    model_path = os.path.join(models_dir, model_filename)
+    scaler_path = os.path.join(models_dir, scaler_filename)
+    feature_file = model_path.replace(".joblib", "_feature_names.txt")
+
+    if not os.path.exists(model_path):
+        raise MLModelError(f"Stage 3 model artifact missing: {model_path}")
+    if not os.path.exists(scaler_path):
+        raise MLModelError(f"Stage 3 scaler artifact missing: {scaler_path}")
+
+    logger.info("Loading Stage 3 classifier from %s", model_path)
+    model = joblib.load(model_path)
+    scaler = joblib.load(scaler_path)
+    feature_names = _read_feature_names(feature_file)
+    return model, scaler, feature_names
+
+
+def _prepare_feature_matrix(
+    df: pd.DataFrame,
+    feature_names: Optional[Sequence[str]],
+) -> Tuple[pd.DataFrame, List[str]]:
+    numeric_df = df.select_dtypes(include=[np.number]).copy()
+    numeric_df.fillna(0, inplace=True)
+
+    if feature_names:
+        missing = [name for name in feature_names if name not in numeric_df.columns]
+        if missing:
+            logger.warning(
+                "%d configured features missing from Stage 2 CSV; filling with zeros: %s",
+                len(missing),
+                ", ".join(missing[:10]),
+            )
+        feature_df = numeric_df.reindex(columns=list(feature_names), fill_value=0)
+        ordered_names = list(feature_names)
+    else:
+        if numeric_df.empty:
+            raise MLModelError("No numeric columns available for ML scoring in Stage 3 input.")
+        ordered_names = numeric_df.columns.tolist()
+        feature_df = numeric_df
+
+    return feature_df, ordered_names
+
+
+def _score_particles_with_model(
+    df: pd.DataFrame,
+    model: object,
+    scaler: object,
+    feature_names: Optional[Sequence[str]],
+) -> pd.Series:
+    feature_df, ordered_names = _prepare_feature_matrix(df, feature_names)
+    logger.debug("Scoring particles with %d ML features.", len(ordered_names))
+    scaled_values = scaler.transform(feature_df.values)
+
+    if hasattr(model, "predict_proba"):
+        probabilities = model.predict_proba(scaled_values)[:, -1]
+    elif hasattr(model, "decision_function"):
+        decision_values = model.decision_function(scaled_values)
+        probabilities = 1 / (1 + np.exp(-decision_values))
+    else:
+        raise MLModelError("Loaded model lacks predict_proba/decision_function for probability scoring.")
+
+    return pd.Series(probabilities, index=df.index, name="ml_probability")
+
+
+def _log_probability_summary(probabilities: pd.Series, sample_id: str, threshold: float) -> None:
+    if probabilities.empty:
+        return
+    summary = {
+        "min": float(probabilities.min()),
+        "median": float(probabilities.median()),
+        "max": float(probabilities.max()),
+        "mean": float(probabilities.mean()),
+    }
+    logger.info(
+        "Stage 3 ML probability summary for %s (threshold %.2f): %s",
+        sample_id,
+        threshold,
+        summary,
     )
 
 
@@ -107,15 +218,51 @@ def run_stage_03_filtering_and_classification(
             "No crop filename column found in Stage 2 output; downstream stages may fail."
         )
 
+    ml_filter_cfg = s3_config.get('ml_filter', {})
+    probability_threshold = float(ml_filter_cfg.get('min_probability_threshold', 0.5))
+
+    try:
+        model, scaler, feature_names = _load_ml_artifacts(s3_config)
+    except MLModelError as exc:
+        logger.error("Failed to load ML artifacts for Stage 3: %s", exc)
+        raise
+
+    if not filtered_df.empty:
+        probabilities = _score_particles_with_model(filtered_df, model, scaler, feature_names)
+        filtered_df['ml_probability'] = probabilities
+        filtered_df['ml_label'] = np.where(
+            filtered_df['ml_probability'] >= probability_threshold, 'accept', 'reject'
+        )
+        _log_probability_summary(probabilities, sample_id, probability_threshold)
+        label_counts = filtered_df['ml_label'].value_counts(dropna=False).to_dict()
+        logger.info(
+            "Stage 3 ML label distribution before thresholding for %s: %s",
+            sample_id,
+            label_counts,
+        )
+    else:
+        filtered_df['ml_probability'] = pd.Series(dtype=float)
+        filtered_df['ml_label'] = pd.Series(dtype=str)
+
+    accepted_mask = filtered_df['ml_label'] == 'accept'
+    accepted_df = filtered_df.loc[accepted_mask].reset_index(drop=True)
+
+    if accepted_df.empty:
+        logger.warning(
+            "All particles rejected by Stage 3 ML filter for sample %s (threshold %.2f).",
+            sample_id,
+            probability_threshold,
+        )
+
     stage3_crops_dir = os.path.join(output_dir_stage3, 'focussed_and_filtered')
-    _copy_filtered_crops(filtered_df, final_particles_crops_dir, stage3_crops_dir)
+    _copy_filtered_crops(accepted_df, final_particles_crops_dir, stage3_crops_dir)
 
     output_filename = 'focussed_and_filtered.csv'
-    saved_csv_path = save_dataframe_to_csv(filtered_df, output_dir_stage3, output_filename)
+    saved_csv_path = save_dataframe_to_csv(accepted_df, output_dir_stage3, output_filename)
 
     logger.info(
         "--- Stage 3: Filtering & Classification for %s COMPLETED. Saved %d particles. ---",
         sample_id,
-        len(filtered_df),
+        len(accepted_df),
     )
     return saved_csv_path
