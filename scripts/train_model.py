@@ -127,8 +127,22 @@ def load_and_extract_from_directory(
     return df
 
 
+def _normalize_sidecar_key(key: str) -> str:
+    """Normalize potential sidecar keys for consistent lookup."""
+    normalized = key.strip()
+    if not normalized:
+        return normalized
+    normalized = normalized.replace('\\', os.sep)
+    try:
+        normalized = os.path.normpath(normalized)
+    except Exception:
+        # If the key cannot be normalized as a path, fall back to the stripped version
+        pass
+    return normalized
+
+
 def _load_label_sidecar(sidecar_path: str) -> Dict[str, Any]:
-    """Return a mapping from CSV base filename to label."""
+    """Return a mapping from CSV identifiers to labels with normalized keys."""
     if not os.path.exists(sidecar_path):
         raise FileNotFoundError(f"Label sidecar not found: {sidecar_path}")
 
@@ -139,16 +153,62 @@ def _load_label_sidecar(sidecar_path: str) -> Dict[str, Any]:
             mapping = json.load(f)
         if not isinstance(mapping, dict):
             raise DataValidationError("Label sidecar JSON must contain an object mapping filename -> label.")
-        return mapping
+        raw_mapping = mapping
+    
+    else:
+        mapping_df = pd.read_csv(sidecar_path)
+        column_candidates = [col for col in mapping_df.columns if col.lower() in {'source', 'filename', 'file', 'csv'}]
+        if not column_candidates or 'label' not in mapping_df.columns:
+            raise DataValidationError(
+                "Label sidecar CSV must contain a 'label' column and one of: source, filename, file, csv"
+            )
+        key_column = column_candidates[0]
+        raw_mapping = {str(row[key_column]): row['label'] for _, row in mapping_df.iterrows()}
 
-    mapping_df = pd.read_csv(sidecar_path)
-    column_candidates = [col for col in mapping_df.columns if col.lower() in {'source', 'filename', 'file', 'csv'}]
-    if not column_candidates or 'label' not in mapping_df.columns:
-        raise DataValidationError(
-            "Label sidecar CSV must contain a 'label' column and one of: source, filename, file, csv"
-        )
-    key_column = column_candidates[0]
-    return {str(row[key_column]): row['label'] for _, row in mapping_df.iterrows()}
+    normalized_mapping: Dict[str, Any] = {}
+    for key, value in raw_mapping.items():
+        if key is None:
+            continue
+        str_key = str(key).strip()
+        if not str_key:
+            continue
+        normalized_mapping[str_key] = value
+        normalized_key = _normalize_sidecar_key(str_key)
+        normalized_mapping[normalized_key] = value
+    return normalized_mapping
+
+
+def _generate_label_key_candidates(csv_path: str, sidecar_dir: Optional[str]) -> List[str]:
+    """Return possible keys that may match an entry in the sidecar for this CSV."""
+    absolute_path = os.path.abspath(csv_path)
+    rel_to_cwd = os.path.relpath(absolute_path)
+    candidates = [absolute_path, rel_to_cwd]
+
+    if sidecar_dir:
+        try:
+            rel_to_sidecar = os.path.relpath(absolute_path, start=sidecar_dir)
+            candidates.append(rel_to_sidecar)
+        except ValueError:
+            # Different drives on Windows, ignore
+            pass
+
+    basename = os.path.basename(csv_path)
+    base_no_ext = os.path.splitext(basename)[0]
+    parent = os.path.basename(os.path.dirname(csv_path))
+
+    candidates.extend([
+        basename,
+        base_no_ext,
+        os.path.join(parent, basename) if parent else None,
+        os.path.join(parent, base_no_ext) if parent else None,
+    ])
+
+    unique_candidates = []
+    for candidate in candidates:
+        if candidate and candidate not in unique_candidates:
+            unique_candidates.append(candidate)
+
+    return unique_candidates
 
 
 def _load_feature_table_from_csv(
@@ -160,26 +220,39 @@ def _load_feature_table_from_csv(
         raise DataValidationError("At least one focussed_and_filtered.csv file must be provided.")
 
     label_lookup = {}
+    sidecar_dir: Optional[str] = None
     if labels_sidecar:
         label_lookup = _load_label_sidecar(labels_sidecar)
+        sidecar_dir = os.path.dirname(os.path.abspath(labels_sidecar))
 
     frames = []
     for csv_path in csv_paths:
         if not os.path.exists(csv_path):
             raise FileNotFoundError(f"CSV file not found: {csv_path}")
         df = pd.read_csv(csv_path)
-        base_name = os.path.splitext(os.path.basename(csv_path))[0]
 
         if label_column in df.columns:
             df['label'] = df[label_column]
             if label_column != 'label':
                 df = df.drop(columns=[label_column])
         elif label_lookup:
-            if base_name not in label_lookup:
+            candidate_keys = _generate_label_key_candidates(csv_path, sidecar_dir)
+            assigned_label = None
+            for candidate in candidate_keys:
+                normalized_candidate = _normalize_sidecar_key(candidate)
+                if candidate in label_lookup:
+                    assigned_label = label_lookup[candidate]
+                    break
+                if normalized_candidate in label_lookup:
+                    assigned_label = label_lookup[normalized_candidate]
+                    break
+
+            if assigned_label is None:
                 raise DataValidationError(
-                    f"Label sidecar does not contain an entry for {base_name} (from {csv_path})."
+                    "Label sidecar does not contain an entry for any of the keys "
+                    f"{candidate_keys} (from {csv_path})."
                 )
-            df['label'] = label_lookup[base_name]
+            df['label'] = assigned_label
         else:
             raise DataValidationError(
                 f"No label column '{label_column}' present in {csv_path} and no sidecar provided."
