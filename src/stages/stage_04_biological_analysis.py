@@ -150,8 +150,10 @@ def run_stage_04_biological_analysis(
 
     analysis_results = []
 
+    crop_column = 'meta__crop_filename' if 'meta__crop_filename' in s3_good_particles_df.columns else 'crop_filename'
+
     for index, particle_row in s3_good_particles_df.iterrows():
-        crop_filename = particle_row.get('crop_filename')
+        crop_filename = particle_row.get(crop_column)
         if not crop_filename:
             logger.warning(f"Row {index} is missing 'crop_filename'. Skipping.")
             continue
