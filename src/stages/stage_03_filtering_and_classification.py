@@ -141,13 +141,20 @@ def _rename_metadata_columns(df: pd.DataFrame) -> pd.DataFrame:
 def _copy_filtered_crops(
     filtered_df: pd.DataFrame,
     source_dir: str,
-    destination_dir: str,
+    destination_dirs: List[str],
 ) -> None:
-    """Copy the filtered particle crops into the Stage 3 directory."""
-    if filtered_df.empty:
+    """Copy the filtered particle crops into one or more Stage 3 directories."""
+    if filtered_df.empty or not destination_dirs:
         return
 
-    os.makedirs(destination_dir, exist_ok=True)
+    unique_destinations = [
+        dest for dest in dict.fromkeys(destination_dirs) if isinstance(dest, str) and dest
+    ]
+    if not unique_destinations:
+        return
+
+    for destination_dir in unique_destinations:
+        os.makedirs(destination_dir, exist_ok=True)
 
     copied_count = 0
     missing_count = 0
@@ -158,10 +165,11 @@ def _copy_filtered_crops(
             continue
 
         src_path = os.path.join(source_dir, crop_filename)
-        dest_path = os.path.join(destination_dir, crop_filename)
 
         if os.path.exists(src_path):
-            shutil.copy2(src_path, dest_path)
+            for destination_dir in unique_destinations:
+                dest_path = os.path.join(destination_dir, crop_filename)
+                shutil.copy2(src_path, dest_path)
             copied_count += 1
         else:
             logger.warning("Missing crop file for Stage 3 copy: %s", src_path)
@@ -170,9 +178,23 @@ def _copy_filtered_crops(
     logger.info(
         "Copied %d filtered particle crops to %s (%d missing)",
         copied_count,
-        destination_dir,
+        ', '.join(unique_destinations),
         missing_count,
     )
+
+
+def _ensure_crop_filename_column(df: pd.DataFrame) -> pd.DataFrame:
+    """Guarantee that downstream copy/CSV logic has a crop filename column."""
+
+    result_df = df.copy()
+    if 'final_crop_filename' in result_df.columns:
+        result_df['crop_filename'] = result_df['final_crop_filename']
+    elif 'crop_filename' not in result_df.columns:
+        result_df['crop_filename'] = None
+        logger.warning(
+            "No crop filename column found in Stage 2 output; downstream stages may fail."
+        )
+    return result_df
 
 
 def _load_ml_artifacts(s3_config: dict) -> tuple:
@@ -305,71 +327,63 @@ def run_stage_03_filtering_and_classification(
     logger.info("Loaded %d particles from Stage 2 final output.", len(final_particles_df))
 
     initial_particle_count = len(final_particles_df)
-    filtered_df = final_particles_df.copy()
+    quality_filtered_df = final_particles_df.copy()
 
-    if 'has_black_mask_artifact' in filtered_df.columns:
-        mask = filtered_df['has_black_mask_artifact'].fillna(False).astype(bool)
+    if 'has_black_mask_artifact' in quality_filtered_df.columns:
+        mask = quality_filtered_df['has_black_mask_artifact'].fillna(False).astype(bool)
         removed = int(mask.sum())
-        filtered_df = filtered_df.loc[~mask]
+        quality_filtered_df = quality_filtered_df.loc[~mask]
         logger.info("Removed %d particles with black mask artifacts.", removed)
     else:
         logger.warning("Column 'has_black_mask_artifact' missing; skipping that filter.")
 
-    if 'is_on_crop_boundary' in filtered_df.columns:
-        mask = filtered_df['is_on_crop_boundary'].fillna(False).astype(bool)
+    if 'is_on_crop_boundary' in quality_filtered_df.columns:
+        mask = quality_filtered_df['is_on_crop_boundary'].fillna(False).astype(bool)
         removed = int(mask.sum())
-        filtered_df = filtered_df.loc[~mask]
+        quality_filtered_df = quality_filtered_df.loc[~mask]
         logger.info("Removed %d particles touching crop boundaries.", removed)
     else:
         logger.warning("Column 'is_on_crop_boundary' missing; skipping boundary filter.")
 
-    filtered_df = filtered_df.reset_index(drop=True)
+    quality_filtered_df = quality_filtered_df.reset_index(drop=True)
 
-    quality_removed_count = initial_particle_count - len(filtered_df)
+    quality_removed_count = initial_particle_count - len(quality_filtered_df)
 
-    if filtered_df.empty:
+    if quality_filtered_df.empty:
         logger.warning("No particles remain after Stage 3 quality filtering.")
 
     ml_rejected_count = 0
     ml_filter_cfg = s3_config.get('ml_filter', {})
     probability_threshold = float(ml_filter_cfg.get('min_probability_threshold', 0.5))
 
-    if not filtered_df.empty:
+    ml_classified_df = quality_filtered_df.copy()
+
+    if not ml_classified_df.empty:
         try:
             model, scaler, feature_names = _load_ml_artifacts(s3_config)
         except MLModelError as exc:
             logger.error("Failed to load ML artifacts for Stage 3: %s", exc)
             raise
 
-        probabilities = _score_particles_with_model(
-            filtered_df, model, scaler, feature_names
-        )
-        filtered_df['ml_probability'] = probabilities
-        filtered_df['ml_label'] = np.where(
-            filtered_df['ml_probability'] >= probability_threshold, 'accept', 'reject'
+        probabilities = _score_particles_with_model(ml_classified_df, model, scaler, feature_names)
+        ml_classified_df['ml_probability'] = probabilities
+        ml_classified_df['ml_label'] = np.where(
+            ml_classified_df['ml_probability'] >= probability_threshold, 'accept', 'reject'
         )
         _log_probability_summary(probabilities, sample_id, probability_threshold)
-        label_counts = filtered_df['ml_label'].value_counts(dropna=False).to_dict()
+        label_counts = ml_classified_df['ml_label'].value_counts(dropna=False).to_dict()
         logger.info(
             "Stage 3 ML label distribution before thresholding for %s: %s",
             sample_id,
             label_counts,
         )
-        accepted_mask = filtered_df['ml_label'] == 'accept'
+        accepted_mask = ml_classified_df['ml_label'] == 'accept'
         ml_rejected_count = int((~accepted_mask).sum())
-        accepted_df = filtered_df.loc[accepted_mask].reset_index(drop=True)
+        accepted_df = ml_classified_df.loc[accepted_mask].reset_index(drop=True)
     else:
-        filtered_df['ml_probability'] = pd.Series(dtype=float)
-        filtered_df['ml_label'] = pd.Series(dtype=str)
-        accepted_df = filtered_df
-
-    if 'final_crop_filename' in accepted_df.columns:
-        accepted_df['crop_filename'] = accepted_df['final_crop_filename']
-    elif 'crop_filename' not in accepted_df.columns:
-        accepted_df['crop_filename'] = None
-        logger.warning(
-            "No crop filename column found in Stage 2 output; downstream stages may fail."
-        )
+        ml_classified_df['ml_probability'] = pd.Series(dtype=float)
+        ml_classified_df['ml_label'] = pd.Series(dtype=str)
+        accepted_df = ml_classified_df
 
     if accepted_df.empty:
         logger.warning(
@@ -378,13 +392,37 @@ def run_stage_03_filtering_and_classification(
             probability_threshold,
         )
 
-    stage3_crops_dir = os.path.join(output_dir_stage3, 'focussed_and_filtered')
-    _copy_filtered_crops(accepted_df, final_particles_crops_dir, stage3_crops_dir)
+    legacy_stage3_crops_dir = os.path.join(output_dir_stage3, 'focussed_and_filtered')
+    filtered_good_crops_dir = os.path.join(output_dir_stage3, 'filtered_good')
 
-    filtered_df = _rename_metadata_columns(accepted_df.copy())
+    focussed_df_for_outputs = _ensure_crop_filename_column(quality_filtered_df)
+    _copy_filtered_crops(
+        focussed_df_for_outputs,
+        final_particles_crops_dir,
+        [legacy_stage3_crops_dir],
+    )
+    focussed_csv_df = _rename_metadata_columns(focussed_df_for_outputs)
+    legacy_output_filename = 'focussed_and_filtered.csv'
+    legacy_csv_path = save_dataframe_to_csv(
+        focussed_csv_df,
+        output_dir_stage3,
+        legacy_output_filename,
+    )
 
-    output_filename = 'focussed_and_filtered.csv'
-    saved_csv_path = save_dataframe_to_csv(accepted_df, output_dir_stage3, output_filename)
+    accepted_df_for_outputs = _ensure_crop_filename_column(accepted_df)
+    _copy_filtered_crops(
+        accepted_df_for_outputs,
+        final_particles_crops_dir,
+        [filtered_good_crops_dir],
+    )
+    filtered_good_csv_df = _rename_metadata_columns(accepted_df_for_outputs)
+
+    filtered_good_filename = 'filtered_good.csv'
+    filtered_good_csv_path = save_dataframe_to_csv(
+        filtered_good_csv_df,
+        output_dir_stage3,
+        filtered_good_filename,
+    )
 
     logger.info(
         "Stage 3 summary for %s -> start: %d, quality removed: %d, ML removed: %d, saved: %d",
@@ -392,6 +430,10 @@ def run_stage_03_filtering_and_classification(
         initial_particle_count,
         quality_removed_count,
         ml_rejected_count,
-        len(filtered_df),
+        len(accepted_df),
     )
-    return saved_csv_path
+    if legacy_csv_path:
+        logger.debug(
+            "Legacy Stage 3 CSV now captures pre-ML filtering results at %s", legacy_csv_path
+        )
+    return filtered_good_csv_path
