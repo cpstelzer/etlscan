@@ -198,7 +198,7 @@ def run_stage_04_biological_analysis(
 
     final_analysis_df = pd.DataFrame(analysis_results)
     
-    output_filename = f"{sample_id}_stage4_final_analysis.csv"
+    output_filename = "stage4_final_analysis.csv"
     saved_csv_path = save_dataframe_to_csv(final_analysis_df, output_dir_stage4, output_filename)
 
     logger.info(f"--- Stage 4: Biological Analysis for {sample_id} COMPLETED ---")
