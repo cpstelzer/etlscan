@@ -117,11 +117,13 @@ def main():
     aggregated_final_particles: List[pd.DataFrame] = []
     aggregated_stage3_focussed_particles: List[pd.DataFrame] = []
     aggregated_stage3_filtered_good_particles: List[pd.DataFrame] = []
+    aggregated_stage4_analysis: List[pd.DataFrame] = []
     combined_filename = f"{batch_dir_name}.csv"
     stage3_combined_filename = f"{batch_dir_name}_stage3_focussed_and_filtered.csv"
     stage3_filtered_good_combined_filename = f"{batch_dir_name}_stage3_filtered_good.csv"
     batch_output_parent_dir = os.path.join(project_base_dir, "data", "output", batch_dir_name)
     os.makedirs(batch_output_parent_dir, exist_ok=True)
+    stage4_combined_filename = f"{batch_dir_name}_stage4_final_analysis.csv"
 
     total_pipeline_start_time = time.time()
     for current_sample_id in valid_sample_ids:
@@ -155,6 +157,7 @@ def main():
         s3_filtered_crops_dir = os.path.join(s3_output_dir, 'filtered_good')
         s3_legacy_crops_dir = os.path.join(s3_output_dir, 'focussed_and_filtered')
         s2_all_crops_dir_path = os.path.join(s2_output_dir, "stage2_all_particle_crops")
+        s4_final_csv_path = os.path.join(s4_output_dir, 'stage4_final_analysis.csv')
 
         try:
             # --- Stage 1: Detection & Pre-Filtering ---
@@ -352,6 +355,40 @@ def main():
                     s3_legacy_csv_path,
                 )
 
+            if os.path.exists(s4_final_csv_path):
+                stage4_analysis_df = load_dataframe_from_csv(s4_final_csv_path)
+                if stage4_analysis_df is not None and not stage4_analysis_df.empty:
+                    stage4_analysis_copy = stage4_analysis_df.copy()
+                    if 'sample_id' in stage4_analysis_copy.columns:
+                        stage4_analysis_copy['sample_id'] = stage4_analysis_copy['sample_id'].fillna(current_sample_id)
+                    else:
+                        stage4_analysis_copy.insert(0, 'sample_id', current_sample_id)
+                    aggregated_stage4_analysis.append(stage4_analysis_copy)
+                    logger.info(
+                        f"Collected {len(stage4_analysis_copy)} Stage 4 biological analysis records for batch aggregation from {current_sample_id}."
+                    )
+
+                    saved_stage4_batch_paths = _write_batch_aggregation_csv(
+                        aggregated_stage4_analysis,
+                        batch_output_csv_dir,
+                        stage4_combined_filename
+                    )
+                    for saved_stage4_batch_path in saved_stage4_batch_paths:
+                        if saved_stage4_batch_path:
+                            logger.info(
+                                f"Batch-level Stage 4 final analysis records updated at {saved_stage4_batch_path}."
+                            )
+                else:
+                    logger.debug(
+                        f"Stage 4 final analysis CSV for {current_sample_id} is empty. Skipping aggregation for this sample."
+                    )
+            else:
+                logger.debug(
+                    "Stage 4 final analysis CSV not found for %s at %s. Skipping aggregation for this sample.",
+                    current_sample_id,
+                    s4_final_csv_path,
+                )
+
     total_pipeline_duration = time.time() - total_pipeline_start_time
     logger.info(f"--- Batch pipeline execution FINISHED in {total_pipeline_duration:.2f} seconds ---")
 
@@ -396,6 +433,20 @@ def main():
                 )
     else:
         logger.info("No Stage 3 focussed particles were collected; skipping batch-level aggregation.")
+
+    if aggregated_stage4_analysis:
+        saved_stage4_batch_paths = _write_batch_aggregation_csv(
+            aggregated_stage4_analysis,
+            batch_output_csv_dir,
+            stage4_combined_filename
+        )
+        for saved_stage4_batch_path in saved_stage4_batch_paths:
+            if saved_stage4_batch_path:
+                logger.info(
+                    f"Batch-level Stage 4 final analysis records saved to {saved_stage4_batch_path}."
+                )
+    else:
+        logger.info("No Stage 4 final analysis records were collected; skipping batch-level aggregation.")
 
     logging.shutdown()
 
