@@ -45,7 +45,7 @@ stage_01_initial_detection:
       low_threshold_value: 10
       min_expected_diameter_px: 1500
       max_expected_diameter_px: 4000
-      min_circularity: 0.75
+      min_circularity: 0.6
     brightness_peak_calculation:
       min_intensity_for_peak_search: 75
       percentile_for_peak_proxy: 75
