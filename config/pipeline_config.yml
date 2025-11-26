@@ -19,7 +19,7 @@ system:
   source_image_illumination_type: "collimated"
   thresholding:
     mode: "otsu"
-    otsu_threshold_multiplier: 0.9
+    otsu_threshold_multiplier: 0.7
     fixed_threshold_value: 70
   # Segmentation parameters for Stage 2 & 4
   segmentation:
@@ -180,7 +180,7 @@ stage_04_biological_analysis:
   # Parameters specific to high-level analysis, e.g., egg detection
   egg_detection:
       gaussian_sigma: 1.0
-      egg_posterior_pixel_fraction: 0.4
+      egg_posterior_pixel_fraction: 0.35
       egg_threshold_quantile: 0.8
       egg_min_area: 50
       egg_max_area: 5000
