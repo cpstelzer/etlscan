@@ -62,48 +62,55 @@ def get_config() -> Dict[str, Any]:
 
 def get_unified_segmentation_params(config: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     """
-    Assembles the comprehensive parameter dictionary for unified main body segmentation
-    by combining system-level settings with Stage 3 main_body_segmentation parameters.
-    It also includes egg_detection parameters for convenience in extract_ml_features.
+    Assemble a segmentation parameter dictionary by combining system defaults with
+    any stage-specific overrides. The resulting mapping is used by both the
+    segmentation helpers and Stage 04 visualizations.
     """
     if config is None:
         config = get_config()
 
     system_cfg = config.get('system', {})
     global_thresh_cfg = system_cfg.get('thresholding', {})
-    
-    s3_config = config.get('stage_03_ml_classification', {})
-    # MODIFIED: Read from new structure
+
+    # Prefer the current Stage 03 configuration, but fall back to legacy keys if needed
+    s3_config = config.get('stage_03_filtering_and_classification', {})
+    if not s3_config:
+        s3_config = config.get('stage_03_ml_classification', {})
+
     s3_feat_params_overall = s3_config.get('feature_extraction_params', {})
     s3_main_body_seg_params = s3_feat_params_overall.get('main_body_segmentation', {})
     s3_egg_detection_params = s3_feat_params_overall.get('egg_detection', {})
 
-    # Start with S3 main body segmentation params
-    unified_params = s3_main_body_seg_params.copy()
+    # Start with system-level segmentation defaults when provided
+    system_segmentation_defaults = system_cfg.get('segmentation', {})
+    unified_params = system_segmentation_defaults.copy()
+
+    # Apply any Stage 03 overrides from the ML feature extraction config
+    unified_params.update(s3_main_body_seg_params)
 
     # Override/add with global system settings
     unified_params['source_image_illumination_type'] = system_cfg.get('source_image_illumination_type', 'darkfield')
     unified_params['thresholding_mode'] = global_thresh_cfg.get('mode', 'otsu')
     unified_params['otsu_threshold_multiplier'] = global_thresh_cfg.get('otsu_threshold_multiplier', 0.45)
     unified_params['fixed_threshold_value'] = global_thresh_cfg.get('fixed_threshold_value', 70)
-    
+
     # Ensure core main body segmentation params have defaults if somehow missing
     unified_params.setdefault('enable_unsharp_masking', False)
     unified_params.setdefault('unsharp_mask_sigma', 1.0)
     unified_params.setdefault('unsharp_mask_amount', 1.0)
     unified_params.setdefault('min_noise_size', 50)
     unified_params.setdefault('closing_selem_size', 1)
-    unified_params.setdefault('min_significant_area', 300) # This is used by extract_ml_features
+    unified_params.setdefault('min_significant_area', 300)  # Used by downstream ML feature extraction
 
-    # MODIFIED: Add egg detection parameters to this dictionary as well,
+    # Add egg detection parameters to this dictionary as well,
     # because extract_ml_features expects them in the single `params` dict it receives.
     # segment_main_body_from_image_float will ignore these egg-specific keys.
-    if s3_egg_detection_params: # Check if the dict exists
+    if s3_egg_detection_params:  # Check if the dict exists
         for key, value in s3_egg_detection_params.items():
-            unified_params[key] = value # Add or overwrite if somehow already present
+            unified_params[key] = value  # Add or overwrite if somehow already present
 
     # Ensure egg params also have defaults if not in config (for robustness, though config should provide them)
-    unified_params.setdefault('gaussian_sigma', 1.0) # For egg blur
+    unified_params.setdefault('gaussian_sigma', 1.0)  # For egg blur
     unified_params.setdefault('egg_posterior_pixel_fraction', 0.45)
     unified_params.setdefault('egg_threshold_quantile', 0.92)
     # ... add defaults for other egg params if desired for extreme robustness

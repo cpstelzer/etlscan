@@ -26,7 +26,7 @@ def perform_egg_analysis(
     image_crop_gray: np.ndarray,
     particle_row_data: pd.Series,
     s4_config: Dict[str, Any],
-    system_config: Dict[str, Any]
+    segmentation_params: Dict[str, Any]
 ) -> Tuple[Dict[str, Any], Optional[skimage.measure._regionprops.RegionProperties], Optional[skimage.measure._regionprops.RegionProperties]]:
     """
     Performs detailed egg detection and returns both the numerical features
@@ -39,7 +39,7 @@ def perform_egg_analysis(
     }
     
     crop_float = skimage.util.img_as_float(image_crop_gray)
-    _, _, main_props = segment_main_body_from_image_float(crop_float, system_config)
+    _, _, main_props = segment_main_body_from_image_float(crop_float, segmentation_params)
 
     if main_props is None:
         logger.warning(f"Could not re-segment particle in crop {particle_row_data.get('crop_filename')}. Skipping egg analysis.")
@@ -59,7 +59,7 @@ def perform_egg_analysis(
 
     # Egg thresholding and filtering logic
     image_for_egg_detection = crop_float.copy()
-    if system_config.get('source_image_illumination_type') == 'collimated':
+    if segmentation_params.get('source_image_illumination_type') == 'collimated':
         image_for_egg_detection = 1.0 - image_for_egg_detection
 
     egg_blurred = skimage.filters.gaussian(image_for_egg_detection, sigma=egg_config.get('gaussian_sigma', 1.0))
@@ -112,10 +112,10 @@ def run_stage_04_biological_analysis(
     
     config = get_config()
     s4_config = config.get('stage_04_biological_analysis', {})
-    system_config = config.get('system', {})
-    
-    # --- MODIFIED: Get unified params for visualization ---
-    vis_params = get_unified_segmentation_params(config)
+
+    # --- MODIFIED: Get unified params for segmentation and visualization ---
+    seg_params = get_unified_segmentation_params(config)
+    vis_params = seg_params
 
     s3_good_particles_df = load_dataframe_from_csv(input_s3_csv_path)
     if s3_good_particles_df is None or s3_good_particles_df.empty:
@@ -170,7 +170,7 @@ def run_stage_04_biological_analysis(
             
         # --- MODIFIED: Unpack new return values ---
         biological_features, main_props_for_vis, best_egg_for_vis = perform_egg_analysis(
-            image_crop, particle_row, s4_config, system_config
+            image_crop, particle_row, s4_config, seg_params
         )
         
         final_particle_data = particle_row.to_dict()
