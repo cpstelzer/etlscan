@@ -138,7 +138,10 @@ stage_03_filtering_and_classification:
   # ML Model files
   model_filename: "rf_fem_classifier.joblib"
   scaler_filename: "rf_fem_scaler.joblib"
-  
+
+  # Feature handling
+  size_invariant_features: false  # Enable to drop raw size metrics when normalized alternatives exist
+
   # ML based filtering
   ml_filter:
     min_probability_threshold: 0.35 # Example of a less stringent threshold
