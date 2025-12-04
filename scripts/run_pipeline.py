@@ -4,6 +4,7 @@ import argparse
 import logging
 import sys
 import time
+import shutil
 from typing import Optional, List, Union
 import pandas as pd
 
@@ -49,6 +50,15 @@ def _write_batch_aggregation_csv(
         saved_paths.append(save_dataframe_to_csv(combined_df, destination_dir, filename))
 
     return saved_paths
+
+
+def _clean_output_directory(output_dir: str, stage_label: str) -> None:
+    """Remove an existing stage output directory so it can be recreated cleanly."""
+    if os.path.isdir(output_dir):
+        logger.info(f"Cleaning existing {stage_label} output at: {output_dir}")
+        shutil.rmtree(output_dir)
+    else:
+        logger.debug(f"No existing {stage_label} output to clean at: {output_dir}")
 
 def main():
     parser = argparse.ArgumentParser(description="Run the Well Plate Analyzer pipeline.")
@@ -98,7 +108,7 @@ def main():
     if stages_to_run_str == "all":
         run_s1, run_s2, run_s3, run_s4 = True, True, True, True
     else:
-        selected_stages = [s.strip() for s in stages_to_run_str.split(',')]
+        selected_stages = [s.strip() for s in stages_to_run_str.split(',') if s.strip()]
         if "1" in selected_stages: run_s1 = True
         if "2" in selected_stages: run_s2 = True
         if "3" in selected_stages: run_s3 = True
@@ -140,7 +150,17 @@ def main():
         s2_output_dir = os.path.join(sample_output_base_dir, "stage2_characterization")
         s3_output_dir = os.path.join(sample_output_base_dir, "stage3_filtering_classification")
         s4_output_dir = os.path.join(sample_output_base_dir, "stage4_biological_analysis")
-        
+
+        # Clean existing outputs for the stages being rerun to ensure fresh outputs
+        if run_s1:
+            _clean_output_directory(s1_output_dir, "Stage 1")
+        if run_s2:
+            _clean_output_directory(s2_output_dir, "Stage 2")
+        if run_s3:
+            _clean_output_directory(s3_output_dir, "Stage 3")
+        if run_s4:
+            _clean_output_directory(s4_output_dir, "Stage 4")
+
         # Ensure directories exist for the stages being run
         if run_s1: os.makedirs(s1_output_dir, exist_ok=True)
         if run_s2: os.makedirs(s2_output_dir, exist_ok=True)

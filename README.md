@@ -81,7 +81,7 @@ Important CLI options:
 
 - `--input_batch_dir`: **Required.** Path to the parent directory that contains the sample folders.
 - `--config`: Optional path to a custom YAML config (defaults to `config/pipeline_config.yml`).
-- `--stages`: Comma-separated list from `{1,2,3,4}` or `all` to control which stage modules run. Dependencies are enforced, so Stage n requires outputs from Stage n−1.
+- `--stages`: Comma-separated list from `{1,2,3,4}` or `all` to control which stage modules run. Dependencies are enforced, so Stage n requires outputs from Stage n−1. When a stage is rerun, its existing output directory is automatically deleted so the new outputs start cleanly.
 
 ## ML classification workflow
 
