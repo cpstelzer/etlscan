@@ -2,7 +2,7 @@
 import logging
 import os
 import shutil
-from typing import List, Optional
+from typing import List, Optional, Tuple
 
 import joblib
 import numpy as np
@@ -40,6 +40,17 @@ METADATA_COLUMNS: List[str] = [
     'SAMPLE_ID', 'source_image_filename', 'crop_filename', 'final_crop_filename', 'track_id'
 ]
 METADATA_PREFIX = 'meta__'
+
+SIZE_INVARIANT_RAW_FEATURE_MAP = {
+    's1_area': ['s1_solidity', 's1_circularity'],
+    's1_perimeter': ['s1_circularity', 'heywood_circularity_factor'],
+    's1_feret_diameter': ['elongation_factor'],
+    's1_equivalent_diameter': ['heywood_circularity_factor'],
+    'main_area_raw': ['solidity', 'heywood_circularity_factor', 'elongation_factor'],
+    'main_area_filled': ['solidity', 'heywood_circularity_factor', 'elongation_factor'],
+    'equivalent_diameter_raw': ['heywood_circularity_factor', 'elongation_factor'],
+    'rot_rect_area': ['compactness_rect'],
+}
 
 
 def _get_lbp_feature_count_from_config(config: Optional[dict] = None) -> int:
@@ -90,6 +101,39 @@ def _infer_lbp_feature_count_from_df(df: pd.DataFrame) -> int:
     if indices:
         return max(indices) + 1
     return len(lbp_columns)
+
+
+def apply_size_invariant_feature_strategy(
+    df: pd.DataFrame,
+    enabled: bool,
+    feature_names: Optional[List[str]] = None,
+) -> Tuple[pd.DataFrame, List[str]]:
+    """
+    Drop size-dependent raw metrics when size-invariant mode is enabled.
+
+    Raw size features are removed only when a normalized counterpart (e.g.,
+    solidity, circularity, elongation) already exists in the dataframe. When a
+    feature list is provided, any columns required by the trained model are
+    retained even if they are size-dependent.
+    """
+
+    if not enabled:
+        return df, []
+
+    working_df = df.copy()
+    dropped: List[str] = []
+
+    for raw_feature, normalized_candidates in SIZE_INVARIANT_RAW_FEATURE_MAP.items():
+        if raw_feature not in working_df.columns:
+            continue
+        if feature_names and raw_feature in feature_names:
+            continue
+
+        if any(candidate in working_df.columns for candidate in normalized_candidates):
+            working_df = working_df.drop(columns=[raw_feature])
+            dropped.append(raw_feature)
+
+    return working_df, dropped
 
 
 def _validate_required_feature_columns(
@@ -242,9 +286,29 @@ def _load_ml_artifacts(s3_config: dict) -> tuple:
     return model, scaler, feature_names
 
 
-def _prepare_ml_features(df: pd.DataFrame, feature_names: List[str]) -> pd.DataFrame:
+def _prepare_ml_features(
+    df: pd.DataFrame,
+    feature_names: List[str],
+    size_invariant_enabled: bool = False,
+) -> pd.DataFrame:
     """Align dataframe columns with feature names used during training."""
-    missing_columns = [col for col in feature_names if col not in df.columns]
+
+    working_df = df
+    if size_invariant_enabled:
+        working_df, dropped = apply_size_invariant_feature_strategy(
+            working_df, enabled=True, feature_names=feature_names
+        )
+        if dropped:
+            logger.debug(
+                "Size-invariant mode enabled; dropped raw size features not used by the model: %s",
+                ', '.join(sorted(dropped)),
+            )
+        elif any(raw in feature_names for raw in SIZE_INVARIANT_RAW_FEATURE_MAP):
+            logger.warning(
+                "Size-invariant mode requested, but the trained feature list still expects raw size metrics."
+            )
+
+    missing_columns = [col for col in feature_names if col not in working_df.columns]
     if missing_columns:
         sample_missing = ', '.join(missing_columns[:10])
         logger.warning(
@@ -253,7 +317,7 @@ def _prepare_ml_features(df: pd.DataFrame, feature_names: List[str]) -> pd.DataF
             sample_missing,
         )
 
-    aligned = df.reindex(columns=feature_names)
+    aligned = working_df.reindex(columns=feature_names)
     aligned = aligned.apply(pd.to_numeric, errors='coerce').fillna(0.0)
     return aligned
 
@@ -263,10 +327,11 @@ def _score_particles_with_model(
     model,
     scaler,
     feature_names: List[str],
+    size_invariant_enabled: bool = False,
 ) -> np.ndarray:
     """Scale Stage 3 features and compute positive-class probabilities."""
 
-    feature_matrix = _prepare_ml_features(df, feature_names)
+    feature_matrix = _prepare_ml_features(df, feature_names, size_invariant_enabled=size_invariant_enabled)
 
     try:
         scaled_features = scaler.transform(feature_matrix)
@@ -314,6 +379,7 @@ def run_stage_03_filtering_and_classification(
     s3_config = config.get('stage_03_filtering_and_classification', {})
     if not s3_config:
         raise ConfigError("Configuration for 'stage_03_filtering_and_classification' not found.")
+    size_invariant_enabled = bool(s3_config.get('size_invariant_features', False))
 
     final_particles_df = load_dataframe_from_csv(input_final_particles_csv_path)
     if final_particles_df is None or final_particles_df.empty:
@@ -365,7 +431,13 @@ def run_stage_03_filtering_and_classification(
             logger.error("Failed to load ML artifacts for Stage 3: %s", exc)
             raise
 
-        probabilities = _score_particles_with_model(ml_classified_df, model, scaler, feature_names)
+        probabilities = _score_particles_with_model(
+            ml_classified_df,
+            model,
+            scaler,
+            feature_names,
+            size_invariant_enabled=size_invariant_enabled,
+        )
         ml_classified_df['ml_probability'] = probabilities
         ml_classified_df['ml_label'] = np.where(
             ml_classified_df['ml_probability'] >= probability_threshold, 'accept', 'reject'

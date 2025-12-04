@@ -54,6 +54,7 @@ from src.core.segmentation import segment_main_body_from_image_float
 from src.core.feature_calculators.quality_calculator import calculate_quality_features
 from src.core.feature_calculators.morphology_calculator import calculate_detailed_body_morphology
 from src.core.feature_calculators.shape_descriptors import calculate_shape_descriptors
+from src.stages.stage_03_filtering_and_classification import apply_size_invariant_feature_strategy
 
 
 logger = logging.getLogger(__name__)
@@ -398,6 +399,21 @@ def main():
 
     # --- Model Training ---
     X, y = _normalize_feature_table(full_df, label_column='label')
+
+    size_invariant_enabled = bool(
+        training_params.get('size_invariant_features', s3_config.get('size_invariant_features', False))
+    )
+    if size_invariant_enabled:
+        X, dropped_raw_features = apply_size_invariant_feature_strategy(X, enabled=True)
+        if dropped_raw_features:
+            logger.info(
+                "Size-invariant training enabled; dropped raw size features with normalized alternatives: %s",
+                ', '.join(sorted(dropped_raw_features)),
+            )
+        else:
+            logger.warning(
+                "Size-invariant training enabled, but no raw size features were removed because normalized alternatives were absent."
+            )
 
     
     # --- MODIFICATION: Exclude features based on config ---
