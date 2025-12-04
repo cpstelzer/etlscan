@@ -407,12 +407,12 @@ def main():
         X, dropped_raw_features = apply_size_invariant_feature_strategy(X, enabled=True)
         if dropped_raw_features:
             logger.info(
-                "Size-invariant training enabled; dropped raw size features with normalized alternatives: %s",
+                "Size-invariant training enabled; dropped raw size-dependent features to favor normalized metrics: %s",
                 ', '.join(sorted(dropped_raw_features)),
             )
         else:
             logger.warning(
-                "Size-invariant training enabled, but no raw size features were removed because normalized alternatives were absent."
+                "Size-invariant training enabled, but no raw size features were removed."
             )
 
     

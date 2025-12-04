@@ -41,15 +41,29 @@ METADATA_COLUMNS: List[str] = [
 ]
 METADATA_PREFIX = 'meta__'
 
-SIZE_INVARIANT_RAW_FEATURE_MAP = {
+# Raw metrics that scale with particle size and should be removed when
+# ``size_invariant_features`` is enabled. Each entry lists normalized or
+# shape-centric counterparts that remain available as replacements.
+SIZE_DEPENDENT_RAW_FEATURE_RULES = {
+    # Stage 1 geometry-heavy metrics
+    'bounding_w': ['compactness_rect', 'extent_raw'],
+    'bounding_h': ['compactness_rect', 'extent_raw'],
+    'rot_rect_width': ['elongation_factor', 'compactness_rect'],
+    'rot_rect_height': ['elongation_factor', 'compactness_rect'],
+    'rot_rect_area': ['compactness_rect'],
     's1_area': ['s1_solidity', 's1_circularity'],
     's1_perimeter': ['s1_circularity', 'heywood_circularity_factor'],
     's1_feret_diameter': ['elongation_factor'],
     's1_equivalent_diameter': ['heywood_circularity_factor'],
+
+    # Stage 2 morphology metrics (raw size driven)
     'main_area_raw': ['solidity', 'heywood_circularity_factor', 'elongation_factor'],
     'main_area_filled': ['solidity', 'heywood_circularity_factor', 'elongation_factor'],
     'equivalent_diameter_raw': ['heywood_circularity_factor', 'elongation_factor'],
-    'rot_rect_area': ['compactness_rect'],
+    'major_axis_length_raw': ['elongation_factor', 'compactness_factor_ni'],
+    'minor_axis_length_raw': ['elongation_factor', 'compactness_factor_ni'],
+    'extent_raw': ['compactness_rect', 'solidity'],
+    'eccentricity_raw': ['elongation_factor', 's1_eccentricity'],
 }
 
 
@@ -111,10 +125,11 @@ def apply_size_invariant_feature_strategy(
     """
     Drop size-dependent raw metrics when size-invariant mode is enabled.
 
-    Raw size features are removed only when a normalized counterpart (e.g.,
-    solidity, circularity, elongation) already exists in the dataframe. When a
-    feature list is provided, any columns required by the trained model are
-    retained even if they are size-dependent.
+    All known raw area/length/perimeter metrics are removed to enforce scale
+    invariance. When normalized counterparts (e.g., solidity, circularity,
+    elongation, compactness) are present, they are preferred; when no
+    normalized alternative exists, the raw feature is still removed unless the
+    trained model explicitly requires it via ``feature_names``.
     """
 
     if not enabled:
@@ -123,15 +138,29 @@ def apply_size_invariant_feature_strategy(
     working_df = df.copy()
     dropped: List[str] = []
 
-    for raw_feature, normalized_candidates in SIZE_INVARIANT_RAW_FEATURE_MAP.items():
+    for raw_feature, normalized_candidates in SIZE_DEPENDENT_RAW_FEATURE_RULES.items():
         if raw_feature not in working_df.columns:
             continue
         if feature_names and raw_feature in feature_names:
+            logger.debug(
+                "Preserving size-dependent feature '%s' because the trained model artifact expects it.",
+                raw_feature,
+            )
             continue
 
-        if any(candidate in working_df.columns for candidate in normalized_candidates):
-            working_df = working_df.drop(columns=[raw_feature])
-            dropped.append(raw_feature)
+        has_normalized_alternative = any(
+            candidate in working_df.columns for candidate in normalized_candidates
+        )
+
+        working_df = working_df.drop(columns=[raw_feature])
+        dropped.append(raw_feature)
+
+        if not has_normalized_alternative:
+            logger.debug(
+                "Dropping size-dependent feature '%s' despite no normalized alternative;"
+                " keeping size invariance strict.",
+                raw_feature,
+            )
 
     return working_df, dropped
 
@@ -303,7 +332,7 @@ def _prepare_ml_features(
                 "Size-invariant mode enabled; dropped raw size features not used by the model: %s",
                 ', '.join(sorted(dropped)),
             )
-        elif any(raw in feature_names for raw in SIZE_INVARIANT_RAW_FEATURE_MAP):
+        elif any(raw in feature_names for raw in SIZE_DEPENDENT_RAW_FEATURE_RULES):
             logger.warning(
                 "Size-invariant mode requested, but the trained feature list still expects raw size metrics."
             )

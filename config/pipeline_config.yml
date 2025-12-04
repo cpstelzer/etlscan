@@ -140,7 +140,7 @@ stage_03_filtering_and_classification:
   scaler_filename: "rf_fem_scaler.joblib"
 
   # Feature handling
-  size_invariant_features: false  # Enable to drop raw size metrics when normalized alternatives exist
+  size_invariant_features: false  # Enable to drop raw size metrics and rely on normalized/scale-free descriptors
 
   # ML based filtering
   ml_filter:
