@@ -11,7 +11,13 @@ import argparse
 import logging
 import os
 import random
+import sys
 from typing import Tuple
+
+# Ensure project root is on the Python path for module resolution
+current_dir = os.path.dirname(os.path.abspath(__file__))
+project_root = os.path.dirname(current_dir)
+sys.path.insert(0, project_root)
 
 import numpy as np
 import torch
