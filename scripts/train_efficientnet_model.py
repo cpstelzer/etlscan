@@ -143,14 +143,23 @@ def evaluate(model, dataloader, criterion, device: torch.device) -> Tuple[float,
 def parse_args():
     parser = argparse.ArgumentParser(description="Train an EfficientNet-B0 classifier with strong augmentation.")
     parser.add_argument('--config', default='config/pipeline_config.yml', help='Path to the pipeline config file.')
-    parser.add_argument('--dataset-dir', default=None, help='Directory with class subfolders for training (defaults to data/training_data).')
-    parser.add_argument('--epochs', type=int, default=15)
-    parser.add_argument('--batch-size', type=int, default=32)
+    parser.add_argument(
+        '--dataset-dir',
+        default=None,
+        help='Directory with class subfolders for training (defaults to config-specified training_data path).',
+    )
+    parser.add_argument('--epochs', type=int, default=None, help='Override training epochs (defaults from config).')
+    parser.add_argument('--batch-size', type=int, default=None, help='Override batch size (defaults from config).')
     parser.add_argument('--learning-rate', type=float, default=1e-3)
     parser.add_argument('--weight-decay', type=float, default=1e-4)
     parser.add_argument('--val-split', type=float, default=0.2)
     parser.add_argument('--mixup-alpha', type=float, default=0.4)
-    parser.add_argument('--device', default='auto', choices=['auto', 'cuda', 'cpu'], help="Device to train on: 'cuda', 'cpu', or 'auto' (prefer CUDA if available).")
+    parser.add_argument(
+        '--device',
+        default='auto',
+        choices=['auto', 'cuda', 'cpu'],
+        help="Device to train on: 'cuda', 'cpu', or 'auto' (prefer CUDA if available).",
+    )
     return parser.parse_args()
 
 
@@ -164,15 +173,26 @@ def main():
 
     checkpoint_filename = eff_cfg.get('checkpoint_filename', 'efficientnet_b0_best.pt')
     input_size = int(eff_cfg.get('input_size', 224))
+    positive_label = eff_cfg.get('positive_label', 'good')
+    training_cfg = (
+        s3_config.get('training_params', {})
+        .get('efficient_net_training', {})
+    )
+    default_epochs = int(training_cfg.get('default_epochs', 15))
+    default_batch_size = int(training_cfg.get('default_batch_size', 32))
+    dataset_subdir = training_cfg.get('dataset_subdir', '') or ''
     models_dir = get_models_dir()
     os.makedirs(models_dir, exist_ok=True)
 
     # Reuse the same curated crop layout as the RandomForest path: data/training_data/{good,bad}
-    dataset_dir = args.dataset_dir or get_training_data_dir()
+    dataset_dir = args.dataset_dir
+    if dataset_dir is None:
+        base_training_dir = get_training_data_dir()
+        dataset_dir = os.path.join(base_training_dir, dataset_subdir) if dataset_subdir else base_training_dir
     if not os.path.isdir(dataset_dir):
         raise FileNotFoundError(f"Training dataset directory not found: {dataset_dir}")
 
-    setup_logging(config)
+    setup_logging()
     logger.info("Starting EfficientNet training with dataset at %s", dataset_dir)
 
     train_tfms, val_tfms = build_transforms(input_size)
@@ -187,8 +207,11 @@ def main():
     train_dataset, val_dataset = random_split(full_dataset, [train_size, val_size])
     val_dataset.dataset.transform = val_tfms
 
-    train_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True, num_workers=2)
-    val_loader = DataLoader(val_dataset, batch_size=args.batch_size, shuffle=False, num_workers=2)
+    epochs = args.epochs or default_epochs
+    batch_size = args.batch_size or default_batch_size
+
+    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, num_workers=2)
+    val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, num_workers=2)
 
     if args.device == 'auto':
         device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -210,13 +233,13 @@ def main():
     random.seed(42)
     np.random.seed(42)
 
-    for epoch in range(args.epochs):
+    for epoch in range(epochs):
         train_loss, train_acc = train_one_epoch(model, train_loader, criterion, optimizer, mixup, device)
         val_loss, val_acc = evaluate(model, val_loader, criterion, device)
         logger.info(
             "Epoch %d/%d -> train loss: %.4f acc: %.3f | val loss: %.4f acc: %.3f",
             epoch + 1,
-            args.epochs,
+            epochs,
             train_loss,
             train_acc,
             val_loss,
@@ -229,6 +252,7 @@ def main():
                 'model_state_dict': model.state_dict(),
                 'class_to_idx': class_to_idx,
                 'input_size': input_size,
+                'positive_label': positive_label,
                 'val_acc': val_acc,
             }
 

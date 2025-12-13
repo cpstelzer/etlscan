@@ -417,8 +417,6 @@ def _load_efficientnet_artifacts(s3_config: dict):
     models_dir = get_models_dir()
     checkpoint_filename = eff_config.get('checkpoint_filename', 'efficientnet_b0_best.pt')
     checkpoint_path = os.path.join(models_dir, checkpoint_filename)
-    positive_label = eff_config.get('positive_label', 'good')
-    input_size = int(eff_config.get('input_size', 224))
 
     if not os.path.exists(checkpoint_path):
         raise MLModelError(
@@ -437,6 +435,17 @@ def _load_efficientnet_artifacts(s3_config: dict):
     model = _build_efficientnet_model(num_classes)
     model.load_state_dict(checkpoint['model_state_dict'])
     model.eval()
+
+    checkpoint_positive_label = checkpoint.get('positive_label')
+    positive_label = eff_config.get('positive_label') or checkpoint_positive_label or 'good'
+    input_size = int(checkpoint.get('input_size', eff_config.get('input_size', 224)))
+
+    if checkpoint_positive_label and positive_label != checkpoint_positive_label:
+        logger.warning(
+            "Config positive_label '%s' differs from checkpoint '%s'; using config value.",
+            positive_label,
+            checkpoint_positive_label,
+        )
 
     positive_index = class_to_idx.get(positive_label)
     if positive_index is None:
