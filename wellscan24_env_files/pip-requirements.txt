@@ -1,0 +1,10 @@
+# Pip-only packages to install AFTER conda has created the environment.
+# Avoid conda-managed packages here (numpy, scipy, pandas, matplotlib, opencv, pyqt, etc.).
+
+pyserial==3.5
+more-itertools==10.8.0
+inflect==7.5.0
+typeguard==4.4.4
+importlib-metadata==8.7.0
+pypylon==4.2.0
+zaber-serial==0.9.1

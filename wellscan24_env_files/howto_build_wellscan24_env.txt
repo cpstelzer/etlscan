@@ -1,0 +1,30 @@
+## Installing the wellscan24_env on a new machine
+
+# Delete the previous version of the environment (if it exists)
+conda env remove --name <env_name>
+conda env remove --prefix /full/path/to/env # If environment is stored in a custom path
+
+# Install all conda dependencies
+conda create -n wellscan24_env --file conda-packages.txt
+
+# Alternative: Install environment to a specific location
+conda create --prefix C:\conda_envs\wellscan24_env --file conda-packages.txt
+
+# Activate the environment
+conda activate wellscan24_env
+conda activate C:\conda_envs\wellscan24_env # if environment is not stored in the default location
+
+# Explicitly install pytorch after activating new conda environment
+# The following line is specific to my local machine (Desktop-QAFILOU)
+conda install pytorch==2.5.1 torchvision==0.20.1 torchaudio==2.5.1 pytorch-cuda=12.4 -c pytorch -c nvidia
+
+# If no GPU is available
+conda install pytorch torchvision cpuonly -c pytorch
+
+# Install pip requiring packages
+pip install -r pip-requirements.txt
+
+# Install Optotune Python SDK from locally stored files
+python -m pip install --no-user optoKummenberg-1.0.4894-py3-none-any.whl
+python -m pip install --no-user optoICC-2.0.4922-py3-none-any.whl
+
