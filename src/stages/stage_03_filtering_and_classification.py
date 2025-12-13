@@ -465,15 +465,21 @@ def _build_efficientnet_transforms(input_size: int):
         )
 
     weights = EfficientNet_B0_Weights.IMAGENET1K_V1
-    eval_transforms = transforms.Compose(
-        [
-            transforms.Resize(input_size + 32),
-            transforms.CenterCrop(input_size),
-            transforms.ToTensor(),
-            transforms.Normalize(mean=weights.meta['mean'], std=weights.meta['std']),
-        ]
-    )
-    return eval_transforms
+    try:
+        # Prefer the official preprocessing pipeline bundled with the weights to avoid
+        # missing metadata such as mean/std on older torchvision versions.
+        return weights.transforms(crop_size=input_size, resize_size=input_size + 32)
+    except Exception:
+        # Fall back to manual construction if the helper is unavailable, using
+        # standard ImageNet normalization constants.
+        return transforms.Compose(
+            [
+                transforms.Resize(input_size + 32),
+                transforms.CenterCrop(input_size),
+                transforms.ToTensor(),
+                transforms.Normalize(mean=(0.485, 0.456, 0.406), std=(0.229, 0.224, 0.225)),
+            ]
+        )
 
 
 def _load_crop_as_tensor(image_path: str, preprocess) -> Optional["torch_type.Tensor"]:
