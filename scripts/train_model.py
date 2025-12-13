@@ -343,22 +343,34 @@ def main():
     parser.add_argument(
         "--labels-sidecar",
         type=str,
-        help="Optional JSON/CSV mapping from csv basename to label when no label column is present."
+        help="Optional JSON/CSV mapping from csv basename to label when no label column is present.",
     )
     parser.add_argument(
         "--use-image-directories",
         action='store_true',
-        help="Enable legacy mode that extracts features directly from image directories."
+        help=(
+            "Extract features directly from image directories instead of CSVs. "
+            "When --csv-files is omitted, this mode is used automatically."
+        ),
+    )
+    parser.add_argument(
+        "--training-data-dir",
+        type=str,
+        default=get_training_data_dir(),
+        help=(
+            "Directory containing training CSV files (defaults to data/training_data under the project base). "
+            "If --csv-files are not provided, all CSVs in this directory will be used."
+        ),
     )
     parser.add_argument(
         "--good-image-dir",
         type=str,
-        help="Path to directory with GOOD training crops (legacy mode only)."
+        help="Path to directory with GOOD training crops (defaults to <training-data-dir>/<good_data_subdir>).",
     )
     parser.add_argument(
         "--bad-image-dir",
         type=str,
-        help="Path to directory with BAD training crops (legacy mode only)."
+        help="Path to directory with BAD training crops (defaults to <training-data-dir>/<bad_data_subdir>).",
     )
     args = parser.parse_args()
 
@@ -376,26 +388,73 @@ def main():
     system_config = config.get('system', {})
     training_params = s3_config.get('training_params', {})
     
-    if args.use_image_directories:
-        training_data_dir = get_training_data_dir()
-        good_dir = args.good_image_dir or os.path.join(
-            training_data_dir, training_params.get('good_data_subdir', 'good')
-        )
-        bad_dir = args.bad_image_dir or os.path.join(
-            training_data_dir, training_params.get('bad_data_subdir', 'bad')
-        )
+    csv_files: List[str] = args.csv_files or []
+    use_image_mode = args.use_image_directories or not csv_files
+
+    if use_image_mode and csv_files:
+        logger.info("--use-image-directories specified; ignoring %d CSV file(s).", len(csv_files))
+
+    if use_image_mode:
+        training_data_dir = args.training_data_dir or get_training_data_dir()
+        if not os.path.isdir(training_data_dir):
+            raise DataValidationError(
+                f"Training data directory not found for image training: {training_data_dir}"
+            )
+
+        def _resolve_image_dir(directory_arg: Optional[str], fallback_subdir: str) -> str:
+            base_dir = directory_arg or os.path.join(training_data_dir, fallback_subdir)
+            return base_dir
+
+        good_dir = _resolve_image_dir(args.good_image_dir, training_params.get('good_data_subdir', 'good'))
+        bad_dir = _resolve_image_dir(args.bad_image_dir, training_params.get('bad_data_subdir', 'bad'))
+
+        for label_name, dir_path in [('good', good_dir), ('bad', bad_dir)]:
+            if not os.path.isdir(dir_path):
+                raise DataValidationError(
+                    f"Image directory for label '{label_name}' not found: {dir_path}"
+                )
+            has_images = any(
+                name.lower().endswith(('.png', '.jpg', '.jpeg', '.tif'))
+                for name in os.listdir(dir_path)
+            )
+            if not has_images:
+                raise DataValidationError(
+                    f"Image directory for label '{label_name}' contains no images: {dir_path}"
+                )
 
         good_df = load_and_extract_from_directory(good_dir, 1, system_config, s2_config)
         bad_df = load_and_extract_from_directory(bad_dir, 0, system_config, s2_config)
 
-        if good_df.empty or bad_df.empty:
-            raise DataValidationError("One or both training directories are empty or failed processing. Cannot train.")
-
         full_df = pd.concat([good_df, bad_df], ignore_index=True)
     else:
-        if not args.csv_files:
-            raise DataValidationError("Provide --csv-files or enable --use-image-directories to supply training data.")
-        full_df = _load_feature_table_from_csv(args.csv_files, args.label_column, args.labels_sidecar)
+        if args.training_data_dir:
+            if not os.path.isdir(args.training_data_dir):
+                raise DataValidationError(
+                    f"Training data directory not found: {args.training_data_dir}"
+                )
+
+            csv_files = [
+                os.path.join(args.training_data_dir, name)
+                for name in os.listdir(args.training_data_dir)
+                if name.lower().endswith('.csv')
+            ]
+
+            if not csv_files:
+                raise DataValidationError(
+                    "No CSV files found in training data directory. Provide --csv-files explicitly or "
+                    "populate the directory with training tables, or allow image-based training by omitting --csv-files."
+                )
+
+            logger.info(
+                "Auto-discovered %d CSV file(s) in training data directory %s", len(csv_files), args.training_data_dir
+            )
+
+        if not csv_files:
+            raise DataValidationError(
+                "Provide --csv-files or omit it to trigger image-based training from the default class folders."
+            )
+
+        full_df = _load_feature_table_from_csv(csv_files, args.label_column, args.labels_sidecar)
 
     # --- Model Training ---
     X, y = _normalize_feature_table(full_df, label_column='label')

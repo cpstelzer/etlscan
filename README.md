@@ -92,14 +92,16 @@ Stage 03 is split into three segments: (1) deterministic quality filters, (2) 
 2. **Runtime scoring** – `stage_03_filtering_and_classification.run_stage_03_filtering_and_classification` automatically attaches `ml_probability` (positive-class score) and `ml_label` ("accept"/"reject" decision based on `ml_filter.min_probability_threshold`). Set `stage_03_filtering_and_classification.model_type` to `random_forest_model` or `efficient_net_model` in the YAML to toggle which classifier runs. The ML-accepted subset is written to `stage3_filtering_classification/filtered_good.csv`, while `stage3_filtering_classification/focussed_and_filtered.csv` now captures the focus/quality-filtered particles before ML classification for auditing or retraining workflows.
 3. **Diagnostics** – Analysts can call `plot_probability_histogram` or `plot_roc_curve` from `src/visualization/feature_visualization.py` to summarize new runs. The helpers accept raw probability arrays / `(y_true, y_score)` pairs and emit PNGs beside other review artifacts.
 
-For classifier retraining run:
+For classifier retraining, the RandomForest trainer now consumes class-labeled image folders by default. A single command is enoug
+h if your crops live under `data/training_data/good` and `data/training_data/bad` (or the `project_base_dir`-relative paths you s
+et in `config/pipeline_config.yml`):
 
 ```
-python scripts/train_model.py --config config/pipeline_config.yml \
-    --training_data_dir data/training_data
+python scripts/train_model.py --config config/pipeline_config.yml
 ```
 
-To train and use the EfficientNet-B0 alternative (including CPU/GPU tips), follow `docs/efficientnet_training.md`.
+See `docs/random_forest_training.md` for details and options (including CSV-based training). To train and use the EfficientNet-B0
+ alternative (including CPU/GPU tips), follow `docs/efficientnet_training.md`.
 
 ## Output layout
 
