@@ -58,9 +58,32 @@ class MixupWrapper:
         return mixed_inputs, targets_a, targets_b, lam
 
 
+def _get_normalization(weights: EfficientNet_B0_Weights) -> Tuple[list, list]:
+    """Return normalization statistics for the provided weights.
+
+    The torchvision weights metadata changed in recent releases (mean/std were
+    removed from ``weights.meta``). This helper first tries the legacy
+    ``meta`` mapping and then falls back to the attributes exposed by the
+    transforms preset. If neither is available, a clear error is raised so
+    callers don't see an unexpected ``KeyError``.
+    """
+
+    meta = getattr(weights, "meta", {}) or {}
+    mean, std = meta.get("mean"), meta.get("std")
+    if mean and std:
+        return mean, std
+
+    preset = weights.transforms()
+    if hasattr(preset, "mean") and hasattr(preset, "std"):
+        return preset.mean, preset.std
+
+    raise RuntimeError("Could not determine normalization statistics from the provided weights.")
+
+
 def build_transforms(input_size: int) -> Tuple[transforms.Compose, transforms.Compose]:
     weights = EfficientNet_B0_Weights.IMAGENET1K_V1
-    normalize = transforms.Normalize(mean=weights.meta['mean'], std=weights.meta['std'])
+    mean, std = _get_normalization(weights)
+    normalize = transforms.Normalize(mean=mean, std=std)
 
     train_tfms = transforms.Compose(
         [
