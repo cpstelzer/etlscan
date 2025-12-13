@@ -131,13 +131,21 @@ stage_02_characterization:
 
 # Stage 3: Filtering & Classification
 stage_03_filtering_and_classification:
+  model_type: "random_forest_model"  # Options: random_forest_model, efficient_net_model
+
   # --- NEW SECTION for controlling debug outputs ---
   debug_output:
     save_rejected_images: true # Set to false to disable saving rejected crops
 
   # ML Model files
-  model_filename: "rf_fem_classifier.joblib"
-  scaler_filename: "rf_fem_scaler.joblib"
+  random_forest_model:
+    model_filename: "rf_fem_classifier.joblib"
+    scaler_filename: "rf_fem_scaler.joblib"
+
+  efficient_net_model:
+    checkpoint_filename: "efficientnet_b0_best.pt"
+    input_size: 224
+    positive_label: "good"
 
   # Feature handling
   size_invariant_features: false  # Enable to drop raw size metrics and rely on normalized/scale-free descriptors
@@ -158,9 +166,9 @@ stage_03_filtering_and_classification:
     min_threshold: 80 
 
   # Training parameters (if a training script is invoked)
-  training_params:
-    good_data_subdir: "good"
-    bad_data_subdir: "bad"
+    training_params:
+      good_data_subdir: "good"
+      bad_data_subdir: "bad"
     test_split_size: 0.25
     random_state: 42
     rf_param_grid:
@@ -169,6 +177,11 @@ stage_03_filtering_and_classification:
       min_samples_split: [2, 5]
       min_samples_leaf: [1, 3]
       class_weight: ["balanced", null]
+    
+    efficient_net_training:
+      dataset_subdir: ""  # Leave blank to reuse data/training_data/{good,bad}
+      default_epochs: 15
+      default_batch_size: 32
       
     # --- NEW SECTION ---
     # List of feature prefixes to exclude from the model training.

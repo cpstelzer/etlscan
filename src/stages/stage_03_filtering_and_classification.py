@@ -2,11 +2,24 @@
 import logging
 import os
 import shutil
-from typing import List, Optional, Tuple
+from typing import List, Optional, Tuple, TYPE_CHECKING
 
 import joblib
 import numpy as np
 import pandas as pd
+
+try:
+    import torch
+    from torchvision import transforms
+    from torchvision.models import efficientnet_b0, EfficientNet_B0_Weights
+except Exception:  # pragma: no cover - optional dependency for CNN path
+    torch = None
+    EfficientNet_B0_Weights = None
+    transforms = None
+    efficientnet_b0 = None
+
+if TYPE_CHECKING:  # pragma: no cover - for type checkers only
+    import torch as torch_type
 
 from src.utils import (
     get_config,
@@ -273,11 +286,14 @@ def _ensure_crop_filename_column(df: pd.DataFrame) -> pd.DataFrame:
 def _load_ml_artifacts(s3_config: dict) -> tuple:
     """Load the ML model, scaler, and feature list used during training."""
     models_dir = get_models_dir()
-    model_filename = s3_config.get('model_filename', 'rf_fem_classifier.joblib')
-    scaler_filename = s3_config.get('scaler_filename', 'rf_fem_scaler.joblib')
+    rf_cfg = s3_config.get('random_forest_model', s3_config)
+    model_filename = rf_cfg.get('model_filename', 'rf_fem_classifier.joblib')
+    scaler_filename = rf_cfg.get('scaler_filename', 'rf_fem_scaler.joblib')
     model_path = os.path.join(models_dir, model_filename)
     scaler_path = os.path.join(models_dir, scaler_filename)
-    feature_names_filename = f"{os.path.splitext(model_filename)[0]}_feature_names.txt"
+    feature_names_filename = rf_cfg.get(
+        'feature_names_filename', f"{os.path.splitext(model_filename)[0]}_feature_names.txt"
+    )
     feature_names_path = os.path.join(models_dir, feature_names_filename)
 
     if not os.path.exists(model_path):
@@ -374,6 +390,160 @@ def _score_particles_with_model(
     return probabilities
 
 
+def _build_efficientnet_model(num_classes: int):
+    """Return an EfficientNet-B0 backbone with a binary classification head."""
+
+    if efficientnet_b0 is None or EfficientNet_B0_Weights is None:
+        raise MLModelError(
+            "torch/torchvision is required for the EfficientNet model path but is not installed."
+        )
+
+    weights = EfficientNet_B0_Weights.IMAGENET1K_V1
+    model = efficientnet_b0(weights=weights)
+    in_features = model.classifier[1].in_features
+    model.classifier[1] = torch.nn.Linear(in_features, num_classes)
+    return model
+
+
+def _load_efficientnet_artifacts(s3_config: dict):
+    """Load the EfficientNet checkpoint and metadata."""
+
+    if torch is None:
+        raise MLModelError(
+            "EfficientNet selected but torch is unavailable. Install torch/torchvision to continue."
+        )
+
+    eff_config = s3_config.get('efficient_net_model', {})
+    models_dir = get_models_dir()
+    checkpoint_filename = eff_config.get('checkpoint_filename', 'efficientnet_b0_best.pt')
+    checkpoint_path = os.path.join(models_dir, checkpoint_filename)
+    positive_label = eff_config.get('positive_label', 'good')
+    input_size = int(eff_config.get('input_size', 224))
+
+    if not os.path.exists(checkpoint_path):
+        raise MLModelError(
+            f"EfficientNet checkpoint not found at {checkpoint_path}. Train the model or update the path."
+        )
+
+    checkpoint = torch.load(checkpoint_path, map_location='cpu')
+
+    class_to_idx = checkpoint.get('class_to_idx') or eff_config.get('class_to_idx')
+    if not class_to_idx:
+        raise MLModelError(
+            "EfficientNet checkpoint is missing class_to_idx metadata; re-train with the new script."
+        )
+
+    num_classes = len(class_to_idx)
+    model = _build_efficientnet_model(num_classes)
+    model.load_state_dict(checkpoint['model_state_dict'])
+    model.eval()
+
+    positive_index = class_to_idx.get(positive_label)
+    if positive_index is None:
+        raise MLModelError(
+            f"Positive label '{positive_label}' not found in class_to_idx mapping {class_to_idx}."
+        )
+
+    return model, input_size, positive_index
+
+
+def _build_efficientnet_transforms(input_size: int):
+    """Compose normalization and resizing transforms for inference."""
+
+    if transforms is None or EfficientNet_B0_Weights is None:
+        raise MLModelError(
+            "torchvision is required for EfficientNet transforms but is not installed."
+        )
+
+    weights = EfficientNet_B0_Weights.IMAGENET1K_V1
+    eval_transforms = transforms.Compose(
+        [
+            transforms.Resize(input_size + 32),
+            transforms.CenterCrop(input_size),
+            transforms.ToTensor(),
+            transforms.Normalize(mean=weights.meta['mean'], std=weights.meta['std']),
+        ]
+    )
+    return eval_transforms
+
+
+def _load_crop_as_tensor(image_path: str, preprocess) -> Optional["torch_type.Tensor"]:
+    """Load a crop image as a tensor or return None if missing/unreadable."""
+
+    try:
+        from PIL import Image
+    except Exception as exc:  # pragma: no cover - defer heavy import until needed
+        raise MLModelError(f"Pillow is required to read crop images: {exc}") from exc
+
+    if not os.path.exists(image_path):
+        logger.warning("Missing crop image for EfficientNet scoring: %s", image_path)
+        return None
+
+    try:
+        with Image.open(image_path) as img:
+            img = img.convert('RGB')
+            return preprocess(img)
+    except Exception as exc:
+        logger.warning("Failed to load crop %s for EfficientNet scoring: %s", image_path, exc)
+        return None
+
+
+def _score_particles_with_efficientnet(
+    df: pd.DataFrame,
+    model,
+    crops_dir: str,
+    input_size: int,
+    positive_index: int,
+) -> np.ndarray:
+    """Run EfficientNet inference over particle crops and return positive-class probs."""
+
+    preprocess = _build_efficientnet_transforms(input_size)
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    model = model.to(device)
+
+    probabilities: List[float] = []
+    batch_tensors: List[torch.Tensor] = []
+    batch_indices: List[int] = []
+    batch_size = 16
+
+    def _flush_batch():
+        nonlocal batch_tensors, batch_indices, probabilities
+        if not batch_tensors:
+            return
+        batch = torch.stack(batch_tensors).to(device)
+        with torch.no_grad():
+            logits = model(batch)
+            probs = torch.softmax(logits, dim=1)[:, positive_index]
+        for idx, prob in zip(batch_indices, probs.cpu().numpy()):
+            probabilities[idx] = float(prob)
+        batch_tensors = []
+        batch_indices = []
+
+    probabilities = [0.0] * len(df)
+    for idx, row in df.iterrows():
+        crop_filename = row.get('crop_filename') or row.get('final_crop_filename')
+        if not isinstance(crop_filename, str) or not crop_filename:
+            logger.warning("Row %s is missing crop filename for EfficientNet scoring.", idx)
+            probabilities[idx] = 0.0
+            continue
+
+        image_path = os.path.join(crops_dir, crop_filename)
+        tensor = _load_crop_as_tensor(image_path, preprocess)
+        if tensor is None:
+            probabilities[idx] = 0.0
+            continue
+
+        batch_tensors.append(tensor)
+        batch_indices.append(idx)
+
+        if len(batch_tensors) >= batch_size:
+            _flush_batch()
+
+    _flush_batch()
+
+    return np.array(probabilities, dtype=float)
+
+
 def _log_probability_summary(
     probabilities: np.ndarray, sample_id: str, threshold: float
 ) -> None:
@@ -408,6 +578,9 @@ def run_stage_03_filtering_and_classification(
     s3_config = config.get('stage_03_filtering_and_classification', {})
     if not s3_config:
         raise ConfigError("Configuration for 'stage_03_filtering_and_classification' not found.")
+    model_type = s3_config.get('model_type', 'random_forest_model')
+    use_rf_model = model_type == 'random_forest_model'
+    logger.info("Stage 3 model_type configured as: %s", model_type)
     size_invariant_enabled = bool(s3_config.get('size_invariant_features', False))
 
     final_particles_df = load_dataframe_from_csv(input_final_particles_csv_path)
@@ -418,7 +591,8 @@ def run_stage_03_filtering_and_classification(
         )
         return None
 
-    _validate_required_feature_columns(final_particles_df, config=config)
+    if use_rf_model:
+        _validate_required_feature_columns(final_particles_df, config=config)
     logger.info("Loaded %d particles from Stage 2 final output.", len(final_particles_df))
 
     initial_particle_count = len(final_particles_df)
@@ -452,21 +626,36 @@ def run_stage_03_filtering_and_classification(
     probability_threshold = float(ml_filter_cfg.get('min_probability_threshold', 0.5))
 
     ml_classified_df = quality_filtered_df.copy()
+    ml_classified_df = _ensure_crop_filename_column(ml_classified_df)
 
     if not ml_classified_df.empty:
         try:
-            model, scaler, feature_names = _load_ml_artifacts(s3_config)
+            if use_rf_model:
+                model, scaler, feature_names = _load_ml_artifacts(s3_config)
+                probabilities = _score_particles_with_model(
+                    ml_classified_df,
+                    model,
+                    scaler,
+                    feature_names,
+                    size_invariant_enabled=size_invariant_enabled,
+                )
+            elif model_type == 'efficient_net_model':
+                model, input_size, positive_index = _load_efficientnet_artifacts(s3_config)
+                probabilities = _score_particles_with_efficientnet(
+                    ml_classified_df,
+                    model,
+                    final_particles_crops_dir,
+                    input_size,
+                    positive_index,
+                )
+            else:
+                raise MLModelError(
+                    f"Unsupported stage 3 model_type '{model_type}'. Choose 'random_forest_model' or 'efficient_net_model'."
+                )
         except MLModelError as exc:
             logger.error("Failed to load ML artifacts for Stage 3: %s", exc)
             raise
 
-        probabilities = _score_particles_with_model(
-            ml_classified_df,
-            model,
-            scaler,
-            feature_names,
-            size_invariant_enabled=size_invariant_enabled,
-        )
         ml_classified_df['ml_probability'] = probabilities
         ml_classified_df['ml_label'] = np.where(
             ml_classified_df['ml_probability'] >= probability_threshold, 'accept', 'reject'
