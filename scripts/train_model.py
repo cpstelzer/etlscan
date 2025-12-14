@@ -45,6 +45,7 @@ sys.path.insert(0, project_root)
 from src.utils import (
     setup_logging, get_config, load_config, get_models_dir, get_training_data_dir
 )
+from src.utils.config_loader import get_unified_segmentation_params
 from src.utils.common_exceptions import ConfigError, MLModelError, DataValidationError
 from src.core.image_io_operations import load_image
 import skimage.util
@@ -62,10 +63,10 @@ logger = logging.getLogger(__name__)
 # --- All helper functions (_standardize_training_crop, etc.) remain unchanged ---
 def _standardize_training_crop(
     image_crop_gray: np.ndarray,
-    system_config: Dict[str, Any]
+    segmentation_params: Dict[str, Any]
 ) -> Optional[np.ndarray]:
     crop_float = skimage.util.img_as_float(image_crop_gray)
-    _, filled_mask, _ = segment_main_body_from_image_float(crop_float, system_config)
+    _, filled_mask, _ = segment_main_body_from_image_float(crop_float, segmentation_params)
 
     if filled_mask is None or filled_mask.sum() == 0:
         logger.warning("Could not segment particle in training crop to standardize orientation.")
@@ -90,7 +91,7 @@ def _standardize_training_crop(
 
 def extract_features_for_single_image(
     image_path: str,
-    system_config: Dict[str, Any],
+    segmentation_params: Dict[str, Any],
     s2_config: Dict[str, Any]
 ) -> Dict[str, Any]:
     features = {}
@@ -100,13 +101,13 @@ def extract_features_for_single_image(
         logger.warning(f"Could not load image {image_path}")
         return None
 
-    image_crop_gray = _standardize_training_crop(image_crop_gray_original, system_config)
+    image_crop_gray = _standardize_training_crop(image_crop_gray_original, segmentation_params)
     if image_crop_gray is None:
         logger.warning(f"Failed to standardize crop for {image_path}, using original.")
         image_crop_gray = image_crop_gray_original
 
     crop_float_orig = skimage.util.img_as_float(image_crop_gray)
-    raw_mask, filled_mask, _ = segment_main_body_from_image_float(crop_float_orig, system_config)
+    raw_mask, filled_mask, _ = segment_main_body_from_image_float(crop_float_orig, segmentation_params)
 
     if filled_mask is None or raw_mask is None:
         logger.warning(f"Segmentation failed for standardized crop from {image_path}")
@@ -116,7 +117,7 @@ def extract_features_for_single_image(
     features.update(quality_features)
 
     intensity_img_for_props = crop_float_orig.copy()
-    if system_config.get('source_image_illumination_type') == 'collimated':
+    if segmentation_params.get('source_image_illumination_type') == 'collimated':
         intensity_img_for_props = 1.0 - intensity_img_for_props
     morphology_features = calculate_detailed_body_morphology(raw_mask, filled_mask, intensity_img_for_props)
     renamed_morphology = {k.replace('_s4', ''): v for k, v in morphology_features.items()}
@@ -131,7 +132,7 @@ def extract_features_for_single_image(
 def load_and_extract_from_directory(
     directory: str,
     label: int,
-    system_config: Dict[str, Any],
+    segmentation_params: Dict[str, Any],
     s2_config: Dict[str, Any]
 ) -> pd.DataFrame:
     features_list = []
@@ -139,7 +140,7 @@ def load_and_extract_from_directory(
     for filename in os.listdir(directory):
         if filename.lower().endswith(('.png', '.jpg', '.jpeg', '.tif')):
             image_path = os.path.join(directory, filename)
-            features = extract_features_for_single_image(image_path, system_config, s2_config)
+            features = extract_features_for_single_image(image_path, segmentation_params, s2_config)
             if features:
                 features_list.append(features)
 
@@ -385,7 +386,10 @@ def main():
 
     s3_config = config.get('stage_03_filtering_and_classification', {})
     s2_config = config.get('stage_02_characterization', {})
-    system_config = config.get('system', {})
+    segmentation_params = get_unified_segmentation_params(config)
+    logger.info(
+        "Loaded unified segmentation parameters for training crops; aligns with Stage 02/04 processing."
+    )
     training_params = s3_config.get('training_params', {})
     
     csv_files: List[str] = args.csv_files or []
@@ -422,8 +426,8 @@ def main():
                     f"Image directory for label '{label_name}' contains no images: {dir_path}"
                 )
 
-        good_df = load_and_extract_from_directory(good_dir, 1, system_config, s2_config)
-        bad_df = load_and_extract_from_directory(bad_dir, 0, system_config, s2_config)
+        good_df = load_and_extract_from_directory(good_dir, 1, segmentation_params, s2_config)
+        bad_df = load_and_extract_from_directory(bad_dir, 0, segmentation_params, s2_config)
 
         full_df = pd.concat([good_df, bad_df], ignore_index=True)
     else:
