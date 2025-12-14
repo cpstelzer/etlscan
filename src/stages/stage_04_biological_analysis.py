@@ -35,7 +35,8 @@ def perform_egg_analysis(
     egg_features = {
         's4_total_egg_area': 0.0,
         's4_egg_eccentricity': 0.0,
-        's4_egg_count': 0
+        's4_egg_count': 0,
+        'main_area_filled_s4': np.nan
     }
     
     crop_float = skimage.util.img_as_float(image_crop_gray)
@@ -44,6 +45,8 @@ def perform_egg_analysis(
     if main_props is None:
         logger.warning(f"Could not re-segment particle in crop {particle_row_data.get('crop_filename')}. Skipping egg analysis.")
         return egg_features, None, None
+
+    egg_features['main_area_filled_s4'] = float(main_props.area)
 
     egg_config = s4_config.get('egg_detection', {})
     
