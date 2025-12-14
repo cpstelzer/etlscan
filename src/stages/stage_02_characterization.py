@@ -18,6 +18,7 @@ from typing import Optional, List, Tuple
 from src.utils import (
     get_config, load_dataframe_from_csv, save_dataframe_to_csv
 )
+from src.utils.config_loader import get_unified_segmentation_params
 from src.utils.path_helpers import extract_frame_from_filename
 from src.utils.common_exceptions import ProcessingError, ConfigError, DataValidationError
 from src.core.image_io_operations import load_image, convert_to_grayscale
@@ -53,7 +54,7 @@ def run_stage_02_characterization(
     
     config = get_config()
     s2_config = config.get('stage_02_characterization', {})
-    system_config = config.get('system', {})
+    segmentation_params = get_unified_segmentation_params(config)
     
     s1_particles_df = load_dataframe_from_csv(input_s1_csv_path)
     if s1_particles_df is None or s1_particles_df.empty:
@@ -80,13 +81,12 @@ def run_stage_02_characterization(
 
     all_particle_features = []
 
-    threshold_cfg = system_config.get('thresholding', {})
     boundary_threshold_params = {
-        'thresholding_mode': threshold_cfg.get('mode', 'otsu'),
-        'otsu_threshold_multiplier': threshold_cfg.get('otsu_threshold_multiplier', 0.45),
-        'fixed_threshold_value': threshold_cfg.get('fixed_threshold_value', 70),
+        'thresholding_mode': segmentation_params.get('thresholding_mode', 'otsu'),
+        'otsu_threshold_multiplier': segmentation_params.get('otsu_threshold_multiplier', 0.45),
+        'fixed_threshold_value': segmentation_params.get('fixed_threshold_value', 70),
     }
-    illumination_mode = str(system_config.get('source_image_illumination_type', 'darkfield')).strip().lower()
+    illumination_mode = str(segmentation_params.get('source_image_illumination_type', 'darkfield')).strip().lower()
 
     s1_particles_df['s1_original_index'] = s1_particles_df.index
     
@@ -142,7 +142,7 @@ def run_stage_02_characterization(
             particle_features['is_on_crop_boundary'] = bool(is_on_crop_boundary)
             
             crop_float_orig = skimage.util.img_as_float(crop_gray)
-            raw_mask, filled_mask, _ = segment_main_body_from_image_float(crop_float_orig, system_config)
+            raw_mask, filled_mask, _ = segment_main_body_from_image_float(crop_float_orig, segmentation_params)
 
             if filled_mask is None or raw_mask is None:
                 logger.warning(f"High-precision segmentation failed for crop {particle_features['crop_filename']}. Skipping feature calculation.")
@@ -152,7 +152,7 @@ def run_stage_02_characterization(
             particle_features.update(quality_features)
 
             intensity_img_for_props = crop_float_orig.copy()
-            if system_config.get('source_image_illumination_type') == 'collimated':
+            if segmentation_params.get('source_image_illumination_type') == 'collimated':
                 intensity_img_for_props = 1.0 - intensity_img_for_props
             morphology_features = calculate_detailed_body_morphology(raw_mask, filled_mask, intensity_img_for_props)
             renamed_morphology = {k.replace('_s4', ''): v for k, v in morphology_features.items()}
