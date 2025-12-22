@@ -8,7 +8,7 @@ import skimage.util
 import shutil
 import os
 
-from src.utils.common_exceptions import ConfigError, DataValidationError
+from src.utils.common_exceptions import ConfigError
 from src.core.segmentation import generate_binary_mask_from_float_image
 
 logger = logging.getLogger(__name__)
@@ -42,24 +42,148 @@ def crop_rotated(
     
     return cropped
 
+
+def normalized_crop_config(crop_config: Dict[str, Any]) -> Dict[str, Any]:
+    mode = crop_config.get('mode', 'rotational_rectangle')
+    if mode not in ['rotational_rectangle', 'centroid_square', 'bounding_box']:
+        raise ConfigError(f"Invalid ParticleCropper mode: {mode}")
+
+    return {
+        'mode': mode,
+        'rotational_padding': int(crop_config.get('rotational_padding', 10)),
+        'square_size': int(crop_config.get('square_size', 150)),
+        'centroid_pre_crop_padding': int(crop_config.get('centroid_pre_crop_padding', 20)),
+        'bbox_padding': int(crop_config.get('bbox_padding', 15)),
+        'bbox_column_mapping': crop_config.get('bbox_column_mapping', {
+            'x': 'bounding_x', 'y': 'bounding_y', 'w': 'bounding_w', 'h': 'bounding_h'
+        }),
+    }
+
+
+def crop_particle_from_arrays(
+    crop_config: Dict[str, Any],
+    full_color_image: np.ndarray,
+    full_gray_image: np.ndarray,
+    particle_data: pd.Series
+) -> Tuple[Optional[np.ndarray], Dict[str, Any]]:
+    """
+    Pure functional cropper that applies the provided configuration to in-memory arrays.
+
+    Args:
+        crop_config: Dictionary describing the crop strategy.
+        full_color_image: Unused currently, reserved for future use.
+        full_gray_image: Grayscale image array.
+        particle_data: Row of particle metadata.
+
+    Returns:
+        Tuple of the cropped grayscale array (or None) and metadata about the crop.
+    """
+    normalized = normalized_crop_config(crop_config)
+    metadata: Dict[str, Any] = {
+        'mode': normalized['mode'],
+    }
+
+    if normalized['mode'] == 'centroid_square':
+        try:
+            cx, cy = int(particle_data['X']), int(particle_data['Y'])
+            h_img, w_img = full_gray_image.shape
+            
+            bb_x = int(particle_data.get('bounding_x', cx - normalized['square_size'] // 2))
+            bb_y = int(particle_data.get('bounding_y', cy - normalized['square_size'] // 2))
+            bb_w = int(particle_data.get('bounding_w', normalized['square_size']))
+            bb_h = int(particle_data.get('bounding_h', normalized['square_size']))
+
+            pad = normalized['centroid_pre_crop_padding']
+            pre_crop_x1 = max(0, bb_x - pad)
+            pre_crop_y1 = max(0, bb_y - pad)
+            pre_crop_x2 = min(w_img, bb_x + bb_w + pad)
+            pre_crop_y2 = min(h_img, bb_y + bb_h + pad)
+
+            sub_image_gray = full_gray_image[pre_crop_y1:pre_crop_y2, pre_crop_x1:pre_crop_x2]
+
+            cx_relative = cx - pre_crop_x1
+            cy_relative = cy - pre_crop_y1
+
+            h_sub, w_sub = sub_image_gray.shape
+            half_size = normalized['square_size'] // 2
+            x1 = max(0, cx_relative - half_size)
+            y1 = max(0, cy_relative - half_size)
+            x2 = min(w_sub, cx_relative + half_size)
+            y2 = min(h_sub, cy_relative + half_size)
+
+            cropped_gray = sub_image_gray[y1:y2, x1:x2]
+            metadata.update({
+                'center': (cx, cy),
+                'padding': pad,
+                'square_size': normalized['square_size'],
+            })
+
+        except (KeyError, ValueError, TypeError) as e:
+            logger.error(f"Missing/invalid data for centroid_square crop: {e}")
+            return None, metadata
+
+    elif normalized['mode'] == 'rotational_rectangle':
+        try:
+            center = (particle_data['X'], particle_data['Y'])
+            width = particle_data['rot_rect_width']
+            height = particle_data['rot_rect_height']
+            angle = particle_data['rot_rect_angle']
+
+            if width > height:
+                width, height = height, width
+                angle += 90
+            
+            size = (int(width), int(height))
+            cropped_gray = crop_rotated(full_gray_image, center, size, angle, normalized['rotational_padding'])
+            metadata.update({
+                'center': center,
+                'size': size,
+                'angle': angle,
+                'padding': normalized['rotational_padding'],
+            })
+
+        except (KeyError, ValueError, TypeError) as e:
+            logger.error(f"Missing/invalid data for rotational_rectangle crop: {e}")
+            return None, metadata
+    
+    elif normalized['mode'] == 'bounding_box':
+        try:
+            mapping = normalized['bbox_column_mapping']
+            x_col, y_col = mapping['x'], mapping['y']
+            w_col, h_col = mapping['w'], mapping['h']
+            x, y = int(particle_data[x_col]), int(particle_data[y_col])
+            w, h = int(particle_data[w_col]), int(particle_data[h_col])
+            
+            pad = normalized['bbox_padding']
+            x1 = max(0, x - pad)
+            y1 = max(0, y - pad)
+            x2 = min(full_gray_image.shape[1], x + w + pad)
+            y2 = min(full_gray_image.shape[0], y + h + pad)
+            
+            cropped_gray = full_gray_image[y1:y2, x1:x2]
+            metadata.update({
+                'bbox': (x, y, w, h),
+                'padding': pad,
+            })
+
+        except (KeyError, ValueError, TypeError) as e:
+            logger.error(f"Missing/invalid data for bounding_box crop: {e}")
+            return None, metadata
+    
+    else:
+        return None, metadata
+
+    if cropped_gray is None or cropped_gray.size == 0:
+        return None, metadata
+
+    return cropped_gray, metadata
+
+
 class ParticleCropper:
     def __init__(self, crop_config: Dict[str, Any]):
-        self.mode = crop_config.get('mode', 'rotational_rectangle')
-        if self.mode not in ['rotational_rectangle', 'centroid_square', 'bounding_box']:
-            raise ConfigError(f"Invalid ParticleCropper mode: {self.mode}")
-        
-        # --- MODIFICATION: Load all new parameters from config ---
-        self.rotational_padding = int(crop_config.get('rotational_padding', 10))
-        
-        self.square_size = int(crop_config.get('square_size', 150))
-        self.half_size = self.square_size // 2
-        self.centroid_pre_crop_padding = int(crop_config.get('centroid_pre_crop_padding', 20))
-
-        self.bbox_padding = int(crop_config.get('bbox_padding', 15))
-        # Keep column mapping for flexibility, though we assume standard names.
-        self.bbox_column_mapping = crop_config.get('bbox_column_mapping', {
-            'x': 'bounding_x', 'y': 'bounding_y', 'w': 'bounding_w', 'h': 'bounding_h'
-        })
+        normalized = normalized_crop_config(crop_config)
+        self.mode = normalized['mode']
+        self._config = normalized
 
     def crop_single_particle_from_image(
         self,
@@ -70,89 +194,16 @@ class ParticleCropper:
         crop_filename_prefix: Optional[str] = None
     ) -> Tuple[Optional[np.ndarray], Optional[str]]:
         
-        # --- MODIFICATION: Refactored logic for each mode ---
-        if self.mode == 'centroid_square':
-            try:
-                cx, cy = int(particle_data['X']), int(particle_data['Y'])
-                h_img, w_img = full_gray_image.shape
-                
-                # Use bounding box from S1 to create a safe, padded pre-crop area
-                bb_x = int(particle_data.get('bounding_x', cx - self.half_size))
-                bb_y = int(particle_data.get('bounding_y', cy - self.half_size))
-                bb_w = int(particle_data.get('bounding_w', self.square_size))
-                bb_h = int(particle_data.get('bounding_h', self.square_size))
-
-                # Apply your suggested padding to the bounding box
-                pad = self.centroid_pre_crop_padding
-                pre_crop_x1 = max(0, bb_x - pad)
-                pre_crop_y1 = max(0, bb_y - pad)
-                pre_crop_x2 = min(w_img, bb_x + bb_w + pad)
-                pre_crop_y2 = min(h_img, bb_y + bb_h + pad)
-                
-                sub_image_gray = full_gray_image[pre_crop_y1:pre_crop_y2, pre_crop_x1:pre_crop_x2]
-                
-                # Find the centroid's position *relative to the new sub-image*
-                cx_relative = cx - pre_crop_x1
-                cy_relative = cy - pre_crop_y1
-                
-                # Perform the final, precise square crop within this safer sub-image
-                h_sub, w_sub = sub_image_gray.shape
-                x1 = max(0, cx_relative - self.half_size)
-                y1 = max(0, cy_relative - self.half_size)
-                x2 = min(w_sub, cx_relative + self.half_size)
-                y2 = min(h_sub, cy_relative + self.half_size)
-                
-                cropped_gray = sub_image_gray[y1:y2, x1:x2]
-
-            except (KeyError, ValueError) as e:
-                logger.error(f"Missing/invalid data for centroid_square crop: {e}")
-                return None, None
-        
-        elif self.mode == 'rotational_rectangle':
-            try:
-                center = (particle_data['X'], particle_data['Y'])
-                width = particle_data['rot_rect_width']
-                height = particle_data['rot_rect_height']
-                angle = particle_data['rot_rect_angle']
-
-                if width > height:
-                    width, height = height, width
-                    angle += 90
-                
-                size = (int(width), int(height))
-                cropped_gray = crop_rotated(full_gray_image, center, size, angle, self.rotational_padding)
-
-            except (KeyError, ValueError) as e:
-                logger.error(f"Missing/invalid data for rotational_rectangle crop: {e}")
-                return None, None
-        
-        elif self.mode == 'bounding_box':
-            try:
-                x_col, y_col = self.bbox_column_mapping['x'], self.bbox_column_mapping['y']
-                w_col, h_col = self.bbox_column_mapping['w'], self.bbox_column_mapping['h']
-                x, y = int(particle_data[x_col]), int(particle_data[y_col])
-                w, h = int(particle_data[w_col]), int(particle_data[h_col])
-                
-                # Apply configurable padding to the simple bounding box
-                pad = self.bbox_padding
-                x1 = max(0, x - pad)
-                y1 = max(0, y - pad)
-                x2 = min(full_gray_image.shape[1], x + w + pad)
-                y2 = min(full_gray_image.shape[0], y + h + pad)
-                
-                cropped_gray = full_gray_image[y1:y2, x1:x2]
-
-            except (KeyError, ValueError) as e:
-                logger.error(f"Missing/invalid data for bounding_box crop: {e}")
-                return None, None
-        
-        else:
-            return None, None
-        # --- END OF MODIFICATION ---
+        cropped_gray, _ = crop_particle_from_arrays(
+            self._config,
+            full_color_image,
+            full_gray_image,
+            particle_data
+        )
 
         if cropped_gray is None or cropped_gray.size == 0:
             return None, None
-            
+
         saved_path = None
         if output_dir_for_crop and crop_filename_prefix:
             final_filename = f"{crop_filename_prefix}_X{int(particle_data.get('X',0))}_Y{int(particle_data.get('Y',0))}.png"
