@@ -65,6 +65,7 @@ def _standardize_training_crop(
     image_crop_gray: np.ndarray,
     segmentation_params: Dict[str, Any]
 ) -> Optional[np.ndarray]:
+    """Rotate and pad a crop so that the main body is upright for feature extraction."""
     crop_float = skimage.util.img_as_float(image_crop_gray)
     _, filled_mask, _ = segment_main_body_from_image_float(crop_float, segmentation_params)
 
@@ -94,6 +95,7 @@ def extract_features_for_single_image(
     segmentation_params: Dict[str, Any],
     s2_config: Dict[str, Any]
 ) -> Dict[str, Any]:
+    """Compute quality, morphology, and shape features for one training crop."""
     features = {}
     
     image_crop_gray_original = load_image(image_path, mode='gray')
@@ -135,6 +137,7 @@ def load_and_extract_from_directory(
     segmentation_params: Dict[str, Any],
     s2_config: Dict[str, Any]
 ) -> pd.DataFrame:
+    """Load all images in a directory and return a labelled feature dataframe."""
     features_list = []
     logger.info(f"Processing directory for label '{label}': {directory}")
     for filename in os.listdir(directory):
@@ -244,6 +247,7 @@ def _load_feature_table_from_csv(
     label_column: str,
     labels_sidecar: Optional[str]
 ) -> pd.DataFrame:
+    """Load training rows from one or more CSVs and ensure a label column is present."""
     if not csv_paths:
         raise DataValidationError("At least one focussed_and_filtered.csv file must be provided.")
 
@@ -296,6 +300,7 @@ def _load_feature_table_from_csv(
 
 
 def _normalize_feature_table(df: pd.DataFrame, label_column: str = 'label') -> Tuple[pd.DataFrame, pd.Series]:
+    """Split features and labels, drop identifiers, and impute missing numeric values."""
     if label_column not in df.columns:
         raise DataValidationError(f"Label column '{label_column}' not found in data frame.")
 
@@ -323,6 +328,7 @@ def _normalize_feature_table(df: pd.DataFrame, label_column: str = 'label') -> T
 
 
 def main():
+    """Entry point for training the RandomForest model or image-based feature extraction."""
     parser = argparse.ArgumentParser(description="Train a new ML model on the rich feature set.")
     parser.add_argument(
         "--config",
@@ -405,6 +411,7 @@ def main():
             )
 
         def _resolve_image_dir(directory_arg: Optional[str], fallback_subdir: str) -> str:
+            """Resolve an image directory from a CLI override or default subdirectory."""
             base_dir = directory_arg or os.path.join(training_data_dir, fallback_subdir)
             return base_dir
 

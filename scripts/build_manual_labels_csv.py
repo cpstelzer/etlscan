@@ -198,6 +198,7 @@ def build_manual_labels_dataframe(
 
 
 def _build_arg_parser() -> argparse.ArgumentParser:
+    """Create the CLI argument parser for rebuilding manual labels."""
     parser = argparse.ArgumentParser(
         description=(
             "Reconstruct Stage-03 metrics for curated crops and emit a labelled CSV."
@@ -243,6 +244,7 @@ def _build_arg_parser() -> argparse.ArgumentParser:
 
 
 def main() -> None:
+    """Parse arguments and run the manual labels aggregation workflow."""
     logging.basicConfig(level=logging.INFO)
     parser = _build_arg_parser()
     args = parser.parse_args()

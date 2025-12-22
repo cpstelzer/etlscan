@@ -104,6 +104,7 @@ def extract_ml_features(
     params: Dict[str, Any], 
     image_array_gray: Optional[np.ndarray] = None
 ) -> Tuple[Optional[Dict[str, Any]], Optional[RegionProperties], Optional[RegionProperties]]:
+    """Segment a particle and compute ML-oriented morphology and intensity features."""
     features: Dict[str, Any] = {key: 0.0 for key in DEFAULT_FEATURE_NAMES} 
     features['posterior_area_ratio'] = 0.5 
     features['egg_ecc'] = 0.0 
