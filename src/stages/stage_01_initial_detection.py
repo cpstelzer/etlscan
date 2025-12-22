@@ -31,6 +31,200 @@ from src.core.well_analysis import (
 logger = logging.getLogger(__name__)
 
 
+def select_background_frame(images_df: pd.DataFrame, fg_index: int, bg_offset: int) -> Dict[str, Any]:
+    """Select FG/BG pairing metadata without performing any I/O."""
+    if images_df.empty:
+        return {"fg_row": None, "bg_row": None, "fg_index": fg_index, "bg_index": None}
+    bg_index = (fg_index + bg_offset) % len(images_df)
+    return {
+        "fg_row": images_df.iloc[fg_index],
+        "bg_row": images_df.iloc[bg_index],
+        "fg_index": fg_index,
+        "bg_index": bg_index,
+    }
+
+
+def prepare_masked_foreground(
+    fg_img_uint8: np.ndarray,
+    bg_img_uint8: np.ndarray,
+    *,
+    enable_brightness_adjustment: bool,
+    brightness_config: Dict[str, Any],
+    well_masking_cfg: Dict[str, Any],
+    system_cfg: Dict[str, Any],
+    source_illumination: str
+) -> Dict[str, Any]:
+    """Prepare FG/BG images and reusable masks for subtraction and local analysis."""
+    fg_for_sub = fg_img_uint8.copy()
+    bg_for_sub = bg_img_uint8.copy()
+
+    if enable_brightness_adjustment:
+        _, bg_for_sub = match_well_brightness(
+            fg_img_uint8,
+            bg_img_uint8,
+            brightness_config
+        )
+
+    well_mask_uint8 = None
+    if well_masking_cfg.get('create_mask', False):
+        _, well_mask_uint8 = mask_well_area(
+            fg_img_uint8.copy(),
+            well_masking_cfg,
+            system_cfg
+        )
+
+    unsub_prepared = fg_img_uint8.copy()
+    if well_mask_uint8 is not None:
+        if source_illumination == 'collimated':
+            hist_unsub = cv2.calcHist([fg_img_uint8], [0], well_mask_uint8, [256], [0, 256])
+            dominant_bg_val = int(np.argmax(hist_unsub))
+            filled_outside = np.full_like(fg_img_uint8, dominant_bg_val)
+            filled_outside[well_mask_uint8 == 255] = fg_img_uint8[well_mask_uint8 == 255]
+            unsub_prepared = filled_outside
+        else:
+            unsub_prepared = apply_mask(fg_img_uint8.copy(), well_mask_uint8)
+
+    if source_illumination == 'collimated':
+        fg_for_sub = cv2.bitwise_not(fg_for_sub)
+        bg_for_sub = cv2.bitwise_not(bg_for_sub)
+
+    return {
+        "fg_for_sub": fg_for_sub,
+        "bg_for_sub": bg_for_sub,
+        "well_mask": well_mask_uint8,
+        "unsub_prepared": unsub_prepared
+    }
+
+
+def analyze_subtracted_image(
+    subtracted_img_uint8: Optional[np.ndarray],
+    well_mask_uint8: Optional[np.ndarray],
+    particle_analysis_config: Dict[str, Any],
+    global_threshold_config: Dict[str, Any],
+    sample_id: str,
+    source_filename: str
+) -> Dict[str, Any]:
+    """Find particles on the subtracted image and return structured results."""
+    if subtracted_img_uint8 is None:
+        return {
+            "particles": [],
+            "particles_df": pd.DataFrame(),
+            "binary_mask": None,
+            "masked_subtracted_image": None,
+        }
+
+    masked_subtracted_img_uint8 = (
+        apply_mask(subtracted_img_uint8, well_mask_uint8)
+        if well_mask_uint8 is not None
+        else subtracted_img_uint8
+    )
+
+    particles_subtracted_list_dicts, binary_mask_display_uint8 = _analyze_single_subtracted_image_global_thresh(
+        masked_subtracted_img_uint8,
+        particle_analysis_config,
+        global_threshold_config
+    )
+    df_subtracted_particles = pd.DataFrame(particles_subtracted_list_dicts)
+    if not df_subtracted_particles.empty:
+        df_subtracted_particles['SAMPLE_ID'] = sample_id
+        df_subtracted_particles['source_image_filename'] = source_filename
+
+    return {
+        "particles": particles_subtracted_list_dicts,
+        "particles_df": df_subtracted_particles,
+        "binary_mask": binary_mask_display_uint8,
+        "masked_subtracted_image": masked_subtracted_img_uint8,
+    }
+
+
+def refine_with_local_otsu(
+    unsub_prepared_uint8: np.ndarray,
+    candidate_particles: Union[List[Dict[str, Any]], pd.DataFrame],
+    roi_crop_size: int,
+    analysis_config: Dict[str, Any],
+    global_threshold_config: Dict[str, Any],
+    source_illumination: str
+) -> Dict[str, Any]:
+    """Refine detections using local Otsu analysis on the unsubtracted frame."""
+    candidate_records = (
+        candidate_particles.to_dict('records') if isinstance(candidate_particles, pd.DataFrame) else candidate_particles
+    )
+
+    particles_unsubtracted_list_dicts, composite_binary_mask_full_image, roi_debug = _analyze_unsubtracted_locally(
+        unsub_prepared_uint8,
+        candidate_records,
+        roi_crop_size,
+        analysis_config,
+        global_threshold_config,
+        source_illumination
+    )
+    df_unsubtracted_particles = pd.DataFrame(particles_unsubtracted_list_dicts)
+
+    return {
+        "particles": particles_unsubtracted_list_dicts,
+        "particles_df": df_unsubtracted_particles,
+        "composite_mask": composite_binary_mask_full_image,
+        "roi_debug": roi_debug,
+    }
+
+
+def process_frame_pair(
+    fg_row: pd.Series,
+    bg_row: pd.Series,
+    config: Dict[str, Any],
+    masks: Optional[Dict[str, Any]] = None
+) -> pd.DataFrame:
+    """Process a FG/BG pair and return fused particle detections."""
+    masks = masks or {}
+    fg_filepath = fg_row.get('full_path')
+    bg_filepath = bg_row.get('full_path')
+    fg_img = load_image(fg_filepath, mode='gray')
+    bg_img = load_image(bg_filepath, mode='gray')
+    if fg_img is None or bg_img is None:
+        logger.warning(f"Could not load FG ({fg_filepath}) or BG ({bg_filepath}). Skipping pair.")
+        return pd.DataFrame()
+
+    prep_data = prepare_masked_foreground(
+        fg_img,
+        bg_img,
+        enable_brightness_adjustment=config.get('enable_brightness_adjustment', False),
+        brightness_config=config.get('config_black_plate_well', {}),
+        well_masking_cfg=config.get('well_masking', {}),
+        system_cfg=config.get('system_cfg', {}),
+        source_illumination=config.get('source_image_illumination', 'darkfield')
+    )
+    general_well_mask_for_roi_uint8 = prep_data.get("well_mask")
+    if general_well_mask_for_roi_uint8 is None:
+        general_well_mask_for_roi_uint8 = masks.get("well_mask")
+    elif masks.get("well_mask") is None:
+        masks["well_mask"] = general_well_mask_for_roi_uint8
+    # Subtract the prepared background from the prepared foreground to isolate moving particles.
+    subtracted_img_uint8 = subtract_images(prep_data["fg_for_sub"], prep_data["bg_for_sub"])
+    sub_analysis = analyze_subtracted_image(
+        subtracted_img_uint8,
+        general_well_mask_for_roi_uint8,
+        config.get('particle_analysis_subtracted_config', {}),
+        config.get('global_threshold_config', {}),
+        config.get('sample_id', 'UNKNOWN_SAMPLE'),
+        fg_row.get('filename', 'UNKNOWN_FILE')
+    )
+    unsub_analysis = refine_with_local_otsu(
+        prep_data["unsub_prepared"],
+        sub_analysis["particles_df"],
+        config.get('local_otsu_roi_size', 150),
+        config.get('unsubtracted_analysis_config', {}),
+        config.get('global_threshold_config', {}),
+        config.get('source_image_illumination', 'darkfield')
+    )
+    # Fuse subtracted and unsubtracted detections to keep confident matches.
+    fused_df_frame = _compare_and_fuse_particle_dfs(
+        sub_analysis["particles_df"],
+        unsub_analysis["particles_df"],
+        config.get('particle_comparison_config', {})
+    )
+    return fused_df_frame
+
+
 # --- _parse_image_filenames, _filter_image_df, _analyze_single_subtracted_image_global_thresh, _analyze_unsubtracted_locally, _compare_and_fuse_particle_dfs ---
 # These helper functions remain unchanged.
 def _parse_image_filenames(image_dir_path: str) -> Optional[pd.DataFrame]: # Unchanged
@@ -284,14 +478,11 @@ def _compare_and_fuse_particle_dfs(df_ref: pd.DataFrame, df_query: pd.DataFrame,
     logger.info(f"Fused {len(final_matched_df)} particles.")
     return final_matched_df
 
-def _process_particle_coordinates_for_tracking(input_csv_path, pixel_size_um, magnification): # Unchanged
-    if not os.path.exists(input_csv_path):
-        logger.error(f"Error: Input file not found at '{input_csv_path}'")
-        return pd.DataFrame()
-    logger.info(f"Tracking Step 1: Loading and processing data from: {os.path.basename(input_csv_path)}")
-    df = pd.read_csv(input_csv_path)
+def _process_particle_coordinates_for_tracking_df(input_df: pd.DataFrame, pixel_size_um, magnification):
+    logger.info("Tracking Step 1: Loading and processing fused particle data for tracking.")
+    df = input_df.copy()
     if df.empty:
-        logger.warning("Input CSV for tracking is empty. No particles to process.")
+        logger.warning("Input DataFrame for tracking is empty. No particles to process.")
         return pd.DataFrame()
     pixel_to_mm_factor = pixel_size_um / (magnification * 1000)
     logger.info(f"   - Using Pixel-to-MM factor: {pixel_to_mm_factor:.6f}")
@@ -348,14 +539,28 @@ def _track_particles_3d(processed_df, search_range_mm, memory_frames, min_track_
     filtered_trajectories = filtered_trajectories.reset_index(drop=True)
     return filtered_trajectories
 
-# --- MODIFIED: Added sample_id to the function signature ---
-def _run_particle_tracking(
-    stage1_csv_path: str,
-    output_dir: str,
+def _build_tracking_figure(tracked_df: pd.DataFrame) -> Optional[plt.Figure]:
+    if tracked_df.empty:
+        return None
+    fig = plt.figure(figsize=(10, 8))
+    ax = fig.add_subplot(111, projection='3d')
+    ax.set_title("3D Particle Tracks")
+    ax.set_xlabel("X (mm)")
+    ax.set_ylabel("Y (mm)")
+    ax.set_zlabel("Z (mm)")
+    for _, track in tracked_df.groupby('track_id'):
+        ax.plot(track['x_mm'], track['y_mm'], track['z_mm'], linewidth=1)
+    plt.tight_layout()
+    return fig
+
+
+def run_particle_tracking(
+    fused_df: pd.DataFrame,
     sample_id: str,
     tracking_config: Dict[str, Any]
-    ):
-    logger.info(f"--- Post-S1 Tracking initiated for: {os.path.basename(stage1_csv_path)} ---")
+) -> Tuple[pd.DataFrame, Optional[plt.Figure]]:
+    """Perform particle tracking on fused detections and return data instead of writing files."""
+    logger.info(f"--- Post-S1 Tracking initiated for: {sample_id} ---")
     pixel_size_um = tracking_config.get('pixel_size_um')
     magnification = tracking_config.get('magnification')
     search_range_mm = tracking_config.get('search_range_mm')
@@ -363,60 +568,43 @@ def _run_particle_tracking(
     min_track_length = tracking_config.get('min_track_length')
     if not all([pixel_size_um, magnification, search_range_mm, memory_frames, min_track_length]):
         raise ConfigError("One or more required tracking parameters are missing from the configuration.")
-    
-    # --- MODIFIED: Standardized output filename ---
-    output_filename = f"{sample_id}_stage1_tracked_particles.csv"
-    output_csv_tracked = os.path.join(output_dir, output_filename)
-    figure_3d_path = os.path.join(output_dir, f"{sample_id}_stage1_tracks_3d.png")
-    
-    processed_data = _process_particle_coordinates_for_tracking(stage1_csv_path, pixel_size_um, magnification)
+
+    processed_data = _process_particle_coordinates_for_tracking_df(fused_df, pixel_size_um, magnification)
     if processed_data.empty:
         logger.warning("Tracking workflow stopped: No data after initial processing.")
-        processed_data.to_csv(output_csv_tracked, index=False)
-        return
+        return processed_data, None
 
     tracked_data = _track_particles_3d(processed_data, search_range_mm, memory_frames, min_track_length)
     if tracked_data.empty:
         logger.warning("Tracking workflow stopped: No tracks survived the filtering process.")
         processed_data['track_id'] = np.nan
-        processed_data.to_csv(output_csv_tracked, index=False)
-        return
+        return processed_data, None
 
     logger.info("Tracking Step 3: Merging tracking results with original data...")
-    merge_cols = ['frame','x_mm','y_mm','z_mm']
-    tracked_cols = ['frame','x','y','z','track_id']
-    
+    merge_cols = ['frame', 'x_mm', 'y_mm', 'z_mm']
+    tracked_cols = ['frame', 'x', 'y', 'z', 'track_id']
+
     processed_rounded = processed_data.copy()
     processed_rounded[merge_cols[1:]] = processed_rounded[merge_cols[1:]].round(6)
     tracked_rounded = tracked_data.copy()
-    tracked_rounded[['x','y','z']] = tracked_rounded[['x','y','z']].round(6)
+    tracked_rounded[['x', 'y', 'z']] = tracked_rounded[['x', 'y', 'z']].round(6)
 
     merged_df = pd.merge(
         processed_rounded,
         tracked_rounded[tracked_cols],
         how='left',
         left_on=merge_cols,
-        right_on=['frame','x','y','z']
+        right_on=['frame', 'x', 'y', 'z']
     )
-    merged_df.drop(columns=['x','y','z'], inplace=True, errors='ignore')
-    
-    final_tracked_particles_df = merged_df.dropna(subset=['track_id']).copy()
-    final_tracked_particles_df['track_id'] = final_tracked_particles_df['track_id'].astype(int)
-    
-    save_dataframe_to_csv(final_tracked_particles_df, output_dir, output_filename)
+    merged_df.drop(columns=['x', 'y', 'z'], inplace=True, errors='ignore')
 
-    logger.info("Tracking Step 4: Visualizing and saving tracks...")
-    fig = plt.figure(figsize=(10, 8))
-    ax = fig.add_subplot(111, projection='3d')
-    ax.set_title("3D Particle Tracks")
-    ax.set_xlabel("X (mm)"); ax.set_ylabel("Y (mm)"); ax.set_zlabel("Z (mm)")
-    for track_id, track in final_tracked_particles_df.groupby('track_id'):
-        ax.plot(track['x_mm'], track['y_mm'], track['z_mm'], linewidth=1)
-    plt.tight_layout()
-    plt.savefig(figure_3d_path, dpi=150)
-    plt.close(fig)
-    logger.info(f"   - Saved 3D figure to: {figure_3d_path}")
-    logger.info(f"--- Post-S1 Tracking for {os.path.basename(stage1_csv_path)} COMPLETED ---")
+    final_tracked_particles_df = merged_df.dropna(subset=['track_id']).copy()
+    if not final_tracked_particles_df.empty:
+        final_tracked_particles_df['track_id'] = final_tracked_particles_df['track_id'].astype(int)
+
+    tracking_figure = _build_tracking_figure(final_tracked_particles_df)
+    logger.info(f"--- Post-S1 Tracking for {sample_id} COMPLETED ---")
+    return final_tracked_particles_df, tracking_figure
 
 
 def run_stage_01_initial_detection(
@@ -464,7 +652,22 @@ def run_stage_01_initial_detection(
     images_df_filtered = _filter_image_df(images_df.copy())
     if images_df_filtered.empty: return None
     
+    frame_pair_config = {
+        "enable_brightness_adjustment": enable_brightness_adjustment,
+        "config_black_plate_well": config_black_plate_well,
+        "well_masking": general_well_masking_cfg,
+        "system_cfg": system_cfg,
+        "source_image_illumination": source_image_illumination,
+        "particle_analysis_subtracted_config": particle_analysis_subtracted_config,
+        "global_threshold_config": global_threshold_config,
+        "local_otsu_roi_size": local_otsu_roi_size,
+        "unsubtracted_analysis_config": unsubtracted_analysis_config,
+        "particle_comparison_config": particle_comparison_config,
+        "sample_id": sample_id,
+    }
+
     all_fused_particles_for_sample_list: List[pd.DataFrame] = []
+    reusable_masks: Dict[str, Any] = {}
 
     effective_mode = bg_offset_mode
     if bg_offset_mode == 'automatic':
@@ -494,94 +697,24 @@ def run_stage_01_initial_detection(
         recording_fps,
     )
 
-    for idx_frame_list, fg_row in images_df_filtered.iterrows():
-        bg_index_in_list = (idx_frame_list + bg_offset) % len(images_df_filtered)
-        bg_row = images_df_filtered.iloc[bg_index_in_list]
-        
-        fg_filepath = fg_row['full_path']; bg_filepath = bg_row['full_path']
+    for idx_frame_list in range(len(images_df_filtered)):
+        # Pair foreground frame with its background counterpart using configured offset.
+        pairing_data = select_background_frame(images_df_filtered, idx_frame_list, bg_offset)
+        fg_row = pairing_data.get("fg_row")
+        bg_row = pairing_data.get("bg_row")
+        if fg_row is None or bg_row is None:
+            logger.warning("Failed to select FG/BG pairing; skipping frame index %s.", idx_frame_list)
+            continue
+
         logger.debug(f"Processing S1 Frame: {fg_row['filename']} (BG: {bg_row['filename']})")
-
-        img_a_gray_orig_uint8 = load_image(fg_filepath, mode='gray')
-        img_b_gray_orig_uint8 = load_image(bg_filepath, mode='gray')
-        if img_a_gray_orig_uint8 is None or img_b_gray_orig_uint8 is None:
-            logger.warning(f"Could not load FG ({fg_filepath}) or BG ({bg_filepath}). Skipping pair.")
-            continue
-        
-        img_a_for_sub = img_a_gray_orig_uint8.copy()
-        img_b_for_sub_final = img_b_gray_orig_uint8.copy()
-
-        if enable_brightness_adjustment:
-            _, img_b_for_sub_final = match_well_brightness(
-                img_a_gray_orig_uint8,
-                img_b_gray_orig_uint8,
-                config_black_plate_well
-            )
-        
-        general_well_mask_for_roi_uint8 = None
-        if general_well_masking_cfg.get('create_mask', False):
-            _, general_well_mask_for_roi_uint8 = mask_well_area(
-                img_a_gray_orig_uint8.copy(),
-                general_well_masking_cfg,
-                system_cfg
-            )
-            
-        img_a_inv_ready = img_a_for_sub.copy()
-        img_b_inv_ready = img_b_for_sub_final.copy()
-
-        if source_image_illumination == 'collimated':
-             img_a_inv_ready = cv2.bitwise_not(img_a_inv_ready)
-             img_b_inv_ready = cv2.bitwise_not(img_b_inv_ready)
-        
-        subtracted_img_uint8 = subtract_images(img_a_inv_ready, img_b_inv_ready)
-        if subtracted_img_uint8 is None:
-            logger.warning(f"Subtraction resulted in None for FG: {fg_row['filename']}. Skipping pair.")
-            continue
-        
-        img_for_sub_analysis_uint8 = apply_mask(subtracted_img_uint8, general_well_mask_for_roi_uint8) \
-                                     if general_well_mask_for_roi_uint8 is not None else subtracted_img_uint8
-        
-        particles_subtracted_list_dicts, _ = _analyze_single_subtracted_image_global_thresh(
-            img_for_sub_analysis_uint8,
-            particle_analysis_subtracted_config,
-            global_threshold_config
+        fused_df_frame = process_frame_pair(
+            fg_row,
+            bg_row,
+            frame_pair_config,
+            reusable_masks
         )
-        df_subtracted_particles = pd.DataFrame(particles_subtracted_list_dicts)
-        if not df_subtracted_particles.empty:
-            df_subtracted_particles['SAMPLE_ID'] = sample_id
-            df_subtracted_particles['source_image_filename'] = fg_row['filename']
 
-        img_for_unsub_analysis_prepared_uint8 = img_a_gray_orig_uint8.copy()
-        if general_well_mask_for_roi_uint8 is not None:
-            if source_image_illumination == 'collimated':
-                pixels_inside_well = img_a_gray_orig_uint8[general_well_mask_for_roi_uint8 == 255]
-                if pixels_inside_well.size > 0:
-                    hist_unsub = cv2.calcHist([img_a_gray_orig_uint8], [0], general_well_mask_for_roi_uint8, [256], [0,256])
-                    dominant_bg_val = np.argmax(hist_unsub)
-                    
-                    filled_outside = np.full_like(img_a_gray_orig_uint8, dominant_bg_val)
-                    filled_outside[general_well_mask_for_roi_uint8 == 255] = img_a_gray_orig_uint8[general_well_mask_for_roi_uint8 == 255]
-                    img_for_unsub_analysis_prepared_uint8 = filled_outside
-                else:
-                    img_for_unsub_analysis_prepared_uint8 = apply_mask(img_a_gray_orig_uint8.copy(), general_well_mask_for_roi_uint8)
-            else:
-                img_for_unsub_analysis_prepared_uint8 = apply_mask(img_a_gray_orig_uint8.copy(), general_well_mask_for_roi_uint8)
-
-        if particles_subtracted_list_dicts:
-            particles_unsubtracted_list_dicts, _, _ = _analyze_unsubtracted_locally(
-                img_for_unsub_analysis_prepared_uint8,
-                particles_subtracted_list_dicts,
-                local_otsu_roi_size,
-                unsubtracted_analysis_config,
-                global_threshold_config,
-                source_image_illumination
-            )
-            df_unsubtracted_particles = pd.DataFrame(particles_unsubtracted_list_dicts)
-        else:
-            df_unsubtracted_particles = pd.DataFrame()
-            logger.debug(f"No subtracted particles for {fg_row['filename']}, skipping local unsubtracted analysis.")
-
-        fused_df_frame = _compare_and_fuse_particle_dfs(df_subtracted_particles, df_unsubtracted_particles, particle_comparison_config)
-        
+        # Collect fused detections for the sample.
         if not fused_df_frame.empty:
             all_fused_particles_for_sample_list.append(fused_df_frame)
 
@@ -593,33 +726,33 @@ def run_stage_01_initial_detection(
     
     logger.info(f"Total fused particles for sample {sample_id}: {len(final_sample_df)}")
 
-    # --- MODIFICATION: Standardized final save block ---
-    intermediate_filename = f"{sample_id}_stage1_fused_particles_TEMP.csv"
-    intermediate_csv_path = save_dataframe_to_csv(final_sample_df, output_dir_stage1, intermediate_filename)
     final_output_filename = f"{sample_id}_stage1_tracked_particles.csv"
     final_output_path = os.path.join(output_dir_stage1, final_output_filename)
     
-    if intermediate_csv_path:
-        tracking_config = config_s1.get('tracking', {})
-        if tracking_config.get('enabled', False):
-            try:
-                # Pass sample_id to tracking function
-                _run_particle_tracking(intermediate_csv_path, output_dir_stage1, sample_id, tracking_config)
-            except Exception as e:
-                logger.exception(f"Particle tracking failed for sample {sample_id}: {e}")
-        else:
-            logger.info("Particle tracking is disabled. Saving fused data as final output.")
+    tracking_config = config_s1.get('tracking', {})
+    if tracking_config.get('enabled', False):
+        # Track fused particles and defer file I/O to the stage wrapper.
+        try:
+            tracked_df, tracking_fig = run_particle_tracking(final_sample_df, sample_id, tracking_config)
+        except Exception as e:
+            logger.exception(f"Particle tracking failed for sample {sample_id}: {e}")
+            tracked_df, tracking_fig = pd.DataFrame(), None
+
+        if tracked_df.empty and not final_sample_df.empty:
+            logger.warning("Particle tracking returned no tracks; saving fused detections with empty track IDs.")
             final_sample_df['track_id'] = np.nan
             save_dataframe_to_csv(final_sample_df, output_dir_stage1, final_output_filename)
-        
-        # Clean up the temporary fused file
-        try:
-            os.remove(intermediate_csv_path)
-        except OSError as e:
-            logger.warning(f"Could not remove temporary fused file: {e}")
+        else:
+            save_dataframe_to_csv(tracked_df, output_dir_stage1, final_output_filename)
+        if tracking_fig is not None:
+            figure_3d_path = os.path.join(output_dir_stage1, f"{sample_id}_stage1_tracks_3d.png")
+            tracking_fig.savefig(figure_3d_path, dpi=150)
+            plt.close(tracking_fig)
+            # Tracking figure documents the trajectories visually.
     else:
-        logger.error(f"--- Stage 1: Failed to save intermediate fused results for {sample_id} ---")
-        return None
+        logger.info("Particle tracking is disabled. Saving fused data as final output.")
+        final_sample_df['track_id'] = np.nan
+        save_dataframe_to_csv(final_sample_df, output_dir_stage1, final_output_filename)
     
     if os.path.exists(final_output_path):
         logger.info(f"--- Stage 1: Initial Detection for Sample ID: {sample_id} COMPLETED ---")
