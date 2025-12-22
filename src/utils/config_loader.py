@@ -1,42 +1,63 @@
 # src/utils/config_loader.py
-import yaml
+import copy
 import os
-from typing import Dict, Any, Optional 
+from functools import lru_cache
+from typing import Dict, Any, Optional
 
-_config: Dict[str, Any] = {}
+import yaml
 
-def load_config(config_path: str = "config/pipeline_config.yml") -> Dict[str, Any]:
+
+DEFAULT_CONFIG_PATH = "config/pipeline_config.yml"
+
+
+def _resolve_config_path(config_path: str) -> str:
+    """Inputs: candidate config path. Outputs: resolved existing path or raises FileNotFoundError."""
+
+    if os.path.exists(config_path):
+        return config_path
+
+    abs_path = os.path.abspath(__file__)
+    src_dir = os.path.dirname(os.path.dirname(abs_path))
+    project_root = os.path.dirname(src_dir)
+    alt_config_path = os.path.join(project_root, config_path)
+
+    if os.path.exists(alt_config_path):
+        return alt_config_path
+
+    raise FileNotFoundError(
+        f"Configuration file not found at '{config_path}' or '{alt_config_path}'. "
+        "Ensure it exists or provide the correct path."
+    )
+
+
+@lru_cache(maxsize=None)
+def _load_config_from_path(resolved_path: str) -> Dict[str, Any]:
+    """Inputs: resolved path. Outputs: parsed YAML dict cached by path."""
+
+    with open(resolved_path, "r", encoding="utf-8") as handle:
+        loaded = yaml.safe_load(handle) or {}
+
+    _replace_null_with_none(loaded)
+    return loaded
+
+
+def load_config_once(config_path: str = DEFAULT_CONFIG_PATH) -> Dict[str, Any]:
+    """Inputs: config path. Outputs: deep-copied config dict without mutating module globals."""
+
+    resolved_path = _resolve_config_path(config_path)
+    cached = _load_config_from_path(resolved_path)
+    print(f"Configuration loaded from: {resolved_path}")
+    return copy.deepcopy(cached)
+
+
+def load_config(config_path: str = DEFAULT_CONFIG_PATH) -> Dict[str, Any]:
     """
-    Loads the YAML configuration file.
+    Inputs: config path. Outputs: deep-copied config dict (compatibility wrapper).
+
+    This preserves the previous public API while delegating to the new stateless loader.
     """
-    global _config
-    if not _config: # Load only once
-        if not os.path.exists(config_path):
-            abs_path = os.path.abspath(__file__)
-            src_dir = os.path.dirname(os.path.dirname(abs_path))
-            project_root = os.path.dirname(src_dir)
-            alt_config_path = os.path.join(project_root, config_path)
-            if os.path.exists(alt_config_path):
-                config_path_to_load = alt_config_path
-            else:
-                raise FileNotFoundError(
-                    f"Configuration file not found at '{config_path}' or '{alt_config_path}'. "
-                    "Ensure it exists or provide the correct path."
-                )
-        else:
-            config_path_to_load = config_path
-        try:
-            with open(config_path_to_load, "r") as f:
-                _config = yaml.safe_load(f)
-            _replace_null_with_none(_config)
-            print(f"Configuration loaded from: {config_path_to_load}")
-        except yaml.YAMLError as e:
-            print(f"Error parsing YAML configuration file: {e}")
-            raise
-        except FileNotFoundError as e: 
-            print(str(e))
-            raise
-    return _config
+
+    return load_config_once(config_path)
 
 def _replace_null_with_none(d: Dict[str, Any]):
     """Recursively replaces 'null' string values with Python None in a dictionary."""
@@ -52,13 +73,14 @@ def _replace_null_with_none(d: Dict[str, Any]):
         elif v == 'null':
             d[k] = None
 
-def get_config() -> Dict[str, Any]:
+def get_config(config_path: str = DEFAULT_CONFIG_PATH) -> Dict[str, Any]:
     """
-    Returns the loaded configuration. Loads it if not already loaded.
+    Inputs: optional config path. Outputs: deep-copied config dict loaded from disk.
+
+    This helper is retained for backward compatibility; new code should thread
+    configuration dictionaries explicitly rather than relying on shared state.
     """
-    if not _config:
-        load_config() 
-    return _config
+    return load_config_once(config_path)
 
 def get_unified_segmentation_params(config: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     """
@@ -117,6 +139,11 @@ def get_unified_segmentation_params(config: Optional[Dict[str, Any]] = None) -> 
 
     return unified_params
 
+
+def clear_cached_configs() -> None:
+    """Inputs: none. Outputs: clears the in-memory YAML cache for tests."""
+
+    _load_config_from_path.cache_clear()
 
 if __name__ == "__main__":
     try:

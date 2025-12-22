@@ -2,26 +2,26 @@
 import os
 import re
 import logging # Import logging
-from typing import Optional, Tuple, Union, List
+from typing import Optional, Tuple, Union, List, Dict, Any
 from .config_loader import get_config
 
 # Initialize logger for this module.
 # It will be configured by setup_logging() when the application starts.
 logger = logging.getLogger(__name__)
 
-def get_project_base_dir() -> str:
-    """Gets the project base directory from config."""
-    config = get_config()
+def get_project_base_dir(config: Optional[Dict[str, Any]] = None) -> str:
+    """Inputs: config dict. Outputs: root project directory (defaults to cwd)."""
+    config = config or get_config()
     return config.get('project_base_dir', '.') # Default to current dir if not set
 
-def get_sample_dir(sample_subdir_name: Optional[str] = None) -> str:
+def get_sample_dir(sample_subdir_name: Optional[str] = None, *, config: Optional[Dict[str, Any]] = None) -> str:
     """
     Constructs the full path to a sample directory within data/input.
     If sample_subdir_name is 'MyBatch/SampleA', it resolves to project_base_dir/data/input/MyBatch/SampleA.
     If sample_subdir_name is None, it uses the 'sample_subdir_name' from config.
     """
-    config = get_config()
-    base_dir = get_project_base_dir()
+    config = config or get_config()
+    base_dir = get_project_base_dir(config)
     input_data_root = os.path.join(base_dir, 'data', 'input')
 
     if sample_subdir_name is None:
@@ -32,14 +32,14 @@ def get_sample_dir(sample_subdir_name: Optional[str] = None) -> str:
     return os.path.join(input_data_root, sample_subdir_name_resolved)
 
 
-def get_output_dir_for_sample(sample_subdir_name: Optional[str] = None, batch_name: Optional[str] = None) -> str:
+def get_output_dir_for_sample(sample_subdir_name: Optional[str] = None, batch_name: Optional[str] = None, *, config: Optional[Dict[str, Any]] = None) -> str:
     """
     Constructs the base output path for a given sample.
     If batch_name is provided, output is project_base_dir/data/output/batch_name/sample_subdir_name.
     Otherwise, output is project_base_dir/data/output/sample_subdir_name.
     """
-    config = get_config()
-    base_dir = get_project_base_dir()
+    config = config or get_config()
+    base_dir = get_project_base_dir(config)
     output_data_root = os.path.join(base_dir, 'data', 'output')
 
     if sample_subdir_name is None:
@@ -60,16 +60,16 @@ def get_output_dir_for_sample(sample_subdir_name: Optional[str] = None, batch_na
     os.makedirs(output_path, exist_ok=True)
     return output_path
 
-def get_models_dir() -> str:
-    """Constructs the full path to the models directory."""
-    base_dir = get_project_base_dir()
+def get_models_dir(config: Optional[Dict[str, Any]] = None) -> str:
+    """Inputs: config dict. Outputs: absolute models directory (ensures it exists)."""
+    base_dir = get_project_base_dir(config)
     models_path = os.path.join(base_dir, 'models')
     os.makedirs(models_path, exist_ok=True)
     return models_path
     
-def get_training_data_dir() -> str:
-    """Constructs the full path to the training data directory."""
-    base_dir = get_project_base_dir()
+def get_training_data_dir(config: Optional[Dict[str, Any]] = None) -> str:
+    """Inputs: config dict. Outputs: absolute training data directory (ensures it exists)."""
+    base_dir = get_project_base_dir(config)
     training_data_path = os.path.join(base_dir, 'data', 'training_data')
     os.makedirs(training_data_path, exist_ok=True)
     return training_data_path
@@ -171,32 +171,32 @@ if __name__ == '__main__':
     if not logging.getLogger().hasHandlers():
         logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(name)s - %(message)s')
 
-    from .config_loader import load_config 
+    from .config_loader import load_config, load_config_once
     try:
         config_file_path = os.path.join(os.path.dirname(__file__), '..', '..', 'config', 'pipeline_config.yml')
         if not os.path.exists(config_file_path):
             config_file_path = os.path.join('config', 'pipeline_config.yml')
         
-        load_config(config_file_path) 
+        cfg = load_config_once(config_file_path) 
         logger.info(f"Config loaded for path_helpers __main__ from: {config_file_path}")
         
-        logger.info(f"Project Base Dir: {get_project_base_dir()}")
+        logger.info(f"Project Base Dir: {get_project_base_dir(cfg)}")
         
         # Test get_sample_dir
-        logger.info(f"Sample Dir (default config): {get_sample_dir()}")
-        logger.info(f"Sample Dir (specific): {get_sample_dir('my_sample_01')}")
-        logger.info(f"Sample Dir (nested specific): {get_sample_dir(os.path.join('MyBatch', 'my_sample_01'))}")
+        logger.info(f"Sample Dir (default config): {get_sample_dir(config=cfg)}")
+        logger.info(f"Sample Dir (specific): {get_sample_dir('my_sample_01', config=cfg)}")
+        logger.info(f"Sample Dir (nested specific): {get_sample_dir(os.path.join('MyBatch', 'my_sample_01'), config=cfg)}")
 
 
         # Test get_output_dir_for_sample
-        logger.info(f"Output Dir for Sample (default config, no batch): {get_output_dir_for_sample()}")
-        logger.info(f"Output Dir for Sample (specific sample, no batch): {get_output_dir_for_sample('my_sample_01')}")
-        logger.info(f"Output Dir for Sample (specific sample, with batch): {get_output_dir_for_sample('my_sample_01', batch_name='MyBatchOutput')}")
-        logger.info(f"Output Dir for Sample (default config sample, with batch): {get_output_dir_for_sample(batch_name='MyBatchOutput')}")
+        logger.info(f"Output Dir for Sample (default config, no batch): {get_output_dir_for_sample(config=cfg)}")
+        logger.info(f"Output Dir for Sample (specific sample, no batch): {get_output_dir_for_sample('my_sample_01', config=cfg)}")
+        logger.info(f"Output Dir for Sample (specific sample, with batch): {get_output_dir_for_sample('my_sample_01', batch_name='MyBatchOutput', config=cfg)}")
+        logger.info(f"Output Dir for Sample (default config sample, with batch): {get_output_dir_for_sample(batch_name='MyBatchOutput', config=cfg)}")
 
 
-        logger.info(f"Models Dir: {get_models_dir()}")
-        logger.info(f"Training Data Dir: {get_training_data_dir()}")
+        logger.info(f"Models Dir: {get_models_dir(cfg)}")
+        logger.info(f"Training Data Dir: {get_training_data_dir(cfg)}")
 
         date, plate, well = parse_date_plate_well("20230101_plate1_well5_extra_info")
         logger.info(f"Parsed: Date={date}, Plate={plate}, Well={well}")
@@ -217,7 +217,7 @@ if __name__ == '__main__':
 
         logger.info("\n--- Testing get_valid_sample_subdirectories ---")
         # Create dummy dirs for testing
-        test_batch_dir_path = os.path.join(get_project_base_dir(), "temp_test_batch_input")
+        test_batch_dir_path = os.path.join(get_project_base_dir(cfg), "temp_test_batch_input")
         os.makedirs(test_batch_dir_path, exist_ok=True)
         valid_sample_names = ["20230101_plate1_well1", "20230102_plate2_well3"]
         invalid_names = ["not_a_sample", "20230103_plate3_well"] # missing part

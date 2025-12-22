@@ -23,9 +23,9 @@ FIXTURE_STAGE2 = Path('tests/fixtures/sample_stage2_final.csv')
 @pytest.fixture(autouse=True)
 def _reset_config():
     """Ensure each test starts with a clean configuration cache."""
-    config_loader._config = {}
+    config_loader.clear_cached_configs()
     yield
-    config_loader._config = {}
+    config_loader.clear_cached_configs()
 
 
 def _write_config(tmp_path: Path) -> Path:
@@ -80,7 +80,7 @@ def _write_dummy_model_artifacts(tmp_path: Path) -> None:
 def test_stage3_writes_ml_columns(tmp_path: Path):
     config_path = _write_config(tmp_path)
     _write_dummy_model_artifacts(tmp_path)
-    config_loader.load_config(str(config_path))
+    config = config_loader.load_config_once(str(config_path))
 
     stage2_df = pd.read_csv(FIXTURE_STAGE2).copy()
     stage2_df = pd.concat([stage2_df] * 4, ignore_index=True)
@@ -104,6 +104,7 @@ def test_stage3_writes_ml_columns(tmp_path: Path):
         str(stage3_output_dir),
         str(crops_dir),
         sample_id='sample_A',
+        config=config,
     )
 
     assert saved_csv is not None

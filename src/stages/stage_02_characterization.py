@@ -44,7 +44,9 @@ def run_stage_02_characterization(
     input_s1_csv_path: str,
     image_dir_path: str,
     output_dir_stage2: str,
-    sample_id: str
+    sample_id: str,
+    *,
+    config: Optional[Dict[str, Any]] = None,
 ) -> Optional[str]:
     """
     Performs detailed characterization for every particle candidate from Stage 1
@@ -52,7 +54,7 @@ def run_stage_02_characterization(
     """
     logger.info(f"--- Stage 2: Universal Characterization for Sample ID: {sample_id} ---")
     
-    config = get_config()
+    config = config or get_config()
     s2_config = config.get('stage_02_characterization', {})
     segmentation_params = get_unified_segmentation_params(config)
     

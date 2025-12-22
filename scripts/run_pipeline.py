@@ -13,7 +13,7 @@ project_root = os.path.dirname(current_dir)
 sys.path.insert(0, project_root)
 
 from src.utils import (
-    setup_logging, get_config, load_config,
+    setup_logging, load_config_once,
     save_dataframe_to_csv, get_project_base_dir,
     load_dataframe_from_csv
 )
@@ -85,12 +85,9 @@ def main():
     args = parser.parse_args()
 
     # --- Setup ---
-    config = {}
-
     try:
-        load_config(args.config)
-        setup_logging()
-        config = get_config()
+        config = load_config_once(args.config)
+        setup_logging(config)
         logger.info(f"Configuration loaded from: {args.config}")
         logger.info(f"Pipeline run initiated for Input Batch Directory: {args.input_batch_dir}")
         logger.info(f"Stages to run: {args.stages}")
@@ -98,7 +95,7 @@ def main():
         print(f"FATAL: Error during setup: {e}")
         sys.exit(1)
 
-    project_base_dir = get_project_base_dir()
+    project_base_dir = get_project_base_dir(config)
     batch_output_csv_dir = project_base_dir
     os.makedirs(batch_output_csv_dir, exist_ok=True)
         
@@ -186,7 +183,8 @@ def main():
                 s1_result_path = run_stage_01_initial_detection(
                     image_dir_path=sample_input_dir,
                     output_dir_stage1=s1_output_dir,
-                    sample_id=current_sample_id
+                    sample_id=current_sample_id,
+                    config=config,
                 )
                 if not s1_result_path:
                     raise ProcessingError(f"Stage 1 failed for {current_sample_id}, cannot proceed.")
@@ -202,7 +200,8 @@ def main():
                     input_s1_csv_path=s1_final_csv_path,
                     image_dir_path=sample_input_dir,
                     output_dir_stage2=s2_output_dir,
-                    sample_id=current_sample_id
+                    sample_id=current_sample_id,
+                    config=config,
                 )
                 if not s2_result_path:
                     raise ProcessingError(f"Stage 2 failed for {current_sample_id}, cannot proceed.")
@@ -224,7 +223,8 @@ def main():
                     input_final_particles_csv_path=s2_final_particles_csv_path,
                     output_dir_stage3=s3_output_dir,
                     final_particles_crops_dir=s2_final_particles_crops_dir,
-                    sample_id=current_sample_id
+                    sample_id=current_sample_id,
+                    config=config,
                 )
                 if not s3_result_path:
                     raise ProcessingError(f"Stage 3 failed for {current_sample_id}, cannot proceed.")
@@ -259,7 +259,8 @@ def main():
                     input_s3_csv_path=stage3_csv_for_stage4,
                     stage3_crops_dir=stage3_crops_for_stage4,
                     output_dir_stage4=s4_output_dir,
-                    sample_id=current_sample_id
+                    sample_id=current_sample_id,
+                    config=config,
                 )
                 if not s4_result_path:
                     logger.error(f"Stage 4 for {current_sample_id} FAILED or produced no output CSV.")
