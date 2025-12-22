@@ -29,6 +29,7 @@ def calculate_detailed_body_morphology(
     filled_body_mask: Optional[np.ndarray],   # uint8 mask
     intensity_image_for_props: Optional[np.ndarray] = None
 ) -> Dict[str, Any]:
+    """Compute detailed morphology metrics for a particle using raw and filled masks."""
     features: Dict[str, Any] = {}
     keys_to_init = [
         'main_area_raw_s4', 'solidity_s4', 'compactness_rect_s4', 'extent_raw_s4',

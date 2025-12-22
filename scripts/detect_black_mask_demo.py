@@ -134,6 +134,7 @@ def run_demo(image_dir: Path, config_path: Path) -> Path:
 
 
 def parse_args() -> argparse.Namespace:
+    """Build and parse CLI arguments for the black mask detection demo."""
     parser = argparse.ArgumentParser(
         description=(
             "Run detect_black_mask_artifact on every supported image in a directory "
@@ -160,6 +161,7 @@ def parse_args() -> argparse.Namespace:
 
 
 def main() -> None:
+    """Entry point for running the black mask detection demo from the CLI."""
     args = parse_args()
     _configure_logging(args.verbose)
 

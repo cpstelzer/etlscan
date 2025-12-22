@@ -228,6 +228,7 @@ def process_frame_pair(
 # --- _parse_image_filenames, _filter_image_df, _analyze_single_subtracted_image_global_thresh, _analyze_unsubtracted_locally, _compare_and_fuse_particle_dfs ---
 # These helper functions remain unchanged.
 def _parse_image_filenames(image_dir_path: str) -> Optional[pd.DataFrame]: # Unchanged
+    """Parse image filenames into a dataframe of metadata needed for Stage 1 processing."""
     if not image_dir_path or not isinstance(image_dir_path, str):
         logger.error(f"Invalid image_dir_path: {image_dir_path}"); return None
     if not os.path.isdir(image_dir_path):
@@ -253,6 +254,7 @@ def _parse_image_filenames(image_dir_path: str) -> Optional[pd.DataFrame]: # Unc
     return df
 
 def _filter_image_df(df: pd.DataFrame) -> pd.DataFrame: # Unchanged
+    """Trim the parsed image table to frames usable for pairing foreground/background."""
     if df.empty: return df
     initial_len = len(df)
     if df.iloc[0]["frame"] == 0:
@@ -358,6 +360,7 @@ def _analyze_single_subtracted_image_global_thresh( # Unchanged
     config_stage1_particle_analysis: Dict[str, Any],
     global_threshold_config: Dict[str, Any]
 ) -> Tuple[List[Dict[str, Any]], Optional[np.ndarray]]:
+    """Detect particles on a subtracted frame using global thresholding settings."""
     particles_data = []; binary_mask_display_uint8 = None
     if image_to_analyze_gray_uint8 is None: return particles_data, binary_mask_display_uint8
     processed_img_uint8 = image_to_analyze_gray_uint8.copy()
@@ -393,6 +396,7 @@ def _analyze_unsubtracted_locally( # Unchanged
     global_threshold_config: Dict[str, Any],
     source_illumination: str
 ) -> Tuple[List[Dict[str, Any]], Optional[np.ndarray], Tuple[Optional[np.ndarray], Optional[np.ndarray], Optional[float]]]:
+    """Refine subtracted detections by re-segmenting local ROIs on the unsubtracted image."""
     if full_unsub_prepped_uint8 is None: return [], None, (None, None, None)
     all_local_particle_data = []; composite_binary_mask_full_image = np.zeros_like(full_unsub_prepped_uint8, dtype=np.uint8)
     first_roi_img_2d_for_display, first_roi_hist_data_ravel, first_roi_effective_thresh_val_float = None, None, None
@@ -441,6 +445,7 @@ def _analyze_unsubtracted_locally( # Unchanged
     return all_local_particle_data, composite_binary_mask_full_image, (first_roi_img_2d_for_display, first_roi_hist_data_ravel, first_roi_effective_thresh_val_float)
 
 def _compare_and_fuse_particle_dfs(df_ref: pd.DataFrame, df_query: pd.DataFrame, config_s1_comparison: Dict[str, Any]) -> pd.DataFrame: # Unchanged
+    """Fuse subtracted and unsubtracted detections by spatial proximity to keep confident particles."""
     if df_ref.empty or df_query.empty: return pd.DataFrame()
     if not all(k in df_ref.columns and k in df_query.columns for k in ['X', 'Y']): raise DataValidationError("X, Y columns missing for fusion.")
     sr_factor, dp_area = config_s1_comparison.get('search_radius_factor', 2.0), config_s1_comparison.get('default_particle_area', 500.0); search_radius = sr_factor * np.sqrt(dp_area / np.pi)
@@ -479,6 +484,7 @@ def _compare_and_fuse_particle_dfs(df_ref: pd.DataFrame, df_query: pd.DataFrame,
     return final_matched_df
 
 def _process_particle_coordinates_for_tracking_df(input_df: pd.DataFrame, pixel_size_um, magnification):
+    """Convert fused particle coordinates to millimeters and extract tracking metadata."""
     logger.info("Tracking Step 1: Loading and processing fused particle data for tracking.")
     df = input_df.copy()
     if df.empty:
@@ -489,6 +495,7 @@ def _process_particle_coordinates_for_tracking_df(input_df: pd.DataFrame, pixel_
     df['x_mm'] = df['X'] * pixel_to_mm_factor
     df['y_mm'] = df['Y'] * pixel_to_mm_factor
     def extract_metadata(filename):
+        """Parse frame, z position, and dioptries from a source image filename."""
         frame_match = re.search(r'_f(\d+)', filename)
         z_match = re.search(r'_fd([-\d.]+?)mm', filename)
         dpt_match = re.search(r'_dpt([-\d.]+?)_', filename)
@@ -512,6 +519,7 @@ def _process_particle_coordinates_for_tracking_df(input_df: pd.DataFrame, pixel_
     return df
 
 def _track_particles_3d(processed_df, search_range_mm, memory_frames, min_track_length): # Unchanged
+    """Run trackpy to build 3D trajectories from processed particle coordinates."""
     if processed_df.empty:
         logger.warning("Input DataFrame for tracking is empty. Skipping tracking.")
         return pd.DataFrame()
@@ -540,6 +548,7 @@ def _track_particles_3d(processed_df, search_range_mm, memory_frames, min_track_
     return filtered_trajectories
 
 def _build_tracking_figure(tracked_df: pd.DataFrame) -> Optional[plt.Figure]:
+    """Create a 3D matplotlib figure summarizing all tracked particle paths."""
     if tracked_df.empty:
         return None
     fig = plt.figure(figsize=(10, 8))

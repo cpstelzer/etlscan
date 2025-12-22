@@ -82,6 +82,7 @@ def determine_offset(
 
 
 def parse_args() -> argparse.Namespace:
+    """Build and parse CLI arguments for the background offset demo."""
     parser = argparse.ArgumentParser(
         description=(
             "Call _determine_bg_offset_for_fg_bg_pairs on a dataset and display the "
@@ -134,6 +135,7 @@ def parse_args() -> argparse.Namespace:
 
 
 def main() -> None:
+    """Run the CLI workflow for determining background offsets."""
     args = parse_args()
     _configure_logging(args.verbose)
 

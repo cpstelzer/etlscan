@@ -35,20 +35,28 @@ logger = logging.getLogger(__name__)
 
 
 class AddGaussianNoise(object):
+    """Transform that adds Gaussian noise to an image tensor."""
+
     def __init__(self, mean=0.0, std=0.02):
+        """Store noise statistics for the transform."""
         self.mean = mean
         self.std = std
 
     def __call__(self, tensor):
+        """Apply Gaussian noise to the provided tensor."""
         noise = torch.randn_like(tensor) * self.std + self.mean
         return tensor + noise
 
 
 class MixupWrapper:
+    """Wrapper for applying mixup augmentation during training."""
+
     def __init__(self, alpha: float):
+        """Configure the Beta distribution strength for mixing samples."""
         self.alpha = alpha
 
     def __call__(self, inputs: torch.Tensor, targets: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, float]:
+        """Mix input batch and labels using the configured mixup alpha."""
         if self.alpha <= 0:
             return inputs, targets, targets, 1.0
         lam = np.random.beta(self.alpha, self.alpha)
@@ -81,6 +89,7 @@ def _get_normalization(weights: EfficientNet_B0_Weights) -> Tuple[list, list]:
 
 
 def build_transforms(input_size: int) -> Tuple[transforms.Compose, transforms.Compose]:
+    """Create training and validation transform pipelines for EfficientNet."""
     weights = EfficientNet_B0_Weights.IMAGENET1K_V1
     mean, std = _get_normalization(weights)
     normalize = transforms.Normalize(mean=mean, std=std)
@@ -113,6 +122,7 @@ def build_transforms(input_size: int) -> Tuple[transforms.Compose, transforms.Co
 
 
 def build_model(num_classes: int) -> nn.Module:
+    """Initialize EfficientNet-B0 with a classifier head sized for the dataset."""
     weights = EfficientNet_B0_Weights.IMAGENET1K_V1
     model = efficientnet_b0(weights=weights)
     in_features = model.classifier[1].in_features
@@ -121,6 +131,7 @@ def build_model(num_classes: int) -> nn.Module:
 
 
 def train_one_epoch(model, dataloader, criterion, optimizer, mixup: MixupWrapper, device: torch.device) -> Tuple[float, float]:
+    """Train the model for one epoch and return average loss and accuracy."""
     model.train()
     total_loss = 0.0
     correct = 0
@@ -145,6 +156,7 @@ def train_one_epoch(model, dataloader, criterion, optimizer, mixup: MixupWrapper
 
 
 def evaluate(model, dataloader, criterion, device: torch.device) -> Tuple[float, float]:
+    """Evaluate the model on the validation set and return loss and accuracy."""
     model.eval()
     total_loss = 0.0
     correct = 0
@@ -164,6 +176,7 @@ def evaluate(model, dataloader, criterion, device: torch.device) -> Tuple[float,
 
 
 def parse_args():
+    """Parse command-line arguments for EfficientNet training."""
     parser = argparse.ArgumentParser(description="Train an EfficientNet-B0 classifier with strong augmentation.")
     parser.add_argument('--config', default='config/pipeline_config.yml', help='Path to the pipeline config file.')
     parser.add_argument(
@@ -187,6 +200,7 @@ def parse_args():
 
 
 def main():
+    """Train EfficientNet-B0 using curated crops and save the best checkpoint."""
     args = parse_args()
     config = load_config_once(args.config)
     s3_config = config.get('stage_03_filtering_and_classification', {})

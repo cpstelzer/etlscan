@@ -20,6 +20,7 @@ def crop_rotated(
     angle: float,
     padding: int = 10
 ) -> np.ndarray:
+    """Rotate an image around a center and extract a padded rectangular crop."""
     # ... (This helper function remains unchanged) ...
     w, h = size
     w_padded, h_padded = w + 2 * padding, h + 2 * padding
@@ -44,6 +45,7 @@ def crop_rotated(
 
 
 def normalized_crop_config(crop_config: Dict[str, Any]) -> Dict[str, Any]:
+    """Validate and normalize crop configuration values for particle cropping."""
     mode = crop_config.get('mode', 'rotational_rectangle')
     if mode not in ['rotational_rectangle', 'centroid_square', 'bounding_box']:
         raise ConfigError(f"Invalid ParticleCropper mode: {mode}")
@@ -180,7 +182,10 @@ def crop_particle_from_arrays(
 
 
 class ParticleCropper:
+    """Utility for cropping particles from full images based on configuration."""
+
     def __init__(self, crop_config: Dict[str, Any]):
+        """Store the normalized cropping configuration for reuse."""
         normalized = normalized_crop_config(crop_config)
         self.mode = normalized['mode']
         self._config = normalized
@@ -193,6 +198,7 @@ class ParticleCropper:
         output_dir_for_crop: Optional[str] = None,
         crop_filename_prefix: Optional[str] = None
     ) -> Tuple[Optional[np.ndarray], Optional[str]]:
+        """Crop one particle and optionally save it with a generated filename."""
         
         cropped_gray, _ = crop_particle_from_arrays(
             self._config,
@@ -224,6 +230,7 @@ def detect_cropped_particle_on_boundary(
     illumination_mode_of_crop: str,
     threshold_params: Dict[str, Any]
 ) -> bool:
+    """Determine whether a cropped particle touches the border of its crop."""
     h, w = image_crop_gray.shape
     if h < 3 or w < 3: return True
     

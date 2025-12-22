@@ -33,6 +33,7 @@ logger = logging.getLogger(__name__)
 
 @dataclass(frozen=True)
 class SamplePaths:
+    """Structured collection of input/output paths for a single sample run."""
     sample_id: str
     batch_dir: str
     batch_dir_name: str
@@ -262,6 +263,7 @@ def run_stage(stage_id: str, sample_paths: SamplePaths, config: dict) -> Optiona
     raise ValueError(f"Unknown stage identifier '{stage_id}'")
 
 def main():
+    """Parse CLI arguments and orchestrate the staged pipeline for a batch run."""
     parser = argparse.ArgumentParser(description="Run the Well Plate Analyzer pipeline.")
     parser.add_argument(
         "--config",

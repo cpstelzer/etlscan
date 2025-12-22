@@ -11,6 +11,7 @@ from scripts.build_manual_labels_csv import (
 
 
 def test_parse_sample_id_from_filename() -> None:
+    """Sample IDs should be parsed from filenames that include a track suffix."""
     assert (
         parse_sample_id_from_filename('20251112_plate2_well19_track1_frame5')
         == '20251112_plate2_well19'
@@ -19,6 +20,7 @@ def test_parse_sample_id_from_filename() -> None:
 
 
 def test_build_manual_labels_dataframe(tmp_path) -> None:
+    """Curated crops should be matched to Stage-03 rows and labelled correctly."""
     stage3_root = tmp_path / 'output'
     sample_id = '20251112_plate2_well19'
     csv_dir = stage3_root / 'size_AS1_L1' / sample_id / 'stage3_filtering_classification'

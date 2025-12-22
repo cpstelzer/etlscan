@@ -522,6 +522,7 @@ def _score_particles_with_efficientnet(
     batch_size = 16
 
     def _flush_batch():
+        """Run EfficientNet on the current batch and store probabilities by index."""
         nonlocal batch_tensors, batch_indices, probabilities
         if not batch_tensors:
             return

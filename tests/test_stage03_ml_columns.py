@@ -29,6 +29,7 @@ def _reset_config():
 
 
 def _write_config(tmp_path: Path) -> Path:
+    """Write a minimal pipeline config for Stage 3 tests and return its path."""
     config_path = tmp_path / "pipeline_config.yml"
     config_data = {
         'project_base_dir': str(tmp_path),
@@ -52,6 +53,7 @@ def _write_config(tmp_path: Path) -> Path:
 
 
 def _write_dummy_model_artifacts(tmp_path: Path) -> None:
+    """Persist a small scaler and classifier to emulate trained artifacts."""
     models_dir = tmp_path / 'models'
     models_dir.mkdir(parents=True, exist_ok=True)
 
@@ -78,6 +80,7 @@ def _write_dummy_model_artifacts(tmp_path: Path) -> None:
 
 
 def test_stage3_writes_ml_columns(tmp_path: Path):
+    """Stage 3 should add ML columns and produce both filtered and legacy outputs."""
     config_path = _write_config(tmp_path)
     _write_dummy_model_artifacts(tmp_path)
     config_loader.load_config(str(config_path))

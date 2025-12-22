@@ -16,18 +16,21 @@ FIXTURE_PATH = 'tests/fixtures/sample_stage2_final.csv'
 
 
 def test_validate_required_feature_columns_passes_with_fixture():
+    """Fixture CSV should satisfy required feature column validation."""
     df = pd.read_csv(FIXTURE_PATH)
     # Should not raise
     _validate_required_feature_columns(df)
 
 
 def test_validate_required_feature_columns_raises_on_missing():
+    """Validation should raise when key feature columns are absent."""
     df = pd.DataFrame({'frame': [1]})
     with pytest.raises(DataValidationError):
         _validate_required_feature_columns(df)
 
 
 def test_metadata_columns_are_prefixed():
+    """Metadata columns should be renamed with the configured prefix."""
     df = pd.read_csv(FIXTURE_PATH)
     renamed = _rename_metadata_columns(df.copy())
     for col in METADATA_COLUMNS:
@@ -37,6 +40,7 @@ def test_metadata_columns_are_prefixed():
 
 
 def test_lbp_columns_expand_with_config():
+    """LBP feature expectations should reflect radii and point settings in config."""
     custom_config = {
         'stage_02_characterization': {
             'shape_descriptors': {
@@ -56,6 +60,7 @@ def test_lbp_columns_expand_with_config():
 
 
 def _build_numeric_df(lbp_count: int) -> pd.DataFrame:
+    """Build a dataframe containing a base feature set plus a configurable number of LBP columns."""
     data = {col: [0] for col in BASE_NUMERIC_FEATURE_COLUMNS}
     for i in range(lbp_count):
         data[f'lbp_{i}'] = [i]
@@ -63,6 +68,7 @@ def _build_numeric_df(lbp_count: int) -> pd.DataFrame:
 
 
 def test_validate_allows_superset_lbp_columns():
+    """Validation should allow more LBP columns than requested by config."""
     df = _build_numeric_df(lbp_count=36)
     narrow_config = {
         'stage_02_characterization': {
@@ -77,6 +83,7 @@ def test_validate_allows_superset_lbp_columns():
 
 
 def test_validate_detects_missing_lbp_columns():
+    """Validation should raise when expected LBP features are missing."""
     df = _build_numeric_df(lbp_count=3)
     config = {
         'stage_02_characterization': {

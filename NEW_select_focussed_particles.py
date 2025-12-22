@@ -48,12 +48,14 @@ diagnostics_csv = os.path.join(plot_dir, "diagnostics_selected_peaks.csv")
 
 
 def smooth_series(s: pd.Series, w: int):
+    """Return a centered rolling mean for a series, skipping smoothing when the window is 1."""
     if w <= 1:
         return s.values
     return s.rolling(window=w, center=True, min_periods=1).mean().values
 
 
 def detect_peaks_in_track(g: pd.DataFrame):
+    """Identify frame indices where the sharpness curve has prominent local maxima."""
     y = g[sharp_col].values
     if len(y) == 0:
         return np.array([], dtype=int)
@@ -74,6 +76,7 @@ def detect_peaks_in_track(g: pd.DataFrame):
 
 
 def filter_focused_frames(df: pd.DataFrame):
+    """Filter each track to rows around sharpness peaks and collect diagnostics."""
     filtered_rows = []
     diagnostics = []
     for tid, g in df.groupby(track_col):
@@ -102,6 +105,7 @@ def filter_focused_frames(df: pd.DataFrame):
 
 
 def plot_track_with_collage(df: pd.DataFrame, tid: int, crops_dir: str, prefix: str, outpath: str):
+    """Plot sharpness and z position for one track and append a collage of selected crops."""
     g = df[df[track_col] == tid].sort_values(frame_col)
     if g.empty:
         return None
@@ -175,6 +179,7 @@ def plot_track_with_collage(df: pd.DataFrame, tid: int, crops_dir: str, prefix: 
 
 
 def plot_example_tracks_with_collages(df: pd.DataFrame, crops_dir: str, prefix: str, outdir: str, n_tracks: Optional[int] = None):
+    """Generate diagnostic plots with collages for the longest tracks in the dataset."""
     track_lengths = df.groupby(track_col)[frame_col].count().sort_values(ascending=False)
     if n_tracks is None:
         track_ids = track_lengths.index
@@ -191,6 +196,7 @@ def plot_example_tracks_with_collages(df: pd.DataFrame, crops_dir: str, prefix: 
 
 
 def plot_3d_reconstructed(df: pd.DataFrame, filtered_df: pd.DataFrame, outpath: str, n_tracks: Optional[int] = 8):
+    """Draw reconstructed 3D trajectories using selected in-focus frames for each track."""
     track_lengths = df.groupby(track_col)[frame_col].count().sort_values(ascending=False)
     if n_tracks is None:
         track_ids = track_lengths.index
@@ -233,6 +239,7 @@ def plot_3d_reconstructed(df: pd.DataFrame, filtered_df: pd.DataFrame, outpath: 
 
 
 def plot_diagnostics_summary(diagnostics_df: pd.DataFrame, outpath: str):
+    """Summarize track lengths and selected maxima counts across all tracks."""
     df_sorted = diagnostics_df.sort_values("n_frames", ascending=False).reset_index(drop=True)
     fig, ax1 = plt.subplots(figsize=(12, 6))
 
@@ -255,6 +262,7 @@ def plot_diagnostics_summary(diagnostics_df: pd.DataFrame, outpath: str):
 
 
 def main():
+    """Run the focus-frame filtering workflow and emit plots and CSV outputs."""
     if not os.path.exists(input_csv):
         raise FileNotFoundError(f"Input CSV not found: {input_csv}")
 

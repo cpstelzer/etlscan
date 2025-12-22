@@ -177,6 +177,7 @@ def build_crop_filename(
     x_value: Any,
     y_value: Any
 ) -> str:
+    """Assemble a descriptive filename for a particle crop using track and frame info."""
     try:
         x_int = int(x_value) if pd.notna(x_value) else 0
     except (TypeError, ValueError):
@@ -201,6 +202,7 @@ def crop_particles(
     illumination_mode: str,
     boundary_threshold_params: Dict[str, Any]
 ) -> List[dict]:
+    """Crop all particles from an image and annotate metadata for downstream features."""
     if frame_num is None:
         logger.warning(
             "Could not parse frame from %s. Skipping %d particles.",
@@ -261,6 +263,7 @@ def segment_particles(
     crops_df: pd.DataFrame,
     segmentation_params: Dict[str, Any]
 ) -> pd.DataFrame:
+    """Generate raw and filled masks for every crop to prepare for feature extraction."""
     segmented_records: List[Dict[str, Any]] = []
 
     for _, crop_row in crops_df.iterrows():
@@ -291,6 +294,7 @@ def compute_features(
     segmentation_params: Dict[str, Any],
     s2_config: Dict[str, Any]
 ) -> pd.DataFrame:
+    """Calculate quality, morphology, and shape descriptors for segmented particles."""
     feature_rows: List[Dict[str, Any]] = []
 
     for _, seg_row in segmented_df.iterrows():
@@ -335,6 +339,7 @@ def select_focused_tracks(
     comprehensive_df: pd.DataFrame,
     focus_cfg: Dict[str, Any]
 ) -> Tuple[Optional[pd.DataFrame], Optional[pd.DataFrame]]:
+    """Limit each track to frames near sharpness peaks and emit diagnostics."""
     if not focus_cfg.get('enabled', False):
         return None, None
 
@@ -367,6 +372,7 @@ def save_all_particle_crops(
     crops_df: pd.DataFrame,
     crops_dir: str
 ) -> None:
+    """Persist every intermediate particle crop to disk."""
     if crops_df is None or crops_df.empty:
         return
 
@@ -392,6 +398,7 @@ def emit_focus_artifacts(
     sample_id: str,
     output_dir_stage2: str
 ) -> None:
+    """Save focus-filtered CSVs and optional visual diagnostics."""
     if filtered_df is None or diagnostics_df is None:
         return
 
@@ -446,6 +453,7 @@ def emit_final_particle_crops(
     sample_id: str,
     output_dir_stage2: str
 ) -> None:
+    """Create and save final crops for area-selected particles."""
     if final_particles_df.empty:
         logger.info('No final particles selected after area-based filtering.')
         return
@@ -479,6 +487,7 @@ def emit_stage2_artifacts(
     focus_cfg: Dict[str, Any],
     save_all_particle_crops_flag: bool
 ) -> Optional[str]:
+    """Persist Stage 2 outputs, including crops, focus artifacts, and summary CSVs."""
     os.makedirs(output_dir_stage2, exist_ok=True)
     output_filename = f"{sample_id}_stage2_all_particle_features.csv"
     saved_csv_path = save_dataframe_to_csv(comprehensive_df, output_dir_stage2, output_filename)
@@ -495,6 +504,7 @@ def emit_stage2_artifacts(
 
 
 def smooth_series(series: pd.Series, window: int) -> np.ndarray:
+    """Return a centered rolling mean of the provided series."""
     if window <= 1:
         return series.to_numpy()
     return series.rolling(window=window, center=True, min_periods=1).mean().to_numpy()
@@ -505,6 +515,7 @@ def detect_peaks_in_track(
     sharp_col: str,
     focus_cfg: dict
 ) -> np.ndarray:
+    """Identify indices of sharpness peaks within a single track."""
     smooth_window = max(1, int(focus_cfg.get('smooth_window', 3)))
     min_sharpness_frac = float(focus_cfg.get('min_sharpness_fraction', 0.3))
     min_prominence_frac = float(focus_cfg.get('min_prominence_fraction', 0.05))
@@ -547,6 +558,7 @@ def filter_focused_frames(
     sharp_col: str,
     focus_cfg: dict
 ) -> Tuple[pd.DataFrame, pd.DataFrame]:
+    """Filter each track to frames near sharpness peaks and record summary stats."""
     filtered_rows: List[pd.DataFrame] = []
     diagnostics: List[dict] = []
 
@@ -585,6 +597,7 @@ def plot_track_with_collage(
     prefix: str,
     outpath: str
 ) -> Optional[str]:
+    """Plot sharpness vs. frame for one track and optionally append a crop collage."""
     track_df = df[df[track_col] == track_id].sort_values(frame_col)
     if track_df.empty:
         return None
@@ -696,6 +709,7 @@ def plot_example_tracks_with_collages(
     outdir: str,
     n_tracks: Optional[int]
 ) -> List[str]:
+    """Create diagnostic plots with collages for the longest tracks."""
     track_lengths = df.groupby(track_col)[frame_col].count().sort_values(ascending=False)
     track_ids = track_lengths.index if n_tracks is None else track_lengths.index[:n_tracks]
 
@@ -728,6 +742,7 @@ def plot_3d_reconstructed(
     outpath: str,
     n_tracks: Optional[int]
 ) -> Optional[str]:
+    """Render 3D trajectories showing selected in-focus points for each track."""
     x_mm_col = FOCUS_X_MM_COLUMN
     y_mm_col = FOCUS_Y_MM_COLUMN
 
@@ -792,6 +807,7 @@ def plot_3d_reconstructed(
 
 
 def plot_diagnostics_summary(diagnostics_df: pd.DataFrame, outpath: str) -> Optional[str]:
+    """Summarize track lengths and selected peak counts in a dual-axis plot."""
     if diagnostics_df.empty:
         return None
 
@@ -836,6 +852,7 @@ def select_final_particles_by_area(
     track_col: str,
     area_col: str
 ) -> pd.DataFrame:
+    """Pick the largest-area particle per track from the focus-filtered dataframe."""
     if filtered_df is None or filtered_df.empty:
         columns = list(filtered_df.columns) if filtered_df is not None else None
         return pd.DataFrame(columns=columns)
@@ -868,6 +885,7 @@ def select_final_particles_by_area(
 
 
 def _format_track_label(row: pd.Series, fallback_suffix: int) -> str:
+    """Create a stable label for crops, preferring track IDs and falling back gracefully."""
     raw_track_id = row.get('track_id')
     if pd.notna(raw_track_id):
         try:
@@ -897,6 +915,7 @@ def crop_and_save_final_particle_images(
     sample_id: str,
     output_dir_stage2: str
 ) -> pd.DataFrame:
+    """Recreate final particle crops and record their filenames."""
     if final_particles_df.empty:
         return final_particles_df
 
