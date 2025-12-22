@@ -1,17 +1,19 @@
 # src/utils/logging_setup.py
 import logging
 import os 
-import sys # Import sys for StreamHandler
+import sys  # Import sys for StreamHandler
+from typing import Dict, Optional
 from .config_loader import get_config 
 from .path_helpers import get_project_base_dir 
 
-def setup_logging() -> logging.Logger:
+def setup_logging(config: Optional[Dict[str, object]] = None) -> logging.Logger:
     """
+    Input: optional config dict. Output: configured root logger with file/console handlers.
     Sets up global logging configuration.
     Logs can be directed to a file specified in the config.
     Ensures INFO level (and above) messages also appear on console if file logging is enabled.
     """
-    config = get_config()
+    config = config or get_config()
     log_config = config.get('logging', {})
     
     level_str = log_config.get('level', 'INFO').upper()
@@ -46,7 +48,7 @@ def setup_logging() -> logging.Logger:
     file_handler_active = False
     if log_file_config_path and log_file_config_path.lower() != 'null':
         if not os.path.isabs(log_file_config_path):
-            project_base = get_project_base_dir() 
+            project_base = get_project_base_dir(config) 
             log_file_full_path = os.path.join(project_base, log_file_config_path)
         else:
             log_file_full_path = log_file_config_path

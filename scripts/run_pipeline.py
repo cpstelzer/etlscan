@@ -14,7 +14,7 @@ project_root = os.path.dirname(current_dir)
 sys.path.insert(0, project_root)
 
 from src.utils import (
-    setup_logging, get_config, load_config,
+    setup_logging, load_config_once,
     save_dataframe_to_csv, get_project_base_dir,
     load_dataframe_from_csv
 )
@@ -44,13 +44,13 @@ class SamplePaths:
 
 
 def prepare_sample_paths(config: dict, batch_dir: str, sample_id: str) -> SamplePaths:
-    """Build all per-sample paths without side effects."""
+    """Input: config dict and sample identifiers. Output: structured sample paths without I/O."""
     batch_dir_name = os.path.basename(os.path.normpath(batch_dir))
     if not batch_dir_name:
         sanitized_batch = batch_dir.strip().replace(os.sep, "_")
         batch_dir_name = sanitized_batch if sanitized_batch else "batch_final_particles"
 
-    project_base_dir = get_project_base_dir()
+    project_base_dir = get_project_base_dir(config)
     batch_output_parent_dir = os.path.join(project_base_dir, "data", "output", batch_dir_name)
     sample_input_dir = os.path.join(batch_dir, sample_id)
     sample_output_base_dir = os.path.join(batch_output_parent_dir, sample_id)
@@ -96,7 +96,7 @@ def _write_batch_aggregation_csv(
     destination_dir: str,
     filenames: Union[str, List[str]],
 ) -> List[Optional[str]]:
-    """Persist any aggregated particle records that have been collected."""
+    """Input: aggregated frames + filenames. Output: saved CSV paths for rollups."""
     if not aggregated_frames:
         return []
 
@@ -114,7 +114,7 @@ def _write_batch_aggregation_csv(
 
 
 def _clean_output_directory(output_dir: str, stage_label: str) -> None:
-    """Remove an existing stage output directory so it can be recreated cleanly."""
+    """Input: output directory + label. Output: directory reset for fresh stage writes."""
     if os.path.isdir(output_dir):
         logger.info(f"Cleaning existing {stage_label} output at: {output_dir}")
         shutil.rmtree(output_dir)
@@ -128,7 +128,7 @@ def accumulate_stage_outputs(
     sample_id: str,
     label: str,
 ) -> Optional[pd.DataFrame]:
-    """Load and append a stage output to the aggregated frames list."""
+    """Input: CSV path and aggregation list. Output: appended dataframe for batch rollup."""
     if not os.path.exists(csv_path):
         logger.debug("%s CSV not found for %s at %s. Skipping aggregation.", label, sample_id, csv_path)
         return None
@@ -154,7 +154,7 @@ def write_batch_rollups(
     filenames: Union[str, List[str]],
     label: str,
 ) -> None:
-    """Persist aggregated frames to batch rollup files and log their locations."""
+    """Input: aggregated frames and targets. Output: batch rollup CSVs persisted."""
     saved_paths = _write_batch_aggregation_csv(aggregated_frames, destination_dir, filenames)
     for saved_path in saved_paths:
         if saved_path:
@@ -162,7 +162,7 @@ def write_batch_rollups(
 
 
 def run_stage(stage_id: str, sample_paths: SamplePaths, config: dict) -> Optional[str]:
-    """Execute a stage based on its identifier using prepared sample paths."""
+    """Input: stage id, paths, config. Output: path to stage CSV (if produced)."""
     stage_outputs = sample_paths.stage_outputs
     sample_id = sample_paths.sample_id
     sample_input_dir = sample_paths.sample_input_dir
@@ -173,7 +173,8 @@ def run_stage(stage_id: str, sample_paths: SamplePaths, config: dict) -> Optiona
         result_path = run_stage_01_initial_detection(
             image_dir_path=sample_input_dir,
             output_dir_stage1=stage_dirs["1"],
-            sample_id=sample_id
+            sample_id=sample_id,
+            config=config,
         )
         if not result_path:
             raise ProcessingError(f"Stage 1 failed for {sample_id}, cannot proceed.")
@@ -190,7 +191,8 @@ def run_stage(stage_id: str, sample_paths: SamplePaths, config: dict) -> Optiona
             input_s1_csv_path=stage_outputs["s1_final_csv_path"],
             image_dir_path=sample_input_dir,
             output_dir_stage2=stage_dirs["2"],
-            sample_id=sample_id
+            sample_id=sample_id,
+            config=config,
         )
         if not result_path:
             raise ProcessingError(f"Stage 2 failed for {sample_id}, cannot proceed.")
@@ -212,7 +214,8 @@ def run_stage(stage_id: str, sample_paths: SamplePaths, config: dict) -> Optiona
             input_final_particles_csv_path=stage_outputs["s2_final_particles_csv_path"],
             output_dir_stage3=stage_dirs["3"],
             final_particles_crops_dir=stage_outputs["s2_final_particles_crops_dir"],
-            sample_id=sample_id
+            sample_id=sample_id,
+            config=config,
         )
         if not result_path:
             raise ProcessingError(f"Stage 3 failed for {sample_id}, cannot proceed.")
@@ -247,7 +250,8 @@ def run_stage(stage_id: str, sample_paths: SamplePaths, config: dict) -> Optiona
             input_s3_csv_path=stage3_csv_for_stage4,
             stage3_crops_dir=stage3_crops_for_stage4,
             output_dir_stage4=stage_dirs["4"],
-            sample_id=sample_id
+            sample_id=sample_id,
+            config=config,
         )
         if not result_path:
             logger.error(f"Stage 4 for {sample_id} FAILED or produced no output CSV.")
@@ -282,12 +286,9 @@ def main():
     args = parser.parse_args()
 
     # --- Setup ---
-    config = {}
-
     try:
-        load_config(args.config)
-        setup_logging()
-        config = get_config()
+        config = load_config_once(args.config)
+        setup_logging(config)
         logger.info(f"Configuration loaded from: {args.config}")
         logger.info(f"Pipeline run initiated for Input Batch Directory: {args.input_batch_dir}")
         logger.info(f"Stages to run: {args.stages}")
@@ -315,7 +316,7 @@ def main():
         sys.exit(1)
 
     sample_paths_template = prepare_sample_paths(config, args.input_batch_dir, valid_sample_ids[0])
-    project_base_dir = get_project_base_dir()
+    project_base_dir = get_project_base_dir(config)
     batch_output_csv_dir = project_base_dir
     batch_output_parent_dir = sample_paths_template.batch_output_parent_dir
     os.makedirs(batch_output_csv_dir, exist_ok=True)
