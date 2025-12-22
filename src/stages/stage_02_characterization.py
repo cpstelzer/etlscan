@@ -13,18 +13,19 @@ matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 import matplotlib.image as mpimg
 from matplotlib.gridspec import GridSpecFromSubplotSpec
-from typing import Optional, List, Tuple
+from typing import Optional, List, Tuple, Dict, Any
 
 from src.utils import (
     get_config, load_dataframe_from_csv, save_dataframe_to_csv
 )
 from src.utils.config_loader import get_unified_segmentation_params
 from src.utils.path_helpers import extract_frame_from_filename
-from src.utils.common_exceptions import ProcessingError, ConfigError, DataValidationError
+from src.utils.common_exceptions import ConfigError
 from src.core.image_io_operations import load_image, convert_to_grayscale
 from src.core.particle_operations import (
-    ParticleCropper,
+    crop_particle_from_arrays,
     detect_cropped_particle_on_boundary,
+    normalized_crop_config,
 )
 from src.core.segmentation import segment_main_body_from_image_float
 from src.core.feature_calculators.quality_calculator import calculate_quality_features
@@ -66,20 +67,12 @@ def run_stage_02_characterization(
         logger.warning("Cropping configuration not found in 'stage_02_characterization'. Using defaults.")
         cropping_config = {'mode': 'rotational_rectangle', 'rotational_padding': 10}
 
-    save_all_particle_crops = bool(cropping_config.get('save_all_particle_crops', True))
-    all_crops_dir = None
-    if save_all_particle_crops:
-        all_crops_dir = os.path.join(output_dir_stage2, "stage2_all_particle_crops")
-        os.makedirs(all_crops_dir, exist_ok=True)
-        
     try:
-        cropper = ParticleCropper(cropping_config)
-        logger.info(f"Initialized ParticleCropper with mode: '{cropping_config.get('mode')}'")
+        normalized_cropping = normalized_crop_config(cropping_config)
+        logger.info(f"Initialized ParticleCropper with mode: '{normalized_cropping.get('mode')}'")
     except ConfigError as e:
         logger.error(f"Failed to initialize ParticleCropper: {e}")
         return None
-
-    all_particle_features = []
 
     boundary_threshold_params = {
         'thresholding_mode': segmentation_params.get('thresholding_mode', 'otsu'),
@@ -89,7 +82,9 @@ def run_stage_02_characterization(
     illumination_mode = str(segmentation_params.get('source_image_illumination_type', 'darkfield')).strip().lower()
 
     s1_particles_df['s1_original_index'] = s1_particles_df.index
-    
+
+    # crop
+    crop_records: List[dict] = []
     for image_filename, group in s1_particles_df.groupby('source_image_filename'):
         logger.info(f"Characterizing {len(group)} particles from image: {image_filename}")
         full_image_path = os.path.join(image_dir_path, image_filename)
@@ -100,96 +95,55 @@ def run_stage_02_characterization(
         if main_img_color is None or main_img_gray is None:
             logger.warning(f"Failed to load image {full_image_path}. Skipping {len(group)} particles.")
             continue
-            
-        for index, s1_particle_row in group.iterrows():
-            original_index = s1_particle_row['s1_original_index']
-            particle_features = {'s1_original_index': original_index}
-            
-            frame_num = extract_frame_from_filename(image_filename)
-            if frame_num is None:
-                logger.warning(f"Could not parse frame from {image_filename} for particle index {original_index}. Skipping.")
-                continue
 
-            raw_track_id = s1_particle_row.get('track_id')
-            if pd.isna(raw_track_id):
-                track_id_str = f"untracked{original_index}"
-            else:
-                track_id_str = f"track{int(raw_track_id)}"
-
-            crop_filename_prefix = f"{sample_id}_{track_id_str}_frame{frame_num}"
-            
-            crop_gray, saved_crop_path = cropper.crop_single_particle_from_image(
-                main_img_color, main_img_gray, s1_particle_row,
-                output_dir_for_crop=all_crops_dir if save_all_particle_crops else None,
-                crop_filename_prefix=crop_filename_prefix
-            )
-
-            if crop_gray is None:
-                logger.warning(f"Failed to crop particle at index {original_index}. Skipping.")
-                continue
-
-            particle_features['crop_filename'] = (
-                os.path.basename(saved_crop_path) if saved_crop_path else None
-            )
-
-            crop_identifier_for_logs = saved_crop_path or crop_filename_prefix or "unsaved_crop"
-            is_on_crop_boundary = detect_cropped_particle_on_boundary(
-                crop_gray,
-                crop_identifier_for_logs,
+        frame_num = extract_frame_from_filename(image_filename)
+        crop_records.extend(
+            crop_particles(
+                main_img_color,
+                main_img_gray,
+                group,
+                normalized_cropping,
+                sample_id,
+                image_filename,
+                frame_num,
                 illumination_mode,
                 boundary_threshold_params,
             )
-            particle_features['is_on_crop_boundary'] = bool(is_on_crop_boundary)
-            
-            crop_float_orig = skimage.util.img_as_float(crop_gray)
-            raw_mask, filled_mask, _ = segment_main_body_from_image_float(crop_float_orig, segmentation_params)
+        )
 
-            if filled_mask is None or raw_mask is None:
-                logger.warning(f"High-precision segmentation failed for crop {particle_features['crop_filename']}. Skipping feature calculation.")
-                continue
-
-            quality_features = calculate_quality_features(crop_gray, saved_crop_path, s2_config)
-            particle_features.update(quality_features)
-
-            intensity_img_for_props = crop_float_orig.copy()
-            if segmentation_params.get('source_image_illumination_type') == 'collimated':
-                intensity_img_for_props = 1.0 - intensity_img_for_props
-            morphology_features = calculate_detailed_body_morphology(raw_mask, filled_mask, intensity_img_for_props)
-            renamed_morphology = {k.replace('_s4', ''): v for k, v in morphology_features.items()}
-            particle_features.update(renamed_morphology)
-
-            # --- THIS IS THE CORRECTED LINE ---
-            shape_features = calculate_shape_descriptors(crop_gray, filled_mask, s2_config)
-            particle_features.update(shape_features)
-
-            all_particle_features.append(particle_features)
-
-    if not all_particle_features:
+    if not crop_records:
         logger.warning(f"No particles were successfully characterized for sample {sample_id}.")
         return None
 
-    features_df = pd.DataFrame(all_particle_features)
+    crops_df = pd.DataFrame(crop_records)
+
+    # segment
+    segmented_df = segment_particles(crops_df, segmentation_params)
+
+    # measure
+    features_df = compute_features(segmented_df, segmentation_params, s2_config)
+
+    if features_df.empty:
+        logger.warning(f"No particles were successfully characterized for sample {sample_id}.")
+        return None
+
     s1_particles_df_indexed = s1_particles_df.copy()
-    
+    overlapping_cols = set(features_df.columns) & set(s1_particles_df_indexed.columns)
+    overlapping_cols.discard('s1_original_index')
+    features_for_merge = features_df.drop(columns=list(overlapping_cols)) if overlapping_cols else features_df
+
     comprehensive_df = pd.merge(
-        s1_particles_df_indexed, features_df, on='s1_original_index', how='right'
+        s1_particles_df_indexed, features_for_merge, on='s1_original_index', how='right'
     )
     comprehensive_df.drop(columns=['s1_original_index'], inplace=True, errors='ignore')
-
-    output_filename = f"{sample_id}_stage2_all_particle_features.csv"
-    saved_csv_path = save_dataframe_to_csv(comprehensive_df, output_dir_stage2, output_filename)
-
-    filtered_df = run_focussed_particles_analysis(
-        comprehensive_df,
-        output_dir_stage2,
-        sample_id,
-        s2_config,
-        all_crops_dir
-    )
 
     focus_cfg = s2_config.get('focussed_particles', {})
     track_col = focus_cfg.get('track_column', 'track_id')
 
+    # focus filter
+    filtered_df, diagnostics_df = select_focused_tracks(comprehensive_df, focus_cfg)
+
+    final_particles_df = pd.DataFrame()
     if filtered_df is not None and not filtered_df.empty:
         final_particles_df = select_final_particles_by_area(
             filtered_df,
@@ -197,24 +151,346 @@ def run_stage_02_characterization(
             area_col='main_area_filled'
         )
 
-        if not final_particles_df.empty:
-            final_particles_df = crop_and_save_final_particle_images(
-                final_particles_df,
-                image_dir_path,
-                cropper,
-                sample_id,
-                output_dir_stage2
-            )
-
-            save_dataframe_to_csv(
-                final_particles_df,
-                output_dir_stage2,
-                'final_particles.csv'
-            )
-        else:
-            logger.info('No final particles selected after area-based filtering.')
+    # save
+    saved_csv_path = emit_stage2_artifacts(
+        comprehensive_df,
+        crops_df,
+        filtered_df,
+        diagnostics_df,
+        final_particles_df,
+        output_dir_stage2,
+        sample_id,
+        normalized_cropping,
+        image_dir_path,
+        focus_cfg,
+        bool(cropping_config.get('save_all_particle_crops', True)),
+    )
 
     logger.info(f"--- Stage 2: Characterization for {sample_id} COMPLETED ---")
+    return saved_csv_path
+
+
+def build_crop_filename(
+    sample_id: str,
+    track_label: str,
+    frame_num: int,
+    x_value: Any,
+    y_value: Any
+) -> str:
+    try:
+        x_int = int(x_value) if pd.notna(x_value) else 0
+    except (TypeError, ValueError):
+        x_int = 0
+
+    try:
+        y_int = int(y_value) if pd.notna(y_value) else 0
+    except (TypeError, ValueError):
+        y_int = 0
+
+    return f"{sample_id}_{track_label}_frame{frame_num}_X{x_int}_Y{y_int}.png"
+
+
+def crop_particles(
+    main_img_color: np.ndarray,
+    main_img_gray: np.ndarray,
+    particles_df: pd.DataFrame,
+    crop_config: Dict[str, Any],
+    sample_id: str,
+    image_filename: str,
+    frame_num: Optional[int],
+    illumination_mode: str,
+    boundary_threshold_params: Dict[str, Any]
+) -> List[dict]:
+    if frame_num is None:
+        logger.warning(
+            "Could not parse frame from %s. Skipping %d particles.",
+            image_filename,
+            len(particles_df)
+        )
+        return []
+
+    crop_records: List[dict] = []
+    for _, s1_particle_row in particles_df.iterrows():
+        original_index = s1_particle_row['s1_original_index']
+        track_label = _format_track_label(s1_particle_row, fallback_suffix=original_index)
+
+        crop_filename = build_crop_filename(
+            sample_id,
+            track_label,
+            frame_num,
+            s1_particle_row.get('X'),
+            s1_particle_row.get('Y')
+        )
+
+        crop_gray, crop_metadata = crop_particle_from_arrays(
+            crop_config,
+            main_img_color,
+            main_img_gray,
+            s1_particle_row
+        )
+
+        if crop_gray is None:
+            logger.warning("Failed to crop particle at index %s. Skipping.", original_index)
+            continue
+
+        crop_identifier_for_logs = crop_filename or "unsaved_crop"
+        is_on_crop_boundary = detect_cropped_particle_on_boundary(
+            crop_gray,
+            crop_identifier_for_logs,
+            illumination_mode,
+            boundary_threshold_params,
+        )
+
+        crop_records.append({
+            's1_original_index': original_index,
+            'track_id': s1_particle_row.get('track_id'),
+            'X': s1_particle_row.get('X'),
+            'Y': s1_particle_row.get('Y'),
+            'frame': s1_particle_row.get('frame', frame_num),
+            'source_image_filename': image_filename,
+            'crop_gray': crop_gray,
+            'crop_metadata': crop_metadata,
+            'crop_filename': crop_filename,
+            'is_on_crop_boundary': bool(is_on_crop_boundary),
+        })
+
+    return crop_records
+
+
+def segment_particles(
+    crops_df: pd.DataFrame,
+    segmentation_params: Dict[str, Any]
+) -> pd.DataFrame:
+    segmented_records: List[Dict[str, Any]] = []
+
+    for _, crop_row in crops_df.iterrows():
+        crop_gray = crop_row.get('crop_gray')
+        if crop_gray is None:
+            continue
+
+        crop_float_orig = skimage.util.img_as_float(crop_gray)
+        raw_mask, filled_mask, _ = segment_main_body_from_image_float(crop_float_orig, segmentation_params)
+
+        if filled_mask is None or raw_mask is None:
+            logger.warning(
+                "High-precision segmentation failed for crop %s. Skipping feature calculation.",
+                crop_row.get('crop_filename')
+            )
+            continue
+
+        record = crop_row.to_dict()
+        record['raw_mask'] = raw_mask
+        record['filled_mask'] = filled_mask
+        segmented_records.append(record)
+
+    return pd.DataFrame(segmented_records)
+
+
+def compute_features(
+    segmented_df: pd.DataFrame,
+    segmentation_params: Dict[str, Any],
+    s2_config: Dict[str, Any]
+) -> pd.DataFrame:
+    feature_rows: List[Dict[str, Any]] = []
+
+    for _, seg_row in segmented_df.iterrows():
+        crop_gray = seg_row.get('crop_gray')
+        raw_mask = seg_row.get('raw_mask')
+        filled_mask = seg_row.get('filled_mask')
+
+        if crop_gray is None or raw_mask is None or filled_mask is None:
+            continue
+
+        particle_features = {
+            's1_original_index': seg_row['s1_original_index'],
+            'crop_filename': seg_row.get('crop_filename'),
+            'is_on_crop_boundary': seg_row.get('is_on_crop_boundary', False),
+            'frame': seg_row.get('frame'),
+            'track_id': seg_row.get('track_id'),
+            'X': seg_row.get('X'),
+            'Y': seg_row.get('Y'),
+            'source_image_filename': seg_row.get('source_image_filename'),
+        }
+
+        quality_features = calculate_quality_features(crop_gray, None, s2_config)
+        particle_features.update(quality_features)
+
+        crop_float_orig = skimage.util.img_as_float(crop_gray)
+        intensity_img_for_props = crop_float_orig.copy()
+        if segmentation_params.get('source_image_illumination_type') == 'collimated':
+            intensity_img_for_props = 1.0 - intensity_img_for_props
+        morphology_features = calculate_detailed_body_morphology(raw_mask, filled_mask, intensity_img_for_props)
+        renamed_morphology = {k.replace('_s4', ''): v for k, v in morphology_features.items()}
+        particle_features.update(renamed_morphology)
+
+        shape_features = calculate_shape_descriptors(crop_gray, filled_mask, s2_config)
+        particle_features.update(shape_features)
+
+        feature_rows.append(particle_features)
+
+    return pd.DataFrame(feature_rows)
+
+
+def select_focused_tracks(
+    comprehensive_df: pd.DataFrame,
+    focus_cfg: Dict[str, Any]
+) -> Tuple[Optional[pd.DataFrame], Optional[pd.DataFrame]]:
+    if not focus_cfg.get('enabled', False):
+        return None, None
+
+    frame_col = focus_cfg.get('frame_column', 'frame')
+    track_col = focus_cfg.get('track_column', 'track_id')
+    sharp_col = focus_cfg.get('sharpness_column', 'variance_laplacian')
+    z_col = FOCUS_Z_COLUMN
+
+    required_cols = {frame_col, track_col, sharp_col, z_col}
+    missing_cols = [col for col in required_cols if col not in comprehensive_df.columns]
+    if missing_cols:
+        logger.warning(
+            "Skipping focussed particle analysis because required columns are missing: %s",
+            ', '.join(missing_cols)
+        )
+        return None, None
+
+    filtered_df, diagnostics_df = filter_focused_frames(
+        comprehensive_df,
+        track_col,
+        frame_col,
+        sharp_col,
+        focus_cfg
+    )
+
+    return filtered_df, diagnostics_df
+
+
+def save_all_particle_crops(
+    crops_df: pd.DataFrame,
+    crops_dir: str
+) -> None:
+    if crops_df is None or crops_df.empty:
+        return
+
+    os.makedirs(crops_dir, exist_ok=True)
+    for _, row in crops_df.iterrows():
+        crop_gray = row.get('crop_gray')
+        crop_filename = row.get('crop_filename')
+        if crop_gray is None or not crop_filename:
+            continue
+        crop_path = os.path.join(crops_dir, crop_filename)
+        try:
+            cv2.imwrite(crop_path, crop_gray)
+        except Exception as exc:  # noqa: BLE001
+            logger.error("Failed to save crop to %s: %s", crop_path, exc)
+
+
+def emit_focus_artifacts(
+    filtered_df: Optional[pd.DataFrame],
+    diagnostics_df: Optional[pd.DataFrame],
+    comprehensive_df: pd.DataFrame,
+    focus_cfg: Dict[str, Any],
+    crops_dir: Optional[str],
+    sample_id: str,
+    output_dir_stage2: str
+) -> None:
+    if filtered_df is None or diagnostics_df is None:
+        return
+
+    save_dataframe_to_csv(filtered_df, output_dir_stage2, 'filtered_in_focus.csv')
+    save_dataframe_to_csv(diagnostics_df, output_dir_stage2, 'diagnostics_selected_peaks.csv')
+
+    if focus_cfg.get('save_plots', True):
+        focus_plots_dir = os.path.join(output_dir_stage2, 'focussed_particles')
+        os.makedirs(focus_plots_dir, exist_ok=True)
+
+        prefix = focus_cfg.get('crop_filename_prefix') or sample_id
+        max_tracks = focus_cfg.get('max_tracks_to_plot')
+        plot_example_tracks_with_collages(
+            comprehensive_df,
+            focus_cfg.get('track_column', 'track_id'),
+            focus_cfg.get('frame_column', 'frame'),
+            focus_cfg.get('sharpness_column', 'variance_laplacian'),
+            FOCUS_Z_COLUMN,
+            focus_cfg,
+            crops_dir,
+            prefix,
+            focus_plots_dir,
+            max_tracks
+        )
+
+        plot_3d_reconstructed(
+            comprehensive_df,
+            filtered_df,
+            focus_cfg.get('track_column', 'track_id'),
+            focus_cfg.get('frame_column', 'frame'),
+            FOCUS_Z_COLUMN,
+            os.path.join(focus_plots_dir, 'reconstructed_trajectories_3d.png'),
+            max_tracks
+        )
+
+        plot_diagnostics_summary(
+            diagnostics_df,
+            os.path.join(focus_plots_dir, 'diagnostics_summary.png')
+        )
+
+    logger.info(
+        'Focussed particle analysis complete: %d peaks across %d tracks.',
+        len(filtered_df),
+        diagnostics_df.shape[0]
+    )
+
+
+def emit_final_particle_crops(
+    final_particles_df: pd.DataFrame,
+    image_dir_path: str,
+    crop_config: Dict[str, Any],
+    sample_id: str,
+    output_dir_stage2: str
+) -> None:
+    if final_particles_df.empty:
+        logger.info('No final particles selected after area-based filtering.')
+        return
+
+    final_particles_df = crop_and_save_final_particle_images(
+        final_particles_df,
+        image_dir_path,
+        crop_config,
+        sample_id,
+        output_dir_stage2
+    )
+
+    if final_particles_df is not None and not final_particles_df.empty:
+        save_dataframe_to_csv(
+            final_particles_df,
+            output_dir_stage2,
+            'final_particles.csv'
+        )
+
+
+def emit_stage2_artifacts(
+    comprehensive_df: pd.DataFrame,
+    crops_df: pd.DataFrame,
+    filtered_df: Optional[pd.DataFrame],
+    diagnostics_df: Optional[pd.DataFrame],
+    final_particles_df: pd.DataFrame,
+    output_dir_stage2: str,
+    sample_id: str,
+    crop_config: Dict[str, Any],
+    image_dir_path: str,
+    focus_cfg: Dict[str, Any],
+    save_all_particle_crops_flag: bool
+) -> Optional[str]:
+    os.makedirs(output_dir_stage2, exist_ok=True)
+    output_filename = f"{sample_id}_stage2_all_particle_features.csv"
+    saved_csv_path = save_dataframe_to_csv(comprehensive_df, output_dir_stage2, output_filename)
+
+    crops_dir = None
+    if save_all_particle_crops_flag:
+        crops_dir = os.path.join(output_dir_stage2, "stage2_all_particle_crops")
+        save_all_particle_crops(crops_df, crops_dir)
+
+    emit_focus_artifacts(filtered_df, diagnostics_df, comprehensive_df, focus_cfg, crops_dir, sample_id, output_dir_stage2)
+    emit_final_particle_crops(final_particles_df, image_dir_path, crop_config, sample_id, output_dir_stage2)
+
     return saved_csv_path
 
 
@@ -563,73 +839,8 @@ def run_focussed_particles_analysis(
     crops_dir: Optional[str]
 ) -> Optional[pd.DataFrame]:
     focus_cfg = stage2_config.get('focussed_particles', {})
-    if not focus_cfg.get('enabled', False):
-        return None
-
-    frame_col = focus_cfg.get('frame_column', 'frame')
-    track_col = focus_cfg.get('track_column', 'track_id')
-    sharp_col = focus_cfg.get('sharpness_column', 'variance_laplacian')
-    z_col = FOCUS_Z_COLUMN
-
-    required_cols = {frame_col, track_col, sharp_col, z_col}
-    missing_cols = [col for col in required_cols if col not in comprehensive_df.columns]
-    if missing_cols:
-        logger.warning(
-            "Skipping focussed particle analysis because required columns are missing: %s",
-            ', '.join(missing_cols)
-        )
-        return
-
-    focus_plots_dir = os.path.join(output_dir_stage2, 'focussed_particles')
-    os.makedirs(focus_plots_dir, exist_ok=True)
-
-    filtered_df, diagnostics_df = filter_focused_frames(
-        comprehensive_df,
-        track_col,
-        frame_col,
-        sharp_col,
-        focus_cfg
-    )
-
-    save_dataframe_to_csv(filtered_df, output_dir_stage2, 'filtered_in_focus.csv')
-    save_dataframe_to_csv(diagnostics_df, output_dir_stage2, 'diagnostics_selected_peaks.csv')
-
-    if focus_cfg.get('save_plots', True):
-        prefix = focus_cfg.get('crop_filename_prefix') or sample_id
-        max_tracks = focus_cfg.get('max_tracks_to_plot')
-        plot_example_tracks_with_collages(
-            comprehensive_df,
-            track_col,
-            frame_col,
-            sharp_col,
-            z_col,
-            focus_cfg,
-            crops_dir,
-            prefix,
-            focus_plots_dir,
-            max_tracks
-        )
-
-        plot_3d_reconstructed(
-            comprehensive_df,
-            filtered_df,
-            track_col,
-            frame_col,
-            z_col,
-            os.path.join(focus_plots_dir, 'reconstructed_trajectories_3d.png'),
-            max_tracks
-        )
-
-        plot_diagnostics_summary(
-            diagnostics_df,
-            os.path.join(focus_plots_dir, 'diagnostics_summary.png')
-        )
-
-    logger.info(
-        'Focussed particle analysis complete: %d peaks across %d tracks.',
-        len(filtered_df),
-        diagnostics_df.shape[0]
-    )
+    filtered_df, diagnostics_df = select_focused_tracks(comprehensive_df, focus_cfg)
+    emit_focus_artifacts(filtered_df, diagnostics_df, comprehensive_df, focus_cfg, crops_dir, sample_id, output_dir_stage2)
     return filtered_df
 
 
@@ -695,7 +906,7 @@ def _format_track_label(row: pd.Series, fallback_suffix: int) -> str:
 def crop_and_save_final_particle_images(
     final_particles_df: pd.DataFrame,
     image_dir_path: str,
-    cropper: ParticleCropper,
+    crop_config: Dict[str, Any],
     sample_id: str,
     output_dir_stage2: str
 ) -> pd.DataFrame:
@@ -729,17 +940,30 @@ def crop_and_save_final_particle_images(
 
         for idx, row in group.iterrows():
             track_label = _format_track_label(row, fallback_suffix=idx)
-            crop_filename_prefix = f"{sample_id}_{track_label}_frame{frame_num}"
-
-            _, saved_crop_path = cropper.crop_single_particle_from_image(
-                main_img_color,
-                main_img_gray,
-                row,
-                output_dir_for_crop=final_dir,
-                crop_filename_prefix=crop_filename_prefix
+            crop_filename = build_crop_filename(
+                sample_id,
+                track_label,
+                frame_num,
+                row.get('X'),
+                row.get('Y')
             )
 
-            if saved_crop_path:
+            crop_gray, _ = crop_particle_from_arrays(
+                crop_config,
+                main_img_color,
+                main_img_gray,
+                row
+            )
+
+            if crop_gray is None:
+                logger.warning('Failed to create final crop for %s.', crop_filename)
+                continue
+
+            saved_crop_path = os.path.join(final_dir, crop_filename)
+            try:
+                cv2.imwrite(saved_crop_path, crop_gray)
                 updated_df.at[idx, 'final_crop_filename'] = os.path.basename(saved_crop_path)
+            except Exception as exc:  # noqa: BLE001
+                logger.error('Failed to save final crop %s: %s', saved_crop_path, exc)
 
     return updated_df.reset_index(drop=True)
