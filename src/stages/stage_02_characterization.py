@@ -831,19 +831,6 @@ def plot_diagnostics_summary(diagnostics_df: pd.DataFrame, outpath: str) -> Opti
     return outpath
 
 
-def run_focussed_particles_analysis(
-    comprehensive_df: pd.DataFrame,
-    output_dir_stage2: str,
-    sample_id: str,
-    stage2_config: dict,
-    crops_dir: Optional[str]
-) -> Optional[pd.DataFrame]:
-    focus_cfg = stage2_config.get('focussed_particles', {})
-    filtered_df, diagnostics_df = select_focused_tracks(comprehensive_df, focus_cfg)
-    emit_focus_artifacts(filtered_df, diagnostics_df, comprehensive_df, focus_cfg, crops_dir, sample_id, output_dir_stage2)
-    return filtered_df
-
-
 def select_final_particles_by_area(
     filtered_df: pd.DataFrame,
     track_col: str,
