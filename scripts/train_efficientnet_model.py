@@ -28,7 +28,7 @@ from torchvision import transforms
 from torchvision.datasets import ImageFolder
 from torchvision.models import EfficientNet_B0_Weights, efficientnet_b0
 
-from src.utils import get_config, load_config, setup_logging, get_models_dir, get_training_data_dir
+from src.utils import load_config_once, setup_logging, get_models_dir, get_training_data_dir
 from src.utils.common_exceptions import ConfigError
 
 logger = logging.getLogger(__name__)
@@ -188,8 +188,8 @@ def parse_args():
 
 def main():
     args = parse_args()
-    config = load_config(args.config)
-    s3_config = get_config().get('stage_03_filtering_and_classification', {})
+    config = load_config_once(args.config)
+    s3_config = config.get('stage_03_filtering_and_classification', {})
     eff_cfg = s3_config.get('efficient_net_model', {})
     if not eff_cfg:
         raise ConfigError("Add an 'efficient_net_model' section to the Stage 3 config to control filenames and labels.")
@@ -204,18 +204,18 @@ def main():
     default_epochs = int(training_cfg.get('default_epochs', 15))
     default_batch_size = int(training_cfg.get('default_batch_size', 32))
     dataset_subdir = training_cfg.get('dataset_subdir', '') or ''
-    models_dir = get_models_dir()
+    models_dir = get_models_dir(config)
     os.makedirs(models_dir, exist_ok=True)
 
     # Reuse the same curated crop layout as the RandomForest path: data/training_data/{good,bad}
     dataset_dir = args.dataset_dir
     if dataset_dir is None:
-        base_training_dir = get_training_data_dir()
+        base_training_dir = get_training_data_dir(config)
         dataset_dir = os.path.join(base_training_dir, dataset_subdir) if dataset_subdir else base_training_dir
     if not os.path.isdir(dataset_dir):
         raise FileNotFoundError(f"Training dataset directory not found: {dataset_dir}")
 
-    setup_logging()
+    setup_logging(config)
     logger.info("Starting EfficientNet training with dataset at %s", dataset_dir)
 
     train_tfms, val_tfms = build_transforms(input_size)

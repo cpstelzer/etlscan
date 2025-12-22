@@ -610,11 +610,12 @@ def run_particle_tracking(
 def run_stage_01_initial_detection(
     image_dir_path: str,
     output_dir_stage1: str,
-    sample_id: str
+    sample_id: str,
+    config: Optional[Dict[str, Any]] = None,
 ) -> Optional[str]:
-    # ... (main body is the same until the final save block)
+    """Input: image dir, output dir, sample id, config. Output: Stage 1 CSV path or None."""
     logger.info(f"--- Stage 1: Initial Detection for Sample ID: {sample_id} ---")
-    config = get_config()
+    config = config or get_config()
     config_s1 = config.get('stage_01_initial_detection', {})
     system_cfg = config.get('system', {})
     source_image_illumination = system_cfg.get('source_image_illumination_type', 'darkfield')

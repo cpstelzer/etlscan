@@ -1,41 +1,51 @@
 # src/utils/config_loader.py
-import yaml
+import functools
 import os
-from typing import Dict, Any, Optional 
+from typing import Any, Dict, Optional
+
+import yaml
 
 _config: Dict[str, Any] = {}
 
+
+def _resolve_config_path(config_path: str) -> str:
+    """Resolve a config path relative to the project root when needed."""
+    if os.path.exists(config_path):
+        return config_path
+
+    abs_path = os.path.abspath(__file__)
+    src_dir = os.path.dirname(os.path.dirname(abs_path))
+    project_root = os.path.dirname(src_dir)
+    alt_config_path = os.path.join(project_root, config_path)
+    if os.path.exists(alt_config_path):
+        return alt_config_path
+
+    raise FileNotFoundError(
+        f"Configuration file not found at '{config_path}' or '{alt_config_path}'. "
+        "Ensure it exists or provide the correct path."
+    )
+
+
+@functools.lru_cache(maxsize=None)
+def load_config_once(config_path: str = "config/pipeline_config.yml") -> Dict[str, Any]:
+    """Load a YAML configuration file once and return the parsed mapping."""
+    resolved_path = _resolve_config_path(config_path)
+    try:
+        with open(resolved_path, "r", encoding="utf-8") as handle:
+            loaded_config: Dict[str, Any] = yaml.safe_load(handle)
+        _replace_null_with_none(loaded_config)
+        return loaded_config
+    except yaml.YAMLError as exc:
+        print(f"Error parsing YAML configuration file: {exc}")
+        raise
+
+
 def load_config(config_path: str = "config/pipeline_config.yml") -> Dict[str, Any]:
-    """
-    Loads the YAML configuration file.
-    """
+    """Load configuration into the legacy module cache for backward compatibility."""
     global _config
-    if not _config: # Load only once
-        if not os.path.exists(config_path):
-            abs_path = os.path.abspath(__file__)
-            src_dir = os.path.dirname(os.path.dirname(abs_path))
-            project_root = os.path.dirname(src_dir)
-            alt_config_path = os.path.join(project_root, config_path)
-            if os.path.exists(alt_config_path):
-                config_path_to_load = alt_config_path
-            else:
-                raise FileNotFoundError(
-                    f"Configuration file not found at '{config_path}' or '{alt_config_path}'. "
-                    "Ensure it exists or provide the correct path."
-                )
-        else:
-            config_path_to_load = config_path
-        try:
-            with open(config_path_to_load, "r") as f:
-                _config = yaml.safe_load(f)
-            _replace_null_with_none(_config)
-            print(f"Configuration loaded from: {config_path_to_load}")
-        except yaml.YAMLError as e:
-            print(f"Error parsing YAML configuration file: {e}")
-            raise
-        except FileNotFoundError as e: 
-            print(str(e))
-            raise
+    if not _config:
+        _config = load_config_once(config_path)
+        print(f"Configuration loaded from: {_resolve_config_path(config_path)}")
     return _config
 
 def _replace_null_with_none(d: Dict[str, Any]):

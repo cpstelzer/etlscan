@@ -1,27 +1,27 @@
 # src/utils/path_helpers.py
 import os
 import re
-import logging # Import logging
-from typing import Optional, Tuple, Union, List
+import logging  # Import logging
+from typing import Any, Dict, Optional, Tuple, Union, List
 from .config_loader import get_config
 
 # Initialize logger for this module.
 # It will be configured by setup_logging() when the application starts.
 logger = logging.getLogger(__name__)
 
-def get_project_base_dir() -> str:
-    """Gets the project base directory from config."""
-    config = get_config()
-    return config.get('project_base_dir', '.') # Default to current dir if not set
+def get_project_base_dir(config: Optional[Dict[str, Any]] = None) -> str:
+    """Input: config dict. Output: project root path without creating files."""
+    config = config or get_config()
+    return config.get('project_base_dir', '.')  # Default to current dir if not set
 
-def get_sample_dir(sample_subdir_name: Optional[str] = None) -> str:
+def get_sample_dir(sample_subdir_name: Optional[str] = None, config: Optional[Dict[str, Any]] = None) -> str:
     """
     Constructs the full path to a sample directory within data/input.
     If sample_subdir_name is 'MyBatch/SampleA', it resolves to project_base_dir/data/input/MyBatch/SampleA.
     If sample_subdir_name is None, it uses the 'sample_subdir_name' from config.
     """
-    config = get_config()
-    base_dir = get_project_base_dir()
+    config = config or get_config()
+    base_dir = get_project_base_dir(config)
     input_data_root = os.path.join(base_dir, 'data', 'input')
 
     if sample_subdir_name is None:
@@ -32,14 +32,18 @@ def get_sample_dir(sample_subdir_name: Optional[str] = None) -> str:
     return os.path.join(input_data_root, sample_subdir_name_resolved)
 
 
-def get_output_dir_for_sample(sample_subdir_name: Optional[str] = None, batch_name: Optional[str] = None) -> str:
+def get_output_dir_for_sample(
+    sample_subdir_name: Optional[str] = None,
+    batch_name: Optional[str] = None,
+    config: Optional[Dict[str, Any]] = None
+) -> str:
     """
     Constructs the base output path for a given sample.
     If batch_name is provided, output is project_base_dir/data/output/batch_name/sample_subdir_name.
     Otherwise, output is project_base_dir/data/output/sample_subdir_name.
     """
-    config = get_config()
-    base_dir = get_project_base_dir()
+    config = config or get_config()
+    base_dir = get_project_base_dir(config)
     output_data_root = os.path.join(base_dir, 'data', 'output')
 
     if sample_subdir_name is None:
@@ -60,16 +64,16 @@ def get_output_dir_for_sample(sample_subdir_name: Optional[str] = None, batch_na
     os.makedirs(output_path, exist_ok=True)
     return output_path
 
-def get_models_dir() -> str:
-    """Constructs the full path to the models directory."""
-    base_dir = get_project_base_dir()
+def get_models_dir(config: Optional[Dict[str, Any]] = None) -> str:
+    """Input: config dict. Output: models directory path (ensures existence)."""
+    base_dir = get_project_base_dir(config)
     models_path = os.path.join(base_dir, 'models')
     os.makedirs(models_path, exist_ok=True)
     return models_path
     
-def get_training_data_dir() -> str:
-    """Constructs the full path to the training data directory."""
-    base_dir = get_project_base_dir()
+def get_training_data_dir(config: Optional[Dict[str, Any]] = None) -> str:
+    """Input: config dict. Output: training data directory path (ensures existence)."""
+    base_dir = get_project_base_dir(config)
     training_data_path = os.path.join(base_dir, 'data', 'training_data')
     os.makedirs(training_data_path, exist_ok=True)
     return training_data_path

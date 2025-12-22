@@ -105,7 +105,8 @@ def run_stage_04_biological_analysis(
     input_s3_csv_path: str,
     stage3_crops_dir: str,
     output_dir_stage4: str,
-    sample_id: str
+    sample_id: str,
+    config: Optional[Dict[str, Any]] = None
 ) -> Optional[str]:
     """
     Performs final biological analysis and generates visualizations for each
@@ -113,7 +114,7 @@ def run_stage_04_biological_analysis(
     """
     logger.info(f"--- Stage 4: Biological Analysis for Sample ID: {sample_id} ---")
     
-    config = get_config()
+    config = config or get_config()
     s4_config = config.get('stage_04_biological_analysis', {})
 
     # --- MODIFIED: Get unified params for segmentation and visualization ---

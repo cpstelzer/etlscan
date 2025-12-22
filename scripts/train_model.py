@@ -43,7 +43,7 @@ project_root = os.path.dirname(current_dir)
 sys.path.insert(0, project_root)
 
 from src.utils import (
-    setup_logging, get_config, load_config, get_models_dir, get_training_data_dir
+    setup_logging, load_config_once, get_models_dir, get_training_data_dir
 )
 from src.utils.config_loader import get_unified_segmentation_params
 from src.utils.common_exceptions import ConfigError, MLModelError, DataValidationError
@@ -357,7 +357,7 @@ def main():
     parser.add_argument(
         "--training-data-dir",
         type=str,
-        default=get_training_data_dir(),
+        default=None,
         help=(
             "Directory containing training CSV files (defaults to data/training_data under the project base). "
             "If --csv-files are not provided, all CSVs in this directory will be used."
@@ -376,9 +376,8 @@ def main():
     args = parser.parse_args()
 
     try:
-        load_config(args.config)
-        setup_logging()
-        config = get_config()
+        config = load_config_once(args.config)
+        setup_logging(config)
         logger.info("Configuration loaded for model training.")
     except Exception as e:
         print(f"FATAL: Error during setup: {e}")
@@ -399,7 +398,7 @@ def main():
         logger.info("--use-image-directories specified; ignoring %d CSV file(s).", len(csv_files))
 
     if use_image_mode:
-        training_data_dir = args.training_data_dir or get_training_data_dir()
+        training_data_dir = args.training_data_dir or get_training_data_dir(config)
         if not os.path.isdir(training_data_dir):
             raise DataValidationError(
                 f"Training data directory not found for image training: {training_data_dir}"
@@ -536,7 +535,7 @@ def main():
     logger.info("--- Top 20 Feature Importances ---")
     logger.info("\n" + importance_df.head(20).to_string())
 
-    models_dir = get_models_dir()
+    models_dir = get_models_dir(config)
     importance_csv_path = os.path.join(models_dir, "feature_importances.csv")
     importance_df.to_csv(importance_csv_path, index=False)
     logger.info(f"Full feature importance list saved to: {importance_csv_path}")

@@ -283,9 +283,9 @@ def _ensure_crop_filename_column(df: pd.DataFrame) -> pd.DataFrame:
     return result_df
 
 
-def _load_ml_artifacts(s3_config: dict) -> tuple:
-    """Load the ML model, scaler, and feature list used during training."""
-    models_dir = get_models_dir()
+def _load_ml_artifacts(s3_config: dict, config: Optional[dict] = None) -> tuple:
+    """Input: stage 3 config + pipeline config. Output: loaded model, scaler, feature names."""
+    models_dir = get_models_dir(config)
     rf_cfg = s3_config.get('random_forest_model', s3_config)
     model_filename = rf_cfg.get('model_filename', 'rf_fem_classifier.joblib')
     scaler_filename = rf_cfg.get('scaler_filename', 'rf_fem_scaler.joblib')
@@ -405,8 +405,8 @@ def _build_efficientnet_model(num_classes: int):
     return model
 
 
-def _load_efficientnet_artifacts(s3_config: dict):
-    """Load the EfficientNet checkpoint and metadata."""
+def _load_efficientnet_artifacts(s3_config: dict, config: Optional[dict] = None):
+    """Input: stage 3 config + pipeline config. Output: EfficientNet checkpoint, model, metadata."""
 
     if torch is None:
         raise MLModelError(
@@ -414,7 +414,7 @@ def _load_efficientnet_artifacts(s3_config: dict):
         )
 
     eff_config = s3_config.get('efficient_net_model', {})
-    models_dir = get_models_dir()
+    models_dir = get_models_dir(config)
     checkpoint_filename = eff_config.get('checkpoint_filename', 'efficientnet_b0_best.pt')
     checkpoint_path = os.path.join(models_dir, checkpoint_filename)
 
@@ -582,6 +582,7 @@ def run_stage_03_filtering_and_classification(
     output_dir_stage3: str,
     final_particles_crops_dir: str,
     sample_id: str,
+    config: Optional[dict] = None,
 ) -> Optional[str]:
     """Apply quality flag filters to Stage 2 final particles."""
     logger.info(
@@ -589,7 +590,7 @@ def run_stage_03_filtering_and_classification(
         sample_id,
     )
 
-    config = get_config()
+    config = config or get_config()
     s3_config = config.get('stage_03_filtering_and_classification', {})
     if not s3_config:
         raise ConfigError("Configuration for 'stage_03_filtering_and_classification' not found.")
@@ -646,7 +647,7 @@ def run_stage_03_filtering_and_classification(
     if not ml_classified_df.empty:
         try:
             if use_rf_model:
-                model, scaler, feature_names = _load_ml_artifacts(s3_config)
+                model, scaler, feature_names = _load_ml_artifacts(s3_config, config)
                 probabilities = _score_particles_with_model(
                     ml_classified_df,
                     model,
@@ -655,7 +656,7 @@ def run_stage_03_filtering_and_classification(
                     size_invariant_enabled=size_invariant_enabled,
                 )
             elif model_type == 'efficient_net_model':
-                model, input_size, positive_index = _load_efficientnet_artifacts(s3_config)
+                model, input_size, positive_index = _load_efficientnet_artifacts(s3_config, config)
                 probabilities = _score_particles_with_efficientnet(
                     ml_classified_df,
                     model,
