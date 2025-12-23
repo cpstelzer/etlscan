@@ -131,7 +131,7 @@ stage_02_characterization:
 
 # Stage 3: Filtering & Classification
 stage_03_filtering_and_classification:
-  model_type: "efficient_net_model"  # Options: random_forest_model, efficient_net_model
+  model_type: "random_forest_model"  # Options: random_forest_model, efficient_net_model
 
   # --- NEW SECTION for controlling debug outputs ---
   debug_output:
