@@ -25,9 +25,11 @@ def setup_logging(config: Optional[Dict[str, object]] = None) -> logging.Logger:
     log_level = getattr(logging, level_str, logging.INFO)
     
     log_format_str = log_config.get('format', '%(asctime)s - %(levelname)s - %(name)s - %(message)s')
+    console_format_str = log_config.get('console_format', '%(asctime)s - %(levelname)s - %(message)s')
     date_format_str = log_config.get('date_format', '%Y-%m-%d %H:%M:%S')
 
     formatter = logging.Formatter(log_format_str, date_format_str)
+    console_formatter = logging.Formatter(console_format_str, date_format_str)
 
     log_file_config_path = log_config.get('log_file') 
     
@@ -62,17 +64,16 @@ def setup_logging(config: Optional[Dict[str, object]] = None) -> logging.Logger:
         # Or, set it explicitly: file_handler.setLevel(log_level)
         root_logger.addHandler(file_handler)
         file_handler_active = True
-        print(f"Detailed logging to file: {log_file_full_path} (Level: {level_str})") # This print will always go to console
-    # else:
-        # This print is redundant if console handler is always added.
-        # print("Detailed logging to console only.")
+        log_file_full_path_resolved = log_file_full_path
+    else:
+        log_file_full_path_resolved = None
 
 
     # Configure Console Handler
     # Add a console handler regardless of whether a file handler is active,
     # but its level can be controlled.
     console_handler = logging.StreamHandler(sys.stdout) # Use sys.stdout for INFO, sys.stderr for ERROR/WARNING
-    console_handler.setFormatter(formatter)
+    console_handler.setFormatter(console_formatter)
     
     # Set console handler level. Typically INFO or WARNING for progress.
     # If file logging is active, we might want console to be less verbose.
@@ -83,11 +84,9 @@ def setup_logging(config: Optional[Dict[str, object]] = None) -> logging.Logger:
         console_log_level_str = log_config.get('console_level', 'INFO').upper() # New config option
         console_log_level = getattr(logging, console_log_level_str, logging.INFO)
         console_handler.setLevel(console_log_level)
-        if console_log_level > log_level: # If console is less verbose than root
-            print(f"Console logging progress at level: {console_log_level_str}")
     else: # No file logging, console is the primary output
         console_handler.setLevel(log_level) # Console gets the main configured level
-        print(f"Logging to console at level: {level_str}")
+        console_log_level_str = level_str
 
     root_logger.addHandler(console_handler)
     
@@ -96,9 +95,16 @@ def setup_logging(config: Optional[Dict[str, object]] = None) -> logging.Logger:
 
     # Log initialization message through the configured system
     if file_handler_active:
-        root_logger.info(f"Logging system initialized. File output: {log_file_full_path}, Console output active.")
+        root_logger.info(
+            "Logging system initialized. File output: %s (level=%s), console level=%s.",
+            log_file_full_path_resolved,
+            level_str,
+            console_log_level_str,
+        )
     else:
-        root_logger.info("Logging system initialized (console output only).")
+        root_logger.info(
+            "Logging system initialized (console only). Console level=%s.", console_log_level_str
+        )
         
     return root_logger
 
