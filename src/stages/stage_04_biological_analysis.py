@@ -116,10 +116,11 @@ def run_stage_04_biological_analysis(
     
     config = config or get_config()
     s4_config = config.get('stage_04_biological_analysis', {})
+    egg_config = s4_config.get('egg_detection', {})
 
     # --- MODIFIED: Get unified params for segmentation and visualization ---
     seg_params = get_unified_segmentation_params(config)
-    vis_params = seg_params
+    vis_params = {**seg_params, **egg_config}
 
     s3_good_particles_df = load_dataframe_from_csv(input_s3_csv_path)
     if s3_good_particles_df is None or s3_good_particles_df.empty:
