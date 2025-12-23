@@ -84,7 +84,7 @@ stage_02_characterization:
   cropping:
     # Toggle saving of all particle crops from Stage 2.
     save_all_particle_crops: true
-    # Available modes: 'rotational_rectangle', 'centroid_square', 'bounding_box'
+    # Available modes: 'rotational_rectangle', 'centroid_square', 'bounding_box', 'bounding_box_rr'
     mode: "rotational_rectangle" # You can now switch this safely
 
     # --- Settings for 'rotational_rectangle' mode ---
