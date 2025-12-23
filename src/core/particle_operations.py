@@ -47,7 +47,13 @@ def crop_rotated(
 def normalized_crop_config(crop_config: Dict[str, Any]) -> Dict[str, Any]:
     """Validate and normalize crop configuration values for particle cropping."""
     mode = crop_config.get('mode', 'rotational_rectangle')
-    if mode not in ['rotational_rectangle', 'centroid_square', 'bounding_box', 'bounding_box_rr']:
+    if mode not in [
+        'rotational_rectangle',
+        'centroid_square',
+        'centroid_square_rr',
+        'bounding_box',
+        'bounding_box_rr'
+    ]:
         raise ConfigError(f"Invalid ParticleCropper mode: {mode}")
 
     return {
@@ -90,6 +96,47 @@ def compute_aabb_for_rotated_rectangle(
     x_max = int(np.ceil(cx + aabb_half_w))
     y_min = int(np.floor(cy - aabb_half_h))
     y_max = int(np.ceil(cy + aabb_half_h))
+
+    img_h, img_w = image_shape
+    x_min = max(0, x_min)
+    y_min = max(0, y_min)
+    x_max = min(img_w, x_max)
+    y_max = min(img_h, y_max)
+
+    return x_min, y_min, x_max, y_max
+
+
+def compute_square_for_rotated_rectangle(
+    center: Tuple[float, float],
+    width_with_padding: float,
+    height_with_padding: float,
+    angle_degrees: float,
+    image_shape: Tuple[int, int]
+) -> Tuple[int, int, int, int]:
+    """
+    Build the smallest upright square that fully covers a padded, rotated rectangle.
+
+    In plain terms: take the rectangle dimensions (with padding), rotate them by the given
+    angle, find how far the corners stretch horizontally and vertically, pick the larger
+    reach so the square covers every corner, and clip the square so it stays inside the image.
+    The result is returned as integer (x_min, y_min, x_max, y_max) coordinates ready for
+    NumPy slicing.
+    """
+    cx, cy = center
+    hw, hh = width_with_padding / 2.0, height_with_padding / 2.0
+
+    angle_rad = np.deg2rad(angle_degrees)
+    cos_a = abs(np.cos(angle_rad))
+    sin_a = abs(np.sin(angle_rad))
+
+    aabb_half_w = hw * cos_a + hh * sin_a
+    aabb_half_h = hw * sin_a + hh * cos_a
+    square_half_size = max(aabb_half_w, aabb_half_h)
+
+    x_min = int(np.floor(cx - square_half_size))
+    x_max = int(np.ceil(cx + square_half_size))
+    y_min = int(np.floor(cy - square_half_size))
+    y_max = int(np.ceil(cy + square_half_size))
 
     img_h, img_w = image_shape
     x_min = max(0, x_min)
@@ -238,6 +285,36 @@ def crop_particle_from_arrays(
 
         except (KeyError, ValueError, TypeError) as e:
             logger.error(f"Missing/invalid data for bounding_box_rr crop: {e}")
+            return None, metadata
+
+    elif normalized['mode'] == 'centroid_square_rr':
+        try:
+            center = (float(particle_data['X']), float(particle_data['Y']))
+            width = float(particle_data['rot_rect_width'])
+            height = float(particle_data['rot_rect_height'])
+            angle = float(particle_data['rot_rect_angle'])
+
+            padded_width = width + 2 * normalized['rotational_padding']
+            padded_height = height + 2 * normalized['rotational_padding']
+
+            x1, y1, x2, y2 = compute_square_for_rotated_rectangle(
+                center,
+                padded_width,
+                padded_height,
+                angle,
+                full_gray_image.shape
+            )
+
+            cropped_gray = full_gray_image[y1:y2, x1:x2]
+            metadata.update({
+                'center': center,
+                'angle': angle,
+                'padded_size': (padded_width, padded_height),
+                'square_bbox': (x1, y1, x2 - x1, y2 - y1),
+            })
+
+        except (KeyError, ValueError, TypeError) as e:
+            logger.error(f"Missing/invalid data for centroid_square_rr crop: {e}")
             return None, metadata
     
     else:

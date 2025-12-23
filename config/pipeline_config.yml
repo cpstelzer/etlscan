@@ -84,11 +84,16 @@ stage_02_characterization:
   cropping:
     # Toggle saving of all particle crops from Stage 2.
     save_all_particle_crops: true
-    # Available modes: 'rotational_rectangle', 'centroid_square', 'bounding_box', 'bounding_box_rr'
+    # Available modes (choose one):
+    #   - 'rotational_rectangle': Rotate and crop a rectangle tightly around the particle with padding.
+    #   - 'centroid_square_rr': Build a square crop enclosing the padded rotated rectangle.
+    #   - 'bounding_box_rr': Use the axis-aligned bounding box of the padded rotated rectangle.
+    #   - 'centroid_square': Fixed-size square centered on the particle centroid.
+    #   - 'bounding_box': Axis-aligned bounding box with padding.
     mode: "rotational_rectangle" # You can now switch this safely
 
-    # --- Settings for 'rotational_rectangle' mode ---
-    rotational_padding: 30 # pixels added to each side
+    # --- Settings for rotation-based modes ---
+    rotational_padding: 30 # pixels added to each side for 'rotational_rectangle', 'bounding_box_rr', and 'centroid_square_rr'
 
     # --- Settings for 'centroid_square' mode ---
     square_size: 150
