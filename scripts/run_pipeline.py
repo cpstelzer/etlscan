@@ -131,12 +131,12 @@ def accumulate_stage_outputs(
 ) -> Optional[pd.DataFrame]:
     """Input: CSV path and aggregation list. Output: appended dataframe for batch rollup."""
     if not os.path.exists(csv_path):
-        logger.debug("%s CSV not found for %s at %s. Skipping aggregation.", label, sample_id, csv_path)
+        logger.info("%s CSV not found for %s at %s. Skipping aggregation.", label, sample_id, csv_path)
         return None
 
     dataframe = load_dataframe_from_csv(csv_path)
     if dataframe is None or dataframe.empty:
-        logger.debug("%s CSV for %s is empty. Skipping aggregation for this sample.", label, sample_id)
+        logger.warning("%s CSV for %s is empty. Skipping aggregation for this sample.", label, sample_id)
         return None
 
     dataframe_copy = dataframe.copy()
@@ -325,6 +325,14 @@ def main():
     os.makedirs(batch_output_parent_dir, exist_ok=True)
 
     batch_dir_name = sample_paths_template.batch_dir_name
+    logger.info("Resolved project base directory: %s", project_base_dir)
+    logger.info("Batch input directory: %s", args.input_batch_dir)
+    logger.info("Batch output root: %s", batch_output_parent_dir)
+    logger.info(
+        "Discovered %d valid sample subdirectories: %s",
+        len(valid_sample_ids),
+        ", ".join(valid_sample_ids)
+    )
 
     aggregated_final_particles: List[pd.DataFrame] = []
     aggregated_stage3_focussed_particles: List[pd.DataFrame] = []
@@ -334,6 +342,14 @@ def main():
     stage3_combined_filename = f"{batch_dir_name}_stage3_focussed_and_filtered.csv"
     stage3_filtered_good_combined_filename = f"{batch_dir_name}_stage3_filtered_good.csv"
     stage4_combined_filename = f"{batch_dir_name}_stage4_final_analysis.csv"
+    stage_stats = {
+        "1": {"attempted": 0, "succeeded": 0, "failed": 0, "skipped": 0},
+        "2": {"attempted": 0, "succeeded": 0, "failed": 0, "skipped": 0},
+        "3": {"attempted": 0, "succeeded": 0, "failed": 0, "skipped": 0},
+        "4": {"attempted": 0, "succeeded": 0, "failed": 0, "skipped": 0},
+    }
+    completed_samples = 0
+    failed_samples = 0
 
     total_pipeline_start_time = time.time()
     for current_sample_id in valid_sample_ids:
@@ -356,20 +372,33 @@ def main():
                 _clean_output_directory(sample_paths.stage_dirs[stage["id"]], stage["label"])
                 os.makedirs(sample_paths.stage_dirs[stage["id"]], exist_ok=True)
 
+        sample_failed = False
         try:
             # Run stages in a data-driven loop
             for stage in stage_execution_plan:
                 if not stage["should_run"]:
+                    stage_stats[stage["id"]]["skipped"] += 1
                     continue
-                run_stage(stage["id"], sample_paths, config)
+                stage_stats[stage["id"]]["attempted"] += 1
+                try:
+                    run_stage(stage["id"], sample_paths, config)
+                    stage_stats[stage["id"]]["succeeded"] += 1
+                except (FileNotFoundError, DataValidationError, ProcessingError, ConfigError, MLModelError):
+                    stage_stats[stage["id"]]["failed"] += 1
+                    raise
+                except Exception:
+                    stage_stats[stage["id"]]["failed"] += 1
+                    raise
 
             sample_specific_duration = time.time() - sample_specific_start_time
             logger.info(f"^^^ Sample {current_sample_id} processing FINISHED in {sample_specific_duration:.2f}s ^^^")
 
         except (FileNotFoundError, DataValidationError, ProcessingError, ConfigError, MLModelError) as e:
             logger.error(f"HALTED processing for {current_sample_id}: {e}")
+            sample_failed = True
         except Exception as e:
             logger.exception(f"An unexpected error HALTED processing for {current_sample_id}: {e}")
+            sample_failed = True
         finally:
             # Aggregate outputs for batch rollups
             aggregation_jobs = [
@@ -414,6 +443,11 @@ def main():
                         job["label"],
                     )
 
+        if sample_failed:
+            failed_samples += 1
+        else:
+            completed_samples += 1
+
     total_pipeline_duration = time.time() - total_pipeline_start_time
     logger.info(f"--- Batch pipeline execution FINISHED in {total_pipeline_duration:.2f} seconds ---")
 
@@ -457,6 +491,35 @@ def main():
         )
     else:
         logger.info("No Stage 4 final analysis records were collected; skipping batch-level aggregation.")
+
+    logger.info(
+        "Sample summary: total=%d, completed=%d, failed=%d",
+        len(valid_sample_ids),
+        completed_samples,
+        failed_samples,
+    )
+    for stage_id, stats in stage_stats.items():
+        logger.info(
+            "Stage %s summary: attempted=%d, succeeded=%d, failed=%d, skipped=%d",
+            stage_id,
+            stats["attempted"],
+            stats["succeeded"],
+            stats["failed"],
+            stats["skipped"],
+        )
+
+    batch_rollup_paths = [
+        os.path.join(batch_output_csv_dir, combined_filename),
+        os.path.join(batch_output_csv_dir, stage3_filtered_good_combined_filename),
+        os.path.join(batch_output_csv_dir, stage3_combined_filename),
+        os.path.join(batch_output_csv_dir, stage4_combined_filename),
+    ]
+    logger.info("Batch rollup directory: %s", batch_output_csv_dir)
+    for rollup_path in batch_rollup_paths:
+        if os.path.exists(rollup_path):
+            logger.info("Batch rollup available: %s", rollup_path)
+        else:
+            logger.info("Batch rollup not generated: %s", rollup_path)
 
     logging.shutdown()
 
