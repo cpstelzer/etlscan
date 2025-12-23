@@ -47,7 +47,7 @@ def crop_rotated(
 def normalized_crop_config(crop_config: Dict[str, Any]) -> Dict[str, Any]:
     """Validate and normalize crop configuration values for particle cropping."""
     mode = crop_config.get('mode', 'rotational_rectangle')
-    if mode not in ['rotational_rectangle', 'centroid_square', 'bounding_box']:
+    if mode not in ['rotational_rectangle', 'centroid_square', 'bounding_box', 'bounding_box_rr']:
         raise ConfigError(f"Invalid ParticleCropper mode: {mode}")
 
     return {
@@ -60,6 +60,44 @@ def normalized_crop_config(crop_config: Dict[str, Any]) -> Dict[str, Any]:
             'x': 'bounding_x', 'y': 'bounding_y', 'w': 'bounding_w', 'h': 'bounding_h'
         }),
     }
+
+
+def compute_aabb_for_rotated_rectangle(
+    center: Tuple[float, float],
+    width_with_padding: float,
+    height_with_padding: float,
+    angle_degrees: float,
+    image_shape: Tuple[int, int]
+) -> Tuple[int, int, int, int]:
+    """
+    Calculate the smallest axis-aligned box that covers a padded rotated rectangle.
+
+    This finds the half-width/half-height of the rotated rectangle projected on the
+    x and y axes, then converts those extents into integer crop coordinates that are
+    clipped to the image boundaries.
+    """
+    cx, cy = center
+    hw, hh = width_with_padding / 2.0, height_with_padding / 2.0
+
+    angle_rad = np.deg2rad(angle_degrees)
+    cos_a = abs(np.cos(angle_rad))
+    sin_a = abs(np.sin(angle_rad))
+
+    aabb_half_w = hw * cos_a + hh * sin_a
+    aabb_half_h = hw * sin_a + hh * cos_a
+
+    x_min = int(np.floor(cx - aabb_half_w))
+    x_max = int(np.ceil(cx + aabb_half_w))
+    y_min = int(np.floor(cy - aabb_half_h))
+    y_max = int(np.ceil(cy + aabb_half_h))
+
+    img_h, img_w = image_shape
+    x_min = max(0, x_min)
+    y_min = max(0, y_min)
+    x_max = min(img_w, x_max)
+    y_max = min(img_h, y_max)
+
+    return x_min, y_min, x_max, y_max
 
 
 def crop_particle_from_arrays(
@@ -147,7 +185,7 @@ def crop_particle_from_arrays(
         except (KeyError, ValueError, TypeError) as e:
             logger.error(f"Missing/invalid data for rotational_rectangle crop: {e}")
             return None, metadata
-    
+
     elif normalized['mode'] == 'bounding_box':
         try:
             mapping = normalized['bbox_column_mapping']
@@ -170,6 +208,36 @@ def crop_particle_from_arrays(
 
         except (KeyError, ValueError, TypeError) as e:
             logger.error(f"Missing/invalid data for bounding_box crop: {e}")
+            return None, metadata
+
+    elif normalized['mode'] == 'bounding_box_rr':
+        try:
+            center = (particle_data['X'], particle_data['Y'])
+            width = float(particle_data['rot_rect_width'])
+            height = float(particle_data['rot_rect_height'])
+            angle = float(particle_data['rot_rect_angle'])
+
+            padded_width = width + 2 * normalized['rotational_padding']
+            padded_height = height + 2 * normalized['rotational_padding']
+
+            x1, y1, x2, y2 = compute_aabb_for_rotated_rectangle(
+                center,
+                padded_width,
+                padded_height,
+                angle,
+                full_gray_image.shape
+            )
+
+            cropped_gray = full_gray_image[y1:y2, x1:x2]
+            metadata.update({
+                'center': center,
+                'angle': angle,
+                'padded_size': (padded_width, padded_height),
+                'aabb': (x1, y1, x2 - x1, y2 - y1),
+            })
+
+        except (KeyError, ValueError, TypeError) as e:
+            logger.error(f"Missing/invalid data for bounding_box_rr crop: {e}")
             return None, metadata
     
     else:
