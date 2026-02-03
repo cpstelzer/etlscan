@@ -17,6 +17,33 @@ from src.utils.common_exceptions import ImageProcessingError
 
 logger = logging.getLogger(__name__)
 
+def _load_image_with_pil(image_path: str, mode: str) -> Optional[np.ndarray]:
+    """
+    Load an image using PIL instead of OpenCV.
+
+    For non-experts: PIL (Python Imaging Library) is an alternative image loader
+    that reads image files using a different code path than OpenCV. This matters
+    when OpenCV cannot load a specific file due to memory allocation errors or
+    decoder issues. The PIL-based loader decodes the same image data and then
+    converts it into a NumPy array in the same grayscale/BGR formats the rest
+    of the pipeline expects, so downstream processing can continue normally.
+    """
+    try:
+        pil_img = Image.open(image_path)
+        if mode == 'gray':
+            img = np.array(pil_img.convert('L'))
+        elif mode == 'color':
+            rgb = np.array(pil_img.convert('RGB'))
+            img = rgb[:, :, ::-1]  # Convert RGB -> BGR to match OpenCV convention
+        else:
+            logger.error(f"Invalid image loading mode: {mode}. Must be 'color' or 'gray'.")
+            return None
+        logger.debug(f"Successfully loaded image: {image_path} in {mode} mode via PIL fallback.")
+        return img
+    except Exception as e:
+        logger.exception(f"Exception during PIL image loading for {image_path}: {e}")
+        return None
+
 def load_image(image_path: str, mode: str = 'color') -> Optional[np.ndarray]:
     """
     Loads an image from the specified path.
@@ -41,25 +68,22 @@ def load_image(image_path: str, mode: str = 'color') -> Optional[np.ndarray]:
                 logger.error(f"Invalid image loading mode: {mode}. Must be 'color' or 'gray'.")
                 return None
             if img is None:
-                logger.error(f"Failed to load image (cv2.imread returned None): {image_path}")
-                return None
+                logger.warning(
+                    "Failed to load image (cv2.imread returned None). "
+                    "Attempting PIL fallback: %s",
+                    image_path,
+                )
+                return _load_image_with_pil(image_path, mode)
             logger.debug(f"Successfully loaded image: {image_path} in {mode} mode via OpenCV.")
             return img
 
         # PIL fallback for headless environments
-        pil_img = Image.open(image_path)
-        if mode == 'gray':
-            img = np.array(pil_img.convert('L'))
-        elif mode == 'color':
-            rgb = np.array(pil_img.convert('RGB'))
-            img = rgb[:, :, ::-1]  # Convert RGB -> BGR to match OpenCV convention
-        else:
-            logger.error(f"Invalid image loading mode: {mode}. Must be 'color' or 'gray'.")
-            return None
-        logger.debug(f"Successfully loaded image: {image_path} in {mode} mode via PIL fallback.")
-        return img
+        return _load_image_with_pil(image_path, mode)
     except Exception as e:
         logger.exception(f"Exception during image loading for {image_path}: {e}")
+        if cv2 is not None:
+            logger.warning("Attempting PIL fallback after OpenCV load exception: %s", image_path)
+            return _load_image_with_pil(image_path, mode)
         return None
 
 def save_image(image_array: np.ndarray, output_path: str, filename: str) -> Optional[str]:
