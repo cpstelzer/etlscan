@@ -18,7 +18,11 @@ from src.utils import (
     parse_date_plate_well, extract_frame_from_filename
 )
 from src.utils.common_exceptions import ProcessingError, ConfigError, DataValidationError
-from src.core.image_io_operations import load_image
+from src.core.image_io_operations import (
+    load_image,
+    load_flat_field_assets,
+    apply_flat_field_correction,
+)
 from src.core.image_enhancement import subtract_images, apply_blur
 from src.core.masking_operations import mask_well_area, apply_mask
 from src.core.region_props_calculator import find_contours, calculate_contour_measurements, filter_contours_by_area
@@ -172,6 +176,7 @@ def process_frame_pair(
     fg_row: pd.Series,
     bg_row: pd.Series,
     config: Dict[str, Any],
+    ffc_assets,
     masks: Optional[Dict[str, Any]] = None
 ) -> pd.DataFrame:
     """Process a FG/BG pair and return fused particle detections."""
@@ -184,9 +189,19 @@ def process_frame_pair(
         logger.warning(f"Could not load FG ({fg_filepath}) or BG ({bg_filepath}). Skipping pair.")
         return pd.DataFrame()
 
+    # Correct both frames for uneven lighting before any masking, subtraction, or thresholding.
+    # This makes intensity comparisons more reliable across the full field of view.
+    fg_img_float = apply_flat_field_correction(fg_img, ffc_assets)
+    bg_img_float = apply_flat_field_correction(bg_img, ffc_assets)
+
+    # Convert corrected [0, 1] floats back to uint8 because Stage 1 helpers below
+    # (masking, subtraction, and local Otsu routines) currently expect uint8 images.
+    fg_img_ffc = np.round(fg_img_float * 255.0).astype(np.uint8)
+    bg_img_ffc = np.round(bg_img_float * 255.0).astype(np.uint8)
+
     prep_data = prepare_masked_foreground(
-        fg_img,
-        bg_img,
+        fg_img_ffc,
+        bg_img_ffc,
         enable_brightness_adjustment=config.get('enable_brightness_adjustment', False),
         brightness_config=config.get('config_black_plate_well', {}),
         well_masking_cfg=config.get('well_masking', {}),
@@ -661,6 +676,10 @@ def run_stage_01_initial_detection(
     if images_df is None or images_df.empty: return None
     images_df_filtered = _filter_image_df(images_df.copy())
     if images_df_filtered.empty: return None
+
+    # Load flat/dark calibration once per sample directory and reuse it for all frames.
+    # Reuse keeps the correction consistent and avoids repeated disk reads.
+    ffc_assets = load_flat_field_assets(image_dir_path, mode='gray')
     
     frame_pair_config = {
         "enable_brightness_adjustment": enable_brightness_adjustment,
@@ -721,6 +740,7 @@ def run_stage_01_initial_detection(
             fg_row,
             bg_row,
             frame_pair_config,
+            ffc_assets,
             reusable_masks
         )
 

@@ -1,10 +1,12 @@
 # src/core/image_io_operations.py
 from __future__ import annotations
 
-import numpy as np
 import os
 import logging
-from typing import Optional, Tuple
+from dataclasses import dataclass
+from typing import Optional
+
+import numpy as np
 
 from PIL import Image
 
@@ -16,6 +18,89 @@ except Exception:  # noqa: BLE001 - keep optional dependency for headless envs
 from src.utils.common_exceptions import ImageProcessingError
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class FlatFieldCorrectionAssets:
+    """Holds sample-level flat-field calibration images for repeated use."""
+    flat_float: np.ndarray
+    dark_float: np.ndarray
+
+
+def load_flat_field_assets(sample_dir_path: str, mode: str = 'gray') -> FlatFieldCorrectionAssets:
+    """
+    Load flat-field calibration images once for a sample directory.
+
+    The flat image captures the uneven illumination pattern in the microscope view,
+    while the dark image captures baseline sensor signal. We reuse both for every
+    frame from the same sample to keep correction consistent and efficient.
+    """
+    calibration_dir = os.path.join(sample_dir_path, '1_flat_field')
+    flat_path = os.path.join(calibration_dir, 'flat.png')
+    dark_path = os.path.join(calibration_dir, 'dark.png')
+
+    flat_img = load_image(flat_path, mode=mode)
+    dark_img = load_image(dark_path, mode=mode)
+    if flat_img is None or dark_img is None:
+        raise ImageProcessingError(
+            f"Failed to load flat-field calibration images from {calibration_dir}. "
+            "Expected files: flat.png and dark.png."
+        )
+
+    if flat_img.shape != dark_img.shape:
+        raise ImageProcessingError(
+            "Flat-field image and dark-frame image must have the same shape. "
+            f"Got flat={flat_img.shape}, dark={dark_img.shape}."
+        )
+
+    return FlatFieldCorrectionAssets(
+        flat_float=flat_img.astype(np.float32),
+        dark_float=dark_img.astype(np.float32),
+    )
+
+
+def apply_flat_field_correction(
+    raw_image: np.ndarray,
+    ffc_assets: FlatFieldCorrectionAssets,
+    *,
+    epsilon: float = 1e-6,
+) -> np.ndarray:
+    """
+    Apply pixel-wise flat-field correction and return a normalized float image.
+
+    Formula: Icorr = (I - D) / (F - D)
+    - I: raw frame
+    - F: flat-field frame
+    - D: dark frame
+
+    The corrected result is normalized to [0, 1] so downstream segmentation sees
+    a stable intensity range independent of exposure level.
+    """
+    raw_float = raw_image.astype(np.float32)
+    flat_float = ffc_assets.flat_float
+    dark_float = ffc_assets.dark_float
+
+    if raw_float.shape != flat_float.shape or raw_float.shape != dark_float.shape:
+        raise ImageProcessingError(
+            "Shape mismatch for flat-field correction. "
+            f"raw={raw_float.shape}, flat={flat_float.shape}, dark={dark_float.shape}."
+        )
+
+    denominator = flat_float - dark_float
+    denominator = np.where(denominator <= 0, epsilon, denominator)
+    corrected = (raw_float - dark_float) / denominator
+
+    corrected_min = float(np.min(corrected))
+    corrected_max = float(np.max(corrected))
+    range_value = corrected_max - corrected_min
+
+    if range_value <= 0:
+        # If the corrected frame is constant, keep a valid [0, 1] image of zeros.
+        normalized = np.zeros_like(corrected, dtype=np.float32)
+    else:
+        normalized = (corrected - corrected_min) / range_value
+
+    return np.clip(normalized, 0.0, 1.0).astype(np.float32)
 
 def _load_image_with_pil(image_path: str, mode: str) -> Optional[np.ndarray]:
     """
