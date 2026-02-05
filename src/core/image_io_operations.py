@@ -27,6 +27,16 @@ class FlatFieldCorrectionAssets:
     dark_float: np.ndarray
 
 
+def _get_flat_field_candidate_dirs(sample_dir_path: str) -> list[str]:
+    """Return candidate calibration directories ordered from most to least specific."""
+    sample_dir = os.path.normpath(sample_dir_path)
+    parent_dir = os.path.dirname(sample_dir)
+    return [
+        os.path.join(sample_dir, '1_flat_field'),
+        os.path.join(parent_dir, '1_flat_field'),
+    ]
+
+
 def load_flat_field_assets(sample_dir_path: str, mode: str = 'gray') -> FlatFieldCorrectionAssets:
     """
     Load flat-field calibration images once for a sample directory.
@@ -35,27 +45,45 @@ def load_flat_field_assets(sample_dir_path: str, mode: str = 'gray') -> FlatFiel
     while the dark image captures baseline sensor signal. We reuse both for every
     frame from the same sample to keep correction consistent and efficient.
     """
-    calibration_dir = os.path.join(sample_dir_path, '1_flat_field')
-    flat_path = os.path.join(calibration_dir, 'flat.png')
-    dark_path = os.path.join(calibration_dir, 'dark.png')
+    candidate_dirs = _get_flat_field_candidate_dirs(sample_dir_path)
+    attempted_dirs: list[str] = []
 
-    flat_img = load_image(flat_path, mode=mode)
-    dark_img = load_image(dark_path, mode=mode)
-    if flat_img is None or dark_img is None:
-        raise ImageProcessingError(
-            f"Failed to load flat-field calibration images from {calibration_dir}. "
-            "Expected files: flat.png and dark.png."
+    for calibration_dir in candidate_dirs:
+        attempted_dirs.append(calibration_dir)
+        flat_path = os.path.join(calibration_dir, 'flat.png')
+        dark_path = os.path.join(calibration_dir, 'dark.png')
+
+        if not os.path.exists(flat_path) or not os.path.exists(dark_path):
+            logger.debug(
+                "Skipping flat-field directory %s because one or both calibration files are missing.",
+                calibration_dir,
+            )
+            continue
+
+        flat_img = load_image(flat_path, mode=mode)
+        dark_img = load_image(dark_path, mode=mode)
+        if flat_img is None or dark_img is None:
+            logger.warning(
+                "Found flat-field files in %s but failed to load one or both images.",
+                calibration_dir,
+            )
+            continue
+
+        if flat_img.shape != dark_img.shape:
+            raise ImageProcessingError(
+                "Flat-field image and dark-frame image must have the same shape. "
+                f"Got flat={flat_img.shape}, dark={dark_img.shape}."
+            )
+
+        return FlatFieldCorrectionAssets(
+            flat_float=flat_img.astype(np.float32),
+            dark_float=dark_img.astype(np.float32),
         )
 
-    if flat_img.shape != dark_img.shape:
-        raise ImageProcessingError(
-            "Flat-field image and dark-frame image must have the same shape. "
-            f"Got flat={flat_img.shape}, dark={dark_img.shape}."
-        )
-
-    return FlatFieldCorrectionAssets(
-        flat_float=flat_img.astype(np.float32),
-        dark_float=dark_img.astype(np.float32),
+    raise ImageProcessingError(
+        "Failed to load flat-field calibration images. "
+        f"Checked directories: {', '.join(attempted_dirs)}. "
+        "Expected files: flat.png and dark.png."
     )
 
 
