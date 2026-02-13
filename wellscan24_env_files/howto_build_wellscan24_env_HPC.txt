@@ -1,0 +1,35 @@
+# Build on Leo5
+
+module load Anaconda3/2023.10/miniconda-base-2023.10
+eval "$($UIBK_CONDA_DIR/bin/conda shell.bash hook)"
+
+# Create the environment from high-level packages
+mamba create -y -p wellscan_env -c conda-forge \
+  python=3.9 \
+  numpy scipy pandas matplotlib \
+  opencv \
+  pyqt \
+  scikit-image scikit-learn \
+  pyyaml networkx joblib threadpoolctl \
+  trackpy pyefd \
+  pip
+
+# Activate the environment
+conda activate /gpfs/gpfs1/scratch/c7471022/wellscan_env
+
+# Explicitly install pytorch after activating new conda environment
+mamba install -y -c pytorch pytorch torchvision torchaudio cpuonly
+# (GPU support is also possible, but requires cluster-specific command!)
+
+# Install the pip-only packages
+python -m pip install --no-user -r scratch/c7471022/env_setup/pip-requirements.txt
+
+
+##### NOTE #################
+# pypylon installation did not work on leo5 due to a too old pip
+# so I did not install it (don't need a camera anyway)
+# Also, I did not install Optotune SDK because it is also not needed for calculations
+
+# Install local Optotune SDK wheels
+python -m pip install --no-user optoKummenberg-1.0.4894-py3-none-any.whl
+python -m pip install --no-user optoICC-2.0.4922-py3-none-any.whl
