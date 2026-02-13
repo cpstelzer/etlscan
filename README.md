@@ -84,6 +84,15 @@ Important CLI options:
 - `--config`: Optional path to a custom YAML config (defaults to `config/pipeline_config.yml`).
 - `--stages`: Comma-separated list from `{1,2,3,4}` or `all` to control which stage modules run. Dependencies are enforced, so Stage n requires outputs from Stage n−1. When a stage is rerun, its existing output directory is automatically deleted so the new outputs start cleanly.
 
+### HPC/Slurm execution notes
+
+If you run this pipeline on a cluster, review `docs/hpc_slurm_runbook.md` for a hardened Slurm template and guidance on:
+
+- keeping input, outputs, and logs on node-accessible storage,
+- setting `project_base_dir` so batch rollups and per-sample folders end up where you expect,
+- staging Stage 3 model artifacts from a separate path via symlink or copy,
+- avoiding concurrent jobs writing into the same output root.
+
 ## ML classification workflow
 
 Stage 03 is split into three segments: (1) deterministic quality filters, (2) ML scoring, and (3) exporting/plotting helpers.
