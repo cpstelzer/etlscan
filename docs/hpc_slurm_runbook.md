@@ -2,48 +2,12 @@
 
 This project can run cleanly on HPC clusters, but a few path and job-isolation details matter.
 
-## 1) Corrected Slurm template
+## 1) Data placement
+Raw data, i.e., sample directories containing the image series (e.g., 20260212_plate101_well1) are stored in the experiment folders inside wellscanner/ (e.g., size_AS1_S1).
 
-```bash
-#!/bin/bash
-#SBATCH --ntasks=1
-#SBATCH --cpus-per-task=2
-#SBATCH --mem=16G
-#SBATCH --time=12:00:00
-#SBATCH --job-name=well_plate_analyzer
-#SBATCH --mail-type=BEGIN,END,FAIL
-#SBATCH --mail-user=your.email@domain.tld
-#SBATCH --output=%x_%j.out
-#SBATCH --error=%x_%j.err
-
-set -euo pipefail
-
-date_arg="${1:-}"
-if [[ -z "$date_arg" ]]; then
-  echo "Usage: sbatch $0 <date>"
-  exit 1
-fi
-
-# Example date input: 20250601
-input_path="${SCRATCH}/wellscanner/size_AS1_S1/images/${date_arg}"
-repo_root="${SCRATCH}/wellscanner/well_plate_analyzer"
-
-module load Anaconda3/2023.10/miniconda-base-2023.10
-eval "$($UIBK_CONDA_DIR/bin/conda shell.bash hook)"
-conda activate wellscan_env
-
-cd "$repo_root"
-
-python scripts/run_pipeline.py \
-  --input_batch_dir "$input_path" \
-  --stages all \
-  --config config/pipeline_config.yml
-```
-
-Notes:
-- The original `#SBATC H --mail-user=...` has a typo and is ignored by Slurm.
-- Quote all path variables to avoid whitespace/special-character issues.
-- Add `--output/--error` so each job has explicit log files.
+- To prepare the raw data for batch processing use `distribute_parts.sh`. This program splits the folders in a given directory into several “part” folders (e.g., part1–part8)  so each part contains about the same number of folders. It also copies 1_flat_field into every part. If needed, it can undo the split and put the folders back where they were.
+- To submit jobs to the cluster (each "part" folder a separate job), execute `submit_batch.sh`, which is a driver Bash script that discovers part1/, part2/, … and submits one Slurm job per subdirectory
+- Individual jobs are submitted by `submit_ws_job.slrm` which accepts exactly one argument: `input_dir` (a part*/ directory), validates it, activates the environment, and runs your pipeline on that directory.
 
 ## 2) Output placement (important)
 

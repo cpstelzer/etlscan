@@ -1,0 +1,55 @@
+#!/usr/bin/env bash
+#SBATCH --ntasks=1
+#SBATCH --cpus-per-task=2
+#SBATCH --mem=16G
+#SBATCH --time=12:00:00
+#SBATCH --job-name=well_plate_analyzer
+#SBATCH --mail-type=BEGIN,END,FAIL
+#SBATCH --mail-user=claus-peter.stelzer@uibk.ac.at
+#SBATCH --output=%x_%j.out
+#SBATCH --error=%x_%j.err
+
+set -euo pipefail
+
+INPUT_DIR="${1:-}"
+if [[ -z "$INPUT_DIR" ]]; then
+  echo "ERROR: Missing input directory."
+  echo "Usage: sbatch $0 /path/to/partX"
+  exit 1
+fi
+
+if [[ ! -d "$INPUT_DIR" ]]; then
+  echo "ERROR: INPUT_DIR does not exist or is not a directory: $INPUT_DIR"
+  exit 2
+fi
+
+INPUT_DIR="$(readlink -f "$INPUT_DIR")"
+
+# ---- adjust to your repository layout ---------------------------------------
+REPO_ROOT="${SCRATCH}/wellscanner/well_plate_analyzer"
+PIPELINE_SCRIPT="scripts/run_pipeline.py"
+CONFIG_FILE="config/pipeline_config.yml"
+# -----------------------------------------------------------------------------
+
+if [[ ! -d "$REPO_ROOT" ]]; then
+  echo "ERROR: REPO_ROOT does not exist: $REPO_ROOT"
+  exit 2
+fi
+
+echo "Job started on: $(hostname)"
+echo "Input directory: $INPUT_DIR"
+echo "Repo root:       $REPO_ROOT"
+echo
+
+module load Anaconda3/2023.10/miniconda-base-2023.10
+
+# Activate conda in non-interactive batch shell
+eval "$($UIBK_CONDA_DIR/bin/conda shell.bash hook)"
+conda activate wellscan_env
+
+cd "$REPO_ROOT"
+
+python "$PIPELINE_SCRIPT" \
+  --input_batch_dir "$INPUT_DIR" \
+  --stages all \
+  --config "$CONFIG_FILE"
