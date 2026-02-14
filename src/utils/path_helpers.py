@@ -12,7 +12,9 @@ logger = logging.getLogger(__name__)
 def get_project_base_dir(config: Optional[Dict[str, Any]] = None) -> str:
     """Input: config dict. Output: project root path without creating files."""
     config = config or get_config()
-    return config.get('project_base_dir', '.')  # Default to current dir if not set
+    configured_base_dir = str(config.get('project_base_dir', '.'))
+    expanded_base_dir = os.path.expanduser(os.path.expandvars(configured_base_dir))
+    return expanded_base_dir
 
 def get_sample_dir(sample_subdir_name: Optional[str] = None, config: Optional[Dict[str, Any]] = None) -> str:
     """
