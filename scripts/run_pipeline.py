@@ -5,6 +5,7 @@ import logging
 import sys
 import time
 import shutil
+import json
 from dataclasses import dataclass
 from typing import Dict, Optional, List, Union
 import pandas as pd
@@ -42,6 +43,57 @@ class SamplePaths:
     sample_output_base_dir: str
     stage_dirs: Dict[str, str]
     stage_outputs: Dict[str, str]
+
+
+def _completion_marker_path(sample_paths: SamplePaths) -> str:
+    """Input: sample paths. Output: completion marker path for full pipeline runs."""
+    return os.path.join(sample_paths.sample_output_base_dir, ".pipeline_all_stages_complete.json")
+
+
+def _has_completion_marker(sample_paths: SamplePaths) -> bool:
+    """Input: sample paths. Output: True if atomic completion marker exists."""
+    return os.path.exists(_completion_marker_path(sample_paths))
+
+
+def _remove_completion_marker(sample_paths: SamplePaths) -> None:
+    """Input: sample paths. Output: removes stale completion marker if present."""
+    marker_path = _completion_marker_path(sample_paths)
+    if os.path.exists(marker_path):
+        os.remove(marker_path)
+
+
+def _write_completion_marker_atomic(sample_paths: SamplePaths, stage_ids: List[str]) -> str:
+    """Input: sample paths + completed stage ids. Output: atomically-written marker path."""
+    marker_path = _completion_marker_path(sample_paths)
+    marker_dir = os.path.dirname(marker_path)
+    os.makedirs(marker_dir, exist_ok=True)
+
+    payload = {
+        "sample_id": sample_paths.sample_id,
+        "completed_stage_ids": stage_ids,
+        "completed_at_epoch_s": time.time(),
+    }
+
+    temp_path = f"{marker_path}.tmp.{os.getpid()}"
+    with open(temp_path, "w", encoding="utf-8") as marker_file:
+        json.dump(payload, marker_file, indent=2, sort_keys=True)
+        marker_file.flush()
+        os.fsync(marker_file.fileno())
+    os.replace(temp_path, marker_path)
+    return marker_path
+
+
+def _find_resume_start_index(
+    valid_sample_ids: List[str],
+    config: dict,
+    input_batch_dir: str,
+) -> int:
+    """Input: sample list. Output: index of first sample without a completion marker."""
+    for idx, sample_id in enumerate(valid_sample_ids):
+        sample_paths = prepare_sample_paths(config, input_batch_dir, sample_id)
+        if not _has_completion_marker(sample_paths):
+            return idx
+    return len(valid_sample_ids)
 
 
 def prepare_sample_paths(config: dict, batch_dir: str, sample_id: str) -> SamplePaths:
@@ -283,6 +335,14 @@ def main():
         default="all",
         help="Comma-separated list of stages to run (e.g., '1,2,3,4' or 'all')."
     )
+    parser.add_argument(
+        "--resume",
+        action="store_true",
+        help=(
+            "Resume a full (1,2,3,4) run from the first sample missing an atomic completion marker. "
+            "Useful after interruptions such as timeouts or power outages."
+        ),
+    )
     # Note: ML training is now handled by a dedicated 'scripts/train_model.py' script
 
     args = parser.parse_args()
@@ -300,16 +360,23 @@ def main():
 
     # Select stages to run
     stages_to_run_str = args.stages.lower()
+    selected_stages = [s.strip() for s in stages_to_run_str.split(',') if s.strip()]
+    selected_stage_ids = set(selected_stages)
     run_s1, run_s2, run_s3, run_s4 = False, False, False, False
 
     if stages_to_run_str == "all":
         run_s1, run_s2, run_s3, run_s4 = True, True, True, True
+        selected_stage_ids = {"1", "2", "3", "4"}
     else:
-        selected_stages = [s.strip() for s in stages_to_run_str.split(',') if s.strip()]
-        if "1" in selected_stages: run_s1 = True
-        if "2" in selected_stages: run_s2 = True
-        if "3" in selected_stages: run_s3 = True
-        if "4" in selected_stages: run_s4 = True
+        if "1" in selected_stage_ids: run_s1 = True
+        if "2" in selected_stage_ids: run_s2 = True
+        if "3" in selected_stage_ids: run_s3 = True
+        if "4" in selected_stage_ids: run_s4 = True
+
+    is_full_pipeline_run = selected_stage_ids == {"1", "2", "3", "4"}
+    if args.resume and not is_full_pipeline_run:
+        logger.error("--resume is only supported with --stages all (or --stages 1,2,3,4).")
+        sys.exit(2)
 
     # Identify samples and derive batch-level paths
     valid_sample_ids = get_valid_sample_subdirectories(args.input_batch_dir)
@@ -333,6 +400,40 @@ def main():
         len(valid_sample_ids),
         ", ".join(valid_sample_ids)
     )
+
+    total_discovered_samples = len(valid_sample_ids)
+    resume_skipped_samples = 0
+
+    stage_execution_plan = [
+        {"id": "1", "label": "Stage 1", "should_run": run_s1},
+        {"id": "2", "label": "Stage 2", "should_run": run_s2},
+        {"id": "3", "label": "Stage 3", "should_run": run_s3},
+        {"id": "4", "label": "Stage 4", "should_run": run_s4},
+    ]
+
+    if args.resume:
+        resume_start_idx = _find_resume_start_index(
+            valid_sample_ids=valid_sample_ids,
+            config=config,
+            input_batch_dir=args.input_batch_dir,
+        )
+        skipped_completed_count = resume_start_idx
+        resume_skipped_samples = skipped_completed_count
+        if resume_start_idx >= len(valid_sample_ids):
+            logger.info(
+                "Resume requested: all %d samples are already complete for stages '%s'. Nothing to do.",
+                len(valid_sample_ids),
+                args.stages,
+            )
+            logging.shutdown()
+            return
+
+        valid_sample_ids = valid_sample_ids[resume_start_idx:]
+        logger.info(
+            "Resume requested: skipping %d completed sample(s); restarting from %s.",
+            skipped_completed_count,
+            valid_sample_ids[0],
+        )
 
     aggregated_final_particles: List[pd.DataFrame] = []
     aggregated_stage3_focussed_particles: List[pd.DataFrame] = []
@@ -359,13 +460,8 @@ def main():
         # Prepare paths and directories
         sample_paths = prepare_sample_paths(config, args.input_batch_dir, current_sample_id)
         os.makedirs(sample_paths.sample_output_base_dir, exist_ok=True)
-
-        stage_execution_plan = [
-            {"id": "1", "label": "Stage 1", "should_run": run_s1},
-            {"id": "2", "label": "Stage 2", "should_run": run_s2},
-            {"id": "3", "label": "Stage 3", "should_run": run_s3},
-            {"id": "4", "label": "Stage 4", "should_run": run_s4},
-        ]
+        if is_full_pipeline_run:
+            _remove_completion_marker(sample_paths)
 
         for stage in stage_execution_plan:
             if stage["should_run"]:
@@ -389,6 +485,10 @@ def main():
                 except Exception:
                     stage_stats[stage["id"]]["failed"] += 1
                     raise
+
+            if is_full_pipeline_run:
+                marker_path = _write_completion_marker_atomic(sample_paths, ["1", "2", "3", "4"])
+                logger.info("Wrote completion marker for %s at %s", current_sample_id, marker_path)
 
             sample_specific_duration = time.time() - sample_specific_start_time
             logger.info(f"^^^ Sample {current_sample_id} processing FINISHED in {sample_specific_duration:.2f}s ^^^")
@@ -493,7 +593,9 @@ def main():
         logger.info("No Stage 4 final analysis records were collected; skipping batch-level aggregation.")
 
     logger.info(
-        "Sample summary: total=%d, completed=%d, failed=%d",
+        "Sample summary: discovered=%d, resume_skipped=%d, processed=%d, completed=%d, failed=%d",
+        total_discovered_samples,
+        resume_skipped_samples,
         len(valid_sample_ids),
         completed_samples,
         failed_samples,
