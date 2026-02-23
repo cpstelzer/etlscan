@@ -1,0 +1,77 @@
+# Configuration for wellscanner_acquisition_module.py
+
+# --- File Paths ---
+paths:
+  output_folder_base: "C:/wellscanner/size_AS1_S1/" # Base directory for saving runs
+  log_filename: "metadata_log.csv"        # Name of the detailed metadata log file within each run folder
+  # New: Experiment summary log file path (will be placed in output_folder_base)
+  experiment_summary_log_filename: "experiment_summary_log.csv"
+
+# --- Focusing Parameters ---
+focusing:
+  pattern: 'zigzag'             # Focusing pattern: 'zigzag' or 'sawtooth'
+  scan_height_mm: 11.2           # Total height range to scan in mm
+  scan_step_um: 350             # Step size for focus adjustment in micrometers
+  scan_ratio: 2.25              # Conversion ratio (mm/diopter) - specific to optical setup
+  lens_settle_time_sec: 0.025   # Time to wait for the liquid lens to stabilize (seconds)
+  lens_controller_port: 'COM5'  # Serial port for the OptoTune lens controller
+  # --- NEW: Intelligent settling for large jumps (e.g., in sawtooth mode) ---
+  large_jump_threshold_dpt: -3.0 # A diopter change more negative than this triggers the special settle time.
+  large_jump_settle_sec: 0.040   # The settle time to use for that single frame (e.g., 1/25fps = 0.04s)
+
+# --- Camera and Acquisition Parameters ---
+camera:
+  fps: 25.0                     # Target frames per second
+                                # If experiencing inconsistent FPS, consider setting this to a reliably achievable value (e.g., 25.0)
+  video_duration_sec: 15        # Duration of the acquisition video per well
+  exposure_us: 750              # Camera exposure time in microseconds
+  # --- COLOR SETTINGS ---
+  # 'Mono': Force monochrome acquisition (fastest).
+  # 'Color': Force color acquisition (debayering adds minor overhead).
+  # 'Ask': Detect camera type and ask the user what to do.
+  color_mode: 'Ask'
+  pixel_format_preference: ["BayerRG8", "BayerBG8", "BayerGB8", "BayerGR8", "Mono8", "Mono12"] # Preference order. For color, Bayer 8-bit is fastest.
+  max_num_buffer_min: 50
+  grab_strategy: "OneByOne"
+  retrieve_timeout_margin_ms: 150
+
+# --- Region of Interest (ROI) ---
+roi:
+  width: 3600                   # Desired ROI width in pixels
+  height: 3600                  # Desired ROI height in pixels
+
+# --- Plate Settings ---
+plate:
+  # Supported values: 24 or 96
+  type: 24
+  definitions:
+    "24":
+      start_x: 15.74            # X coordinate for well A1 (in mm)
+      start_y: 18.88            # Y coordinate for well A1 (in mm)
+      spacing: 18.0             # Well spacing (in mm)
+      origin_x: 6.387            # Origin offset X (in mm)
+      origin_y: 17.963           # Origin offset Y (in mm)
+    "96":
+      start_x: 20.3            # X coordinate for well A1 (in mm) - update as needed
+      start_y: 14.5            # Y coordinate for well A1 (in mm) - update as needed
+      spacing: 9.0              # Well spacing (in mm)
+      origin_x: 17.096            # Origin offset X (in mm) - update as needed
+      origin_y: 14.981           # Origin offset Y (in mm) - update as needed
+
+# --- Output Settings ---
+output:
+  # Format for saved images.
+  # "bmp": Fastest for saving, but creates very large files (recommended for max FPS).
+  # "png": Lossless compression, but much slower to save (may cause skipped frames).
+  # "jpg": Lossy compression, fast to save, but image quality is degraded.
+  image_format: "bmp"
+
+# --- Watermark Parameters ---
+watermark:
+  font: "FONT_HERSHEY_SIMPLEX"
+  font_scale: 2.0
+  # Color is in BGR (Blue, Green, Red) format for OpenCV. (e.g., [255, 255, 255] for white)
+  color_bgr: [255, 255, 255]
+  thickness: 2
+  offset_horizontal: 600
+  offset_vertical: 200
