@@ -56,3 +56,13 @@ logs/
 *.bak
 *.swo
 *.swp
+
+# Well-plate acquisition artifacts (from legacy /record repository)
+workspace.code-workspace
+record/feature_scaler.joblib
+record/rotifer_classifier.joblib
+record/wellscanner_acquisition_module.txt
+record/wellscanner_coords.csv
+record/ws_acq_mod_new.txt
+record/ws_acquire.txt
+record/ws_config.txt
