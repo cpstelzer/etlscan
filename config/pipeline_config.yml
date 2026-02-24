@@ -1,6 +1,7 @@
 # config/pipeline_config.yml
 # Global Settings
-project_base_dir: "$SCRATCH/wellscanner/basedir"  # CHANGE THIS to your project's root
+#project_base_dir: "$SCRATCH/wellscanner/basedir"  # CHANGE THIS to your project's root on HPC server
+project_base_dir: "C:/sandbox"  # CHANGE THIS to your project's root
 sample_subdir_name: "C:/wellscanner/test/" # Example, will be overridden by run_pipeline.py
 
 # Logging Configuration
