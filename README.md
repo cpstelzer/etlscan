@@ -23,6 +23,33 @@ Supporting tooling:
       --config config/pipeline_config.yml
   ```
 
+
+## Acquisition workflows (`src/acquire`)
+
+Acquisition entrypoints are preserved while now delegating to shared workflow modules:
+
+- `src/acquire/ws_acquire.py` → multi-well XY-stage workflow
+- `src/acquire/ws_acquire_experiment.py` → parameter sweep workflow
+- `src/acquire/ws_acquire_single.py` → single-sample no-stage workflow
+
+The common orchestration and helpers live in:
+
+- `src/acquire/workflows.py` (workflow orchestration)
+- `src/acquire/config.py` (plate-type normalization + merged plate settings)
+- `src/acquire/plate_layout.py` (24/96 coordinate generation)
+- `src/acquire/well_selector_gui.py` (well selector UI)
+- `src/acquire/stage_controller.py` (Zaber adapter)
+- `src/acquire/camera_capabilities.py` (Pylon capability detection)
+- `src/acquire/experiment_logging.py` (summary log helpers)
+
+For moving newly acquired runs into pipeline batch inputs, use:
+
+```
+python scripts/prepare_acquisition_batch.py <acquisition_output_dir> <batch_name> [--prefix YYYYMMDD_]
+```
+
+This copies matching run folders into `data/input/<batch_name>/...` without changing the acquisition naming contract (`YYYYMMDD_plateX_wellY`).
+
 ## Project structure
 
 ```
