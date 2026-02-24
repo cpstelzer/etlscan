@@ -74,3 +74,19 @@ def test_single_workflow_smoke(monkeypatch):
     run_single_well_workflow(acquisition_config_path="ws_config.yaml", plate_no=0, well_no=0, start_dpt=-2.0)
     assert called['config_path'] == "ws_config.yaml"
     assert called['args'][0:3] == (0, 0, -2.0)
+
+
+def test_load_acquisition_config_uses_lazy_api(monkeypatch):
+    from src.acquire.workflows import load_acquisition_config
+
+    called = {}
+
+    def fake_load_config(path):
+        called['path'] = path
+        return {}
+
+    monkeypatch.setattr("src.acquire.workflows._get_acquisition_api", lambda: (fake_load_config, lambda *args, **kwargs: None))
+
+    conf = load_acquisition_config("ws_config.yaml")
+    assert called['path'] == "ws_config.yaml"
+    assert conf['loaded_from_path'].endswith("ws_config.yaml")

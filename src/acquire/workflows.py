@@ -77,6 +77,7 @@ def decide_color_mode(acq_conf):
 
 def load_acquisition_config(acquisition_config_path):
     print("\nLoading acquisition configuration...")
+    load_config, _ = _get_acquisition_api()
     acq_conf = load_config(acquisition_config_path)
     acq_conf['loaded_from_path'] = os.path.abspath(acquisition_config_path)
     return acq_conf
