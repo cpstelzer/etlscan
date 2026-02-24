@@ -1,0 +1,100 @@
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from typing import Any, Dict, Optional
+
+import yaml
+
+
+@dataclass(frozen=True)
+class RealtimeConfig:
+    enabled: bool = False
+    default_grayscale: bool = True
+    output_root_dir: str = "data/output/realtime"
+    target_fps: float = 10.0
+    max_processing_latency_ms: int = 250
+    drop_frame_if_backlogged: bool = True
+    queue_size: int = 2
+    bgi_min_age_s: float = 2.0
+    bgi_max_age_s: float = 4.0
+    stage1_config: Dict[str, Any] = field(default_factory=dict)
+    stage2_crop_config: Dict[str, Any] = field(default_factory=lambda: {"mode": "rotational_rectangle", "rotational_padding": 10})
+    min_focus_score: float = 100.0
+    min_particle_area: float = 500.0
+    stage3_enable_artifact_filter: bool = True
+    stage3_enable_boundary_filter: bool = True
+    save_accepted_crops: bool = True
+    image_format: str = "png"
+    png_compression: int = 3
+    metric_print_interval_s: float = 5.0
+    acquisition_source: str = "camera"
+    camera_index: int = 0
+    input_dir: Optional[str] = None
+    max_frames: Optional[int] = None
+    flat_field_dir: Optional[str] = None
+
+
+def _must_be_positive(name: str, value: float) -> None:
+    if value <= 0:
+        raise ValueError(f"realtime_mode.{name} must be > 0, got {value}")
+
+
+def _must_be_nonnegative(name: str, value: float) -> None:
+    if value < 0:
+        raise ValueError(f"realtime_mode.{name} must be >= 0, got {value}")
+
+
+def load_realtime_config(config_path: str) -> RealtimeConfig:
+    with open(config_path, "r", encoding="utf-8") as handle:
+        cfg = yaml.safe_load(handle) or {}
+
+    rt = cfg.get("realtime_mode", {}) or {}
+    runtime = rt.get("runtime", {}) or {}
+    background = rt.get("background", {}) or {}
+    stage2 = rt.get("stage2", {}) or {}
+    stage3 = rt.get("stage3", {}) or {}
+    persistence = rt.get("persistence", {}) or {}
+    logging_cfg = rt.get("logging", {}) or {}
+    acquisition_cfg = rt.get("acquisition", {}) or {}
+
+    parsed = RealtimeConfig(
+        enabled=bool(rt.get("enabled", False)),
+        default_grayscale=bool(rt.get("default_grayscale", True)),
+        output_root_dir=str(rt.get("output_root_dir", "data/output/realtime")),
+        target_fps=float(runtime.get("target_fps", 10.0)),
+        max_processing_latency_ms=int(runtime.get("max_processing_latency_ms", 250)),
+        drop_frame_if_backlogged=bool(runtime.get("drop_frame_if_backlogged", True)),
+        queue_size=int(runtime.get("queue_size", 2)),
+        bgi_min_age_s=float(background.get("bgi_min_age_s", 2.0)),
+        bgi_max_age_s=float(background.get("bgi_max_age_s", 4.0)),
+        stage1_config=rt.get("stage1", {}) or {},
+        stage2_crop_config=stage2.get("crop_config", {"mode": "rotational_rectangle", "rotational_padding": 10}),
+        min_focus_score=float(stage2.get("min_focus_score", 100.0)),
+        min_particle_area=float(stage2.get("min_particle_area", 500.0)),
+        stage3_enable_artifact_filter=bool(stage3.get("enable_artifact_filter", True)),
+        stage3_enable_boundary_filter=bool(stage3.get("enable_boundary_filter", True)),
+        save_accepted_crops=bool(persistence.get("save_accepted_crops", True)),
+        image_format=str(persistence.get("image_format", "png")).lower(),
+        png_compression=int(persistence.get("png_compression", 3)),
+        metric_print_interval_s=float(logging_cfg.get("metric_print_interval_s", 5.0)),
+        acquisition_source=str(acquisition_cfg.get("source", "camera")).lower(),
+        camera_index=int(acquisition_cfg.get("camera_index", 0)),
+        input_dir=acquisition_cfg.get("input_dir"),
+        max_frames=acquisition_cfg.get("max_frames"),
+        flat_field_dir=acquisition_cfg.get("flat_field_dir"),
+    )
+
+    _must_be_positive("runtime.target_fps", parsed.target_fps)
+    _must_be_nonnegative("runtime.max_processing_latency_ms", parsed.max_processing_latency_ms)
+    if parsed.queue_size < 1:
+        raise ValueError("realtime_mode.runtime.queue_size must be >= 1")
+    _must_be_positive("background.bgi_min_age_s", parsed.bgi_min_age_s)
+    _must_be_positive("background.bgi_max_age_s", parsed.bgi_max_age_s)
+    if parsed.bgi_max_age_s <= parsed.bgi_min_age_s:
+        raise ValueError("realtime_mode.background.bgi_max_age_s must be > bgi_min_age_s")
+    _must_be_nonnegative("stage2.min_focus_score", parsed.min_focus_score)
+    _must_be_nonnegative("stage2.min_particle_area", parsed.min_particle_area)
+    if parsed.image_format not in {"png", "jpg", "jpeg", "bmp"}:
+        raise ValueError("realtime_mode.persistence.image_format must be one of png/jpg/jpeg/bmp")
+
+    return parsed

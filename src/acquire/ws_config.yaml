@@ -75,3 +75,44 @@ watermark:
   thickness: 2
   offset_horizontal: 600
   offset_vertical: 200
+
+# --- Realtime acquisition + processing mode ---
+realtime_mode:
+  enabled: false
+  default_grayscale: true
+  output_root_dir: "data/output/realtime"
+  runtime:
+    target_fps: 10
+    max_processing_latency_ms: 250
+    drop_frame_if_backlogged: true
+    queue_size: 2
+  background:
+    bgi_min_age_s: 2.0
+    bgi_max_age_s: 4.0
+  acquisition:
+    source: "camera"   # camera | directory
+    camera_index: 0
+    input_dir: null
+    max_frames: null
+    flat_field_dir: null
+  stage1:
+    source_image_illumination: "collimated"
+    local_otsu_roi_size: 150
+    particle_analysis_subtracted_config: {}
+    global_threshold_config: {}
+    unsubtracted_analysis_config: {}
+  stage2:
+    crop_config:
+      mode: "rotational_rectangle"
+      rotational_padding: 10
+    min_focus_score: 100
+    min_particle_area: 500
+  stage3:
+    enable_artifact_filter: true
+    enable_boundary_filter: true
+  persistence:
+    save_accepted_crops: true
+    image_format: "png"
+    png_compression: 3
+  logging:
+    metric_print_interval_s: 5
