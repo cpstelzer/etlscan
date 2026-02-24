@@ -122,9 +122,9 @@ def prompt_plate_and_dpt():
     return plate_num, start_dpt_val
 
 
-def preflight_delete_or_exit(base_out_dir, candidate_dirs, check_step_title):
+def preflight_delete_or_exit(candidate_dirs, check_step_title):
     print(check_step_title)
-    if candidate_dirs:
+    if candidate_dirs['dirs']:
         print("\n--- WARNING: Existing Data Found ---")
         for line in candidate_dirs['description_lines']:
             print(line)
@@ -285,7 +285,6 @@ def run_multiwell_workflow(*, acquisition_config_path, csv_filename, default_pla
             except (ValueError, KeyError):
                 continue
         preflight_delete_or_exit(
-            base_out_dir,
             {
                 'dirs': existing_dirs,
                 'description_lines': [
@@ -447,7 +446,6 @@ def run_experiment_sweep_workflow(*, acquisition_config_path, csv_filename, defa
                 continue
 
         preflight_delete_or_exit(
-            base_out_dir,
             {
                 'dirs': existing_combination_dirs,
                 'description_lines': [
