@@ -1,16 +1,33 @@
-# Import module for image acquisition
+"""Compatibility shim for single-sample acquisition workflow."""
 
-'''
-Script for recording images without controlling Zaber XY-table
-'''
-
-from wellscanner_acquisition_module import run_acquisition, load_config
+import os
+import sys
 
 
-plate_no = 0
-well_no = 0 
-start_dpt = -2.0
+def _ensure_repo_root_on_path():
+    repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+    if repo_root not in sys.path:
+        sys.path.insert(0, repo_root)
 
-ACQUISITION_CONFIG_PATH = "ws_config.yaml" # default: ws_config.yaml
-acq_conf = load_config(ACQUISITION_CONFIG_PATH)
-run_acquisition(plate_no, well_no, start_dpt, acq_conf)
+
+_ensure_repo_root_on_path()
+
+from src.acquire.workflows import run_single_well_workflow
+
+PLATE_NO = 0
+WELL_NO = 0
+START_DPT = -2.0
+ACQUISITION_CONFIG_PATH = "ws_config.yaml"
+
+
+def main():
+    run_single_well_workflow(
+        acquisition_config_path=ACQUISITION_CONFIG_PATH,
+        plate_no=PLATE_NO,
+        well_no=WELL_NO,
+        start_dpt=START_DPT,
+    )
+
+
+if __name__ == "__main__":
+    main()
