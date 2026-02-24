@@ -90,3 +90,12 @@ def test_load_acquisition_config_uses_lazy_api(monkeypatch):
     conf = load_acquisition_config("ws_config.yaml")
     assert called['path'] == "ws_config.yaml"
     assert conf['loaded_from_path'].endswith("ws_config.yaml")
+
+
+def test_shim_config_paths_are_repo_relative():
+    import os
+    from src.acquire import ws_acquire, ws_acquire_experiment, ws_acquire_single
+
+    assert os.path.isfile(ws_acquire.ACQUISITION_CONFIG_PATH)
+    assert os.path.isfile(ws_acquire_experiment.ACQUISITION_CONFIG_PATH)
+    assert os.path.isfile(ws_acquire_single.ACQUISITION_CONFIG_PATH)

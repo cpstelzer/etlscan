@@ -17,7 +17,7 @@ from src.acquire.workflows import run_single_well_workflow
 PLATE_NO = 0
 WELL_NO = 0
 START_DPT = -2.0
-ACQUISITION_CONFIG_PATH = "ws_config.yaml"
+ACQUISITION_CONFIG_PATH = os.path.join(os.path.dirname(__file__), "ws_config.yaml")
 
 
 def main():
