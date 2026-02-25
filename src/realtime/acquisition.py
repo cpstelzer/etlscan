@@ -42,7 +42,7 @@ def _parse_etl_from_filename(path: str) -> Tuple[Optional[float], Optional[float
         return None, None
 
 
-def _build_focus_cycle_pattern(
+def build_focus_cycle_pattern(
     start_dpt: float,
     pattern: str,
     scan_height_mm: float,
@@ -156,7 +156,7 @@ class CameraFrameSource(FrameSource):
             if lens is None:
                 raise RuntimeError("Failed to get valid Lens object from ECC-1C")
 
-            focus_cycle = _build_focus_cycle_pattern(
+            focus_cycle = build_focus_cycle_pattern(
                 start_dpt=self._start_dpt,
                 pattern=self._focus_pattern,
                 scan_height_mm=self._scan_height_mm,

@@ -9,10 +9,10 @@ from typing import Optional
 
 import pandas as pd
 
-from src.core.image_io_operations import FlatFieldCorrectionAssets, load_flat_field_assets
+from src.core.image_io_operations import FlatFieldCorrectionAssets, load_flat_field_assets, load_image, save_image
 
-from .acquisition import FramePacket, build_frame_source
-from .background_buffer import BackgroundBuffer, StepMatchedBackgroundBuffer
+from .acquisition import FramePacket, build_focus_cycle_pattern, build_frame_source
+from .background_buffer import BackgroundBuffer
 from .config import RealtimeConfig
 from .monitoring import RuntimeMonitor
 from .persistence import save_accepted_crops
@@ -79,10 +79,15 @@ def _make_csv_friendly(df: pd.DataFrame) -> pd.DataFrame:
     return csv_df
 
 
+def _bg_filename(diopter: float) -> str:
+    return f"bg_dpt{diopter:.3f}.png".replace("-", "m").replace("+", "p")
+
+
 def run_realtime_session(config: RealtimeConfig, plate: int, well: int) -> str:
     session = create_session(config, plate=plate, well=well)
     logger.info("Realtime session started: %s", session.output_dir)
     logger.info("Accepted crops directory: %s", os.path.abspath(session.accepted_dir))
+    logger.info("Background image directory: %s", os.path.abspath(session.bg_dir))
 
     if not config.save_accepted_crops:
         logger.warning("realtime_mode.persistence.save_accepted_crops=false, so accepted crops will NOT be written to disk.")
@@ -91,10 +96,26 @@ def run_realtime_session(config: RealtimeConfig, plate: int, well: int) -> str:
         config.stage3_enable_artifact_filter,
         config.stage3_enable_boundary_filter,
     )
-    if config.acquisition_source == "camera" and config.etl_control_enabled:
-        logger.info("Background mode: ETL step-matched subtraction (same-diopter previous cycle).")
+
+    use_etl_bg_library = config.acquisition_source == "camera" and config.etl_control_enabled
+    expected_bg_steps = 0
+    if use_etl_bg_library:
+        expected_bg_steps = len(
+            build_focus_cycle_pattern(
+                start_dpt=config.start_dpt,
+                pattern=config.focus_pattern,
+                scan_height_mm=config.scan_height_mm,
+                scan_step_um=config.scan_step_um,
+                scan_ratio=config.scan_ratio,
+            )
+        )
+        logger.info(
+            "Background mode: fixed ETL-step library from first cycle (%d images in bg_images/).",
+            expected_bg_steps,
+        )
     else:
         logger.info("Background mode: time-aged subtraction (BGI_MIN/MAX aging window).")
+
     logger.info(
         "Realtime acquisition policy: target_fps=%.2f drop_frame_if_backlogged=%s",
         config.target_fps,
@@ -105,12 +126,13 @@ def run_realtime_session(config: RealtimeConfig, plate: int, well: int) -> str:
 
     ffc_assets = _load_optional_ffc_assets(config)
     bg_buffer = BackgroundBuffer(config.bgi_min_age_s, config.bgi_max_age_s)
-    step_bg_buffer = StepMatchedBackgroundBuffer()
     monitor = RuntimeMonitor(config.metric_print_interval_s)
     accepted_rows_for_csv: list[pd.DataFrame] = []
     warned_etl_unavailable = False
     last_focus_reject_warn_frame = -10**9
     last_boundary_reject_warn_frame = -10**9
+
+    bg_library_paths: dict[str, str] = {}
 
     frame_queue: queue.Queue[Optional[FramePacket]] = queue.Queue(maxsize=config.queue_size)
     acq_thread = _start_acquisition_thread(config, frame_queue, monitor)
@@ -135,19 +157,32 @@ def run_realtime_session(config: RealtimeConfig, plate: int, well: int) -> str:
                 "If you replay acquisition filenames with _dpt..._fd...mm, ETL values will be shown.")
             warned_etl_unavailable = True
 
-        # For ETL-stepped camera runs, use same-step background from previous cycle.
-        # This avoids subtracting different focus planes, which can create many false detections.
-        if packet.diopter is not None:
-            step_key = f"dpt_{packet.diopter:.3f}"
-            bg_img = step_bg_buffer.update_and_get(step_key, packet.image_gray)
+        if use_etl_bg_library and packet.diopter is not None:
+            key = f"dpt_{packet.diopter:.3f}"
+            if key not in bg_library_paths:
+                filename = _bg_filename(packet.diopter)
+                saved_bg = save_image(packet.image_gray, session.bg_dir, filename)
+                if saved_bg:
+                    bg_library_paths[key] = saved_bg
+                    logger.info("Captured background reference %d/%d for %s -> %s", len(bg_library_paths), expected_bg_steps, key, saved_bg)
+                monitor.counters.frames_skipped_no_bg += 1
+                monitor.maybe_log()
+                if len(bg_library_paths) == expected_bg_steps:
+                    logger.info("Background reference library complete (%d ETL steps). Realtime processing now active.", expected_bg_steps)
+                continue
+
+            bg_img = load_image(bg_library_paths[key], mode="gray")
+            if bg_img is None:
+                monitor.counters.frames_skipped_no_bg += 1
+                monitor.maybe_log()
+                continue
         else:
             bg_buffer.update(packet.image_gray, packet.timestamp_s)
             bg_img = bg_buffer.get_valid_aged_background(packet.timestamp_s)
-
-        if bg_img is None:
-            monitor.counters.frames_skipped_no_bg += 1
-            monitor.maybe_log()
-            continue
+            if bg_img is None:
+                monitor.counters.frames_skipped_no_bg += 1
+                monitor.maybe_log()
+                continue
 
         s1 = run_stage1_realtime(
             packet.image_gray,
