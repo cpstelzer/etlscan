@@ -129,7 +129,9 @@ def run_realtime_session(config: RealtimeConfig, plate: int, well: int) -> str:
 
     ffc_assets = _load_optional_ffc_assets(config)
     monitor = RuntimeMonitor(config.metric_print_interval_s)
-    accepted_rows_for_csv: list[pd.DataFrame] = []
+    accepted_csv_path = os.path.join(session.output_dir, "accepted_particles.csv")
+    accepted_csv_header_written = False
+    accepted_rows_count = 0
     last_focus_reject_warn_frame = -10**9
     last_boundary_reject_warn_frame = -10**9
 
@@ -139,153 +141,159 @@ def run_realtime_session(config: RealtimeConfig, plate: int, well: int) -> str:
     frame_queue: queue.Queue[Optional[FramePacket]] = queue.Queue(maxsize=config.queue_size)
     acq_thread = _start_acquisition_thread(config, frame_queue, monitor)
 
-    while True:
-        packet = frame_queue.get()
-        if packet is None:
-            break
+    try:
+        while True:
+            packet = frame_queue.get()
+            if packet is None:
+                break
 
-        frame_start = time.monotonic()
-        if packet.diopter is not None or packet.focusing_distance_mm is not None:
-            if packet.frame_index % config.etl_status_interval_frames == 0:
-                logger.info(
-                    "ETL status (frame=%d): diopters=%s, focusing_distance_mm=%s",
-                    packet.frame_index,
-                    f"{packet.diopter:.3f}" if packet.diopter is not None else "n/a",
-                    f"{packet.focusing_distance_mm:.3f}" if packet.focusing_distance_mm is not None else "n/a",
+            frame_start = time.monotonic()
+            if packet.diopter is not None or packet.focusing_distance_mm is not None:
+                if packet.frame_index % config.etl_status_interval_frames == 0:
+                    logger.info(
+                        "ETL status (frame=%d): diopters=%s, focusing_distance_mm=%s",
+                        packet.frame_index,
+                        f"{packet.diopter:.3f}" if packet.diopter is not None else "n/a",
+                        f"{packet.focusing_distance_mm:.3f}" if packet.focusing_distance_mm is not None else "n/a",
+                    )
+            if packet.diopter is None:
+                raise RuntimeError(
+                    "ETL telemetry missing for camera frame. Fixed bg_images subtraction requires per-frame diopter values."
                 )
-        if packet.diopter is None:
-            raise RuntimeError(
-                "ETL telemetry missing for camera frame. Fixed bg_images subtraction requires per-frame diopter values."
+
+            key = f"dpt_{packet.diopter:.3f}"
+            if key not in bg_library_paths:
+                filename = _bg_filename(packet.diopter)
+                saved_bg = save_image(packet.image_gray, session.bg_dir, filename)
+                if saved_bg:
+                    bg_library_paths[key] = saved_bg
+                    logger.info("Captured background reference %d/%d for %s -> %s", len(bg_library_paths), expected_bg_steps, key, saved_bg)
+
+            if not bg_library_ready:
+                if len(bg_library_paths) >= expected_bg_steps:
+                    bg_library_ready = True
+                    logger.info("Background reference library complete (%d unique ETL steps). Realtime processing now active.", expected_bg_steps)
+                else:
+                    monitor.counters.frames_skipped_no_bg += 1
+                    monitor.maybe_log()
+                    continue
+
+            if key not in bg_library_paths:
+                raise RuntimeError(
+                    f"Missing background image for ETL step {key} after library initialization."
+                )
+
+            bg_path_for_frame = bg_library_paths[key]
+            logger.info(
+                "BG match: frame=%d fg_diopter=%.3f bg_image=%s",
+                packet.frame_index,
+                float(packet.diopter),
+                os.path.basename(bg_path_for_frame),
             )
 
-        key = f"dpt_{packet.diopter:.3f}"
-        if key not in bg_library_paths:
-            filename = _bg_filename(packet.diopter)
-            saved_bg = save_image(packet.image_gray, session.bg_dir, filename)
-            if saved_bg:
-                bg_library_paths[key] = saved_bg
-                logger.info("Captured background reference %d/%d for %s -> %s", len(bg_library_paths), expected_bg_steps, key, saved_bg)
-
-        if not bg_library_ready:
-            if len(bg_library_paths) >= expected_bg_steps:
-                bg_library_ready = True
-                logger.info("Background reference library complete (%d unique ETL steps). Realtime processing now active.", expected_bg_steps)
-            else:
+            bg_img = load_image(bg_path_for_frame, mode="gray")
+            if bg_img is None:
                 monitor.counters.frames_skipped_no_bg += 1
                 monitor.maybe_log()
                 continue
 
-        if key not in bg_library_paths:
-            raise RuntimeError(
-                f"Missing background image for ETL step {key} after library initialization."
+            s1 = run_stage1_realtime(
+                packet.image_gray,
+                bg_img,
+                frame_index=packet.frame_index,
+                timestamp_s=packet.timestamp_s,
+                config=config.stage1_config,
+                ffc_assets=ffc_assets,
             )
+            monitor.counters.stage1_detections += len(s1.detections_df)
 
-        bg_path_for_frame = bg_library_paths[key]
-        logger.info(
-            "BG match: frame=%d fg_diopter=%.3f bg_image=%s",
-            packet.frame_index,
-            float(packet.diopter),
-            os.path.basename(bg_path_for_frame),
-        )
+            s2 = run_stage2_realtime(packet.image_gray, s1.detections_df, packet.frame_index, {
+                "crop_config": config.stage2_crop_config,
+                "min_focus_score": config.min_focus_score,
+                "min_particle_area": config.min_particle_area,
+                "max_candidates_per_frame": config.max_stage2_candidates_per_frame,
+                "source_image_illumination": config.stage1_config.get("source_image_illumination", "darkfield"),
+            })
+            monitor.counters.stage2_candidates += s2.pre_threshold_count
+            monitor.counters.stage2_rejected_focus += s2.rejected_focus_count
+            monitor.counters.stage2_rejected_area += s2.rejected_area_count
 
-        bg_img = load_image(bg_path_for_frame, mode="gray")
-        if bg_img is None:
-            monitor.counters.frames_skipped_no_bg += 1
-            monitor.maybe_log()
-            continue
-
-        s1 = run_stage1_realtime(
-            packet.image_gray,
-            bg_img,
-            frame_index=packet.frame_index,
-            timestamp_s=packet.timestamp_s,
-            config=config.stage1_config,
-            ffc_assets=ffc_assets,
-        )
-        monitor.counters.stage1_detections += len(s1.detections_df)
-
-        s2 = run_stage2_realtime(packet.image_gray, s1.detections_df, packet.frame_index, {
-            "crop_config": config.stage2_crop_config,
-            "min_focus_score": config.min_focus_score,
-            "min_particle_area": config.min_particle_area,
-            "max_candidates_per_frame": config.max_stage2_candidates_per_frame,
-            "source_image_illumination": config.stage1_config.get("source_image_illumination", "darkfield"),
-        })
-        monitor.counters.stage2_candidates += s2.pre_threshold_count
-        monitor.counters.stage2_rejected_focus += s2.rejected_focus_count
-        monitor.counters.stage2_rejected_area += s2.rejected_area_count
-
-        s3 = run_stage3_realtime(
-            s2.particles_df,
-            {
-                "enable_artifact_filter": config.stage3_enable_artifact_filter,
-                "enable_boundary_filter": config.stage3_enable_boundary_filter,
-            },
-        )
-        monitor.counters.stage3_rejected_artifact += s3.rejected_artifact_count
-        monitor.counters.stage3_rejected_boundary += s3.rejected_boundary_count
-
-        if (
-            s2.pre_threshold_count > 0
-            and s2.rejected_focus_count == s2.pre_threshold_count
-            and len(s3.accepted_df) == 0
-            and (packet.frame_index - last_focus_reject_warn_frame) >= config.focus_rejection_log_interval_frames
-        ):
-            logger.warning(
-                "All %d Stage-2 candidates rejected by focus threshold (min_focus_score=%.3f, observed variance_laplacian range=[%s, %s]).",
-                s2.pre_threshold_count,
-                float(config.min_focus_score),
-                f"{s2.focus_min:.3f}" if s2.focus_min is not None else "n/a",
-                f"{s2.focus_max:.3f}" if s2.focus_max is not None else "n/a",
+            s3 = run_stage3_realtime(
+                s2.particles_df,
+                {
+                    "enable_artifact_filter": config.stage3_enable_artifact_filter,
+                    "enable_boundary_filter": config.stage3_enable_boundary_filter,
+                },
             )
-            last_focus_reject_warn_frame = packet.frame_index
+            monitor.counters.stage3_rejected_artifact += s3.rejected_artifact_count
+            monitor.counters.stage3_rejected_boundary += s3.rejected_boundary_count
 
-        if (
-            s2.pre_threshold_count > 0
-            and s3.rejected_boundary_count == s2.pre_threshold_count
-            and len(s3.accepted_df) == 0
-            and config.stage3_enable_boundary_filter
-            and (packet.frame_index - last_boundary_reject_warn_frame) >= config.focus_rejection_log_interval_frames
-        ):
-            logger.warning(
-                "All %d Stage-2 candidates were rejected by boundary filter (mode=%s).",
-                s2.pre_threshold_count,
-                str(config.stage1_config.get("source_image_illumination", "darkfield")).strip().lower(),
-            )
-            last_boundary_reject_warn_frame = packet.frame_index
+            if (
+                s2.pre_threshold_count > 0
+                and s2.rejected_focus_count == s2.pre_threshold_count
+                and len(s3.accepted_df) == 0
+                and (packet.frame_index - last_focus_reject_warn_frame) >= config.focus_rejection_log_interval_frames
+            ):
+                logger.warning(
+                    "All %d Stage-2 candidates rejected by focus threshold (min_focus_score=%.3f, observed variance_laplacian range=[%s, %s]).",
+                    s2.pre_threshold_count,
+                    float(config.min_focus_score),
+                    f"{s2.focus_min:.3f}" if s2.focus_min is not None else "n/a",
+                    f"{s2.focus_max:.3f}" if s2.focus_max is not None else "n/a",
+                )
+                last_focus_reject_warn_frame = packet.frame_index
 
-        saved_count = 0
-        accepted_for_csv = _make_csv_friendly(s3.accepted_df.reset_index(drop=True))
-        if config.save_accepted_crops:
-            saved_paths = save_accepted_crops(s3.accepted_df, session, config.image_format, config.png_compression)
-            saved_count = len(saved_paths)
+            if (
+                s2.pre_threshold_count > 0
+                and s3.rejected_boundary_count == s2.pre_threshold_count
+                and len(s3.accepted_df) == 0
+                and config.stage3_enable_boundary_filter
+                and (packet.frame_index - last_boundary_reject_warn_frame) >= config.focus_rejection_log_interval_frames
+            ):
+                logger.warning(
+                    "All %d Stage-2 candidates were rejected by boundary filter (mode=%s).",
+                    s2.pre_threshold_count,
+                    str(config.stage1_config.get("source_image_illumination", "darkfield")).strip().lower(),
+                )
+                last_boundary_reject_warn_frame = packet.frame_index
+
+            saved_count = 0
+            accepted_for_csv = _make_csv_friendly(s3.accepted_df.reset_index(drop=True))
+            if config.save_accepted_crops:
+                saved_paths = save_accepted_crops(s3.accepted_df, session, config.image_format, config.png_compression)
+                saved_count = len(saved_paths)
+                if not accepted_for_csv.empty:
+                    accepted_for_csv["saved_crop_path"] = None
+                    n = min(len(accepted_for_csv), len(saved_paths))
+                    if n > 0:
+                        accepted_for_csv.loc[: n - 1, "saved_crop_path"] = saved_paths[:n]
             if not accepted_for_csv.empty:
-                accepted_for_csv["saved_crop_path"] = None
-                n = min(len(accepted_for_csv), len(saved_paths))
-                if n > 0:
-                    accepted_for_csv.loc[: n - 1, "saved_crop_path"] = saved_paths[:n]
-        if not accepted_for_csv.empty:
-            accepted_rows_for_csv.append(accepted_for_csv)
+                accepted_for_csv.to_csv(
+                    accepted_csv_path,
+                    mode="a",
+                    header=not accepted_csv_header_written,
+                    index=False,
+                )
+                accepted_csv_header_written = True
+                accepted_rows_count += len(accepted_for_csv)
 
-        monitor.counters.saved_crops += saved_count
-        monitor.counters.accepted_particles += len(s3.accepted_df)
-        monitor.counters.frames_processed += 1
-        monitor.maybe_log()
+            monitor.counters.saved_crops += saved_count
+            monitor.counters.accepted_particles += len(s3.accepted_df)
+            monitor.counters.frames_processed += 1
+            monitor.maybe_log()
 
-        elapsed_ms = (time.monotonic() - frame_start) * 1000.0
-        if elapsed_ms > config.max_processing_latency_ms:
-            logger.warning("Frame %d processing latency %.2fms > budget %dms", packet.frame_index, elapsed_ms, config.max_processing_latency_ms)
+            elapsed_ms = (time.monotonic() - frame_start) * 1000.0
+            if elapsed_ms > config.max_processing_latency_ms:
+                logger.warning("Frame %d processing latency %.2fms > budget %dms", packet.frame_index, elapsed_ms, config.max_processing_latency_ms)
+    except KeyboardInterrupt:
+        logger.info("Realtime session interrupted by user; finalizing outputs written so far.")
+    finally:
+        acq_thread.join(timeout=2.0)
+        monitor.maybe_log(force=True)
 
-    acq_thread.join(timeout=2.0)
-    monitor.maybe_log(force=True)
-
-    accepted_csv_path = os.path.join(session.output_dir, "accepted_particles.csv")
-    if accepted_rows_for_csv:
-        accepted_df = pd.concat(accepted_rows_for_csv, ignore_index=True)
-    else:
-        accepted_df = pd.DataFrame()
-    accepted_df.to_csv(accepted_csv_path, index=False)
-    logger.info("Accepted particle dataframe written to: %s (rows=%d)", accepted_csv_path, len(accepted_df))
+    if not accepted_csv_header_written:
+        pd.DataFrame().to_csv(accepted_csv_path, index=False)
+    logger.info("Accepted particle dataframe written to: %s (rows=%d)", accepted_csv_path, accepted_rows_count)
 
     logger.info("Realtime session finished. output_dir=%s", session.output_dir)
     return session.output_dir
