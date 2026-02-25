@@ -34,6 +34,7 @@ def run_stage2_realtime(
     working = s1_df.copy()
     working["s1_original_index"] = working.index
     crop_cfg = normalized_crop_config(stage2_cfg.get("crop_config", {"mode": "rotational_rectangle", "rotational_padding": 10}))
+    illumination_mode = str(stage2_cfg.get("source_image_illumination", "darkfield")).strip().lower()
     boundary_threshold_params = {
         "thresholding_mode": "otsu",
         "otsu_threshold_multiplier": 0.45,
@@ -47,14 +48,14 @@ def run_stage2_realtime(
         sample_id="REALTIME",
         image_filename=f"realtime_frame_{frame_index:06d}.png",
         frame_num=frame_index,
-        illumination_mode="darkfield",
+        illumination_mode=illumination_mode,
         boundary_threshold_params=boundary_threshold_params,
     )
     crops_df = pd.DataFrame(crop_records)
     if crops_df.empty:
         return Stage2Result(particles_df=crops_df)
 
-    segmented_df = segment_particles(crops_df, {"source_image_illumination_type": "darkfield"})
+    segmented_df = segment_particles(crops_df, {"source_image_illumination_type": illumination_mode})
     if segmented_df.empty:
         return Stage2Result(particles_df=segmented_df)
 

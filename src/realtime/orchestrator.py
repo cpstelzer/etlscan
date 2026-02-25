@@ -62,6 +62,11 @@ def run_realtime_session(config: RealtimeConfig, plate: int, well: int) -> str:
 
     if not config.save_accepted_crops:
         logger.warning("realtime_mode.persistence.save_accepted_crops=false, so accepted crops will NOT be written to disk.")
+    logger.info(
+        "Realtime filters: artifact_filter=%s boundary_filter=%s",
+        config.stage3_enable_artifact_filter,
+        config.stage3_enable_boundary_filter,
+    )
 
     ffc_assets = _load_optional_ffc_assets(config)
     bg_buffer = BackgroundBuffer(config.bgi_min_age_s, config.bgi_max_age_s)
@@ -97,6 +102,7 @@ def run_realtime_session(config: RealtimeConfig, plate: int, well: int) -> str:
             "crop_config": config.stage2_crop_config,
             "min_focus_score": config.min_focus_score,
             "min_particle_area": config.min_particle_area,
+            "source_image_illumination": config.stage1_config.get("source_image_illumination", "darkfield"),
         })
         monitor.counters.stage2_candidates += s2.pre_threshold_count
         monitor.counters.stage2_rejected_focus += s2.rejected_focus_count
@@ -124,6 +130,20 @@ def run_realtime_session(config: RealtimeConfig, plate: int, well: int) -> str:
                 float(config.min_focus_score),
                 f"{s2.focus_min:.3f}" if s2.focus_min is not None else "n/a",
                 f"{s2.focus_max:.3f}" if s2.focus_max is not None else "n/a",
+            )
+
+        if (
+            s2.pre_threshold_count > 0
+            and s3.rejected_boundary_count == s2.pre_threshold_count
+            and len(s3.accepted_df) == 0
+            and config.stage3_enable_boundary_filter
+        ):
+            logger.warning(
+                "All %d Stage-2 candidates were rejected by boundary filter. "
+                "This often indicates illumination mismatch for boundary detection; current mode=%s. "
+                "You can temporarily set realtime_mode.stage3.enable_boundary_filter=false to confirm flow.",
+                s2.pre_threshold_count,
+                str(config.stage1_config.get("source_image_illumination", "darkfield")).strip().lower(),
             )
 
         saved_count = 0

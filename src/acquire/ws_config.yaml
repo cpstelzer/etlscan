@@ -110,7 +110,7 @@ realtime_mode:
     min_particle_area: 500
   stage3:
     enable_artifact_filter: true
-    enable_boundary_filter: true
+    enable_boundary_filter: false
   persistence:
     save_accepted_crops: true
     image_format: "png"

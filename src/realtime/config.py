@@ -22,7 +22,7 @@ class RealtimeConfig:
     min_focus_score: float = 0.0
     min_particle_area: float = 500.0
     stage3_enable_artifact_filter: bool = True
-    stage3_enable_boundary_filter: bool = True
+    stage3_enable_boundary_filter: bool = False
     save_accepted_crops: bool = True
     image_format: str = "png"
     png_compression: int = 3
@@ -73,7 +73,7 @@ def load_realtime_config(config_path: str) -> RealtimeConfig:
         min_focus_score=float(stage2.get("min_focus_score", 0.0)),
         min_particle_area=float(stage2.get("min_particle_area", 500.0)),
         stage3_enable_artifact_filter=bool(stage3.get("enable_artifact_filter", True)),
-        stage3_enable_boundary_filter=bool(stage3.get("enable_boundary_filter", True)),
+        stage3_enable_boundary_filter=bool(stage3.get("enable_boundary_filter", False)),
         save_accepted_crops=bool(persistence.get("save_accepted_crops", True)),
         image_format=str(persistence.get("image_format", "png")).lower(),
         png_compression=int(persistence.get("png_compression", 3)),
