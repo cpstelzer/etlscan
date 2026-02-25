@@ -82,9 +82,9 @@ realtime_mode:
   default_grayscale: true
   output_root_dir: "data/output/realtime"
   runtime:
-    target_fps: 10
+    target_fps: 5
     max_processing_latency_ms: 250
-    drop_frame_if_backlogged: true
+    drop_frame_if_backlogged: false
     queue_size: 2
   background:
     bgi_min_age_s: 2.0
@@ -118,3 +118,4 @@ realtime_mode:
   logging:
     metric_print_interval_s: 5
     etl_status_interval_frames: 30
+    focus_rejection_log_interval_frames: 30

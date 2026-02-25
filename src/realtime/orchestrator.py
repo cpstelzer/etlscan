@@ -81,12 +81,21 @@ def run_realtime_session(config: RealtimeConfig, plate: int, well: int) -> str:
         config.stage3_enable_artifact_filter,
         config.stage3_enable_boundary_filter,
     )
+    logger.info(
+        "Realtime acquisition policy: target_fps=%.2f drop_frame_if_backlogged=%s",
+        config.target_fps,
+        config.drop_frame_if_backlogged,
+    )
+    if not config.drop_frame_if_backlogged:
+        logger.info("No-intentional-skip mode enabled: queue backpressure will block instead of dropping software frames.")
 
     ffc_assets = _load_optional_ffc_assets(config)
     bg_buffer = BackgroundBuffer(config.bgi_min_age_s, config.bgi_max_age_s)
     monitor = RuntimeMonitor(config.metric_print_interval_s)
     accepted_rows_for_csv: list[pd.DataFrame] = []
     warned_etl_unavailable = False
+    last_focus_reject_warn_frame = -10**9
+    last_boundary_reject_warn_frame = -10**9
 
     frame_queue: queue.Queue[Optional[FramePacket]] = queue.Queue(maxsize=config.queue_size)
     acq_thread = _start_acquisition_thread(config, frame_queue, monitor)
@@ -152,29 +161,30 @@ def run_realtime_session(config: RealtimeConfig, plate: int, well: int) -> str:
             s2.pre_threshold_count > 0
             and s2.rejected_focus_count == s2.pre_threshold_count
             and len(s3.accepted_df) == 0
+            and (packet.frame_index - last_focus_reject_warn_frame) >= config.focus_rejection_log_interval_frames
         ):
             logger.warning(
-                "All %d Stage-2 candidates rejected by focus threshold (min_focus_score=%.3f, observed variance_laplacian range=[%s, %s]). "
-                "Try lowering realtime_mode.stage2.min_focus_score.",
+                "All %d Stage-2 candidates rejected by focus threshold (min_focus_score=%.3f, observed variance_laplacian range=[%s, %s]).",
                 s2.pre_threshold_count,
                 float(config.min_focus_score),
                 f"{s2.focus_min:.3f}" if s2.focus_min is not None else "n/a",
                 f"{s2.focus_max:.3f}" if s2.focus_max is not None else "n/a",
             )
+            last_focus_reject_warn_frame = packet.frame_index
 
         if (
             s2.pre_threshold_count > 0
             and s3.rejected_boundary_count == s2.pre_threshold_count
             and len(s3.accepted_df) == 0
             and config.stage3_enable_boundary_filter
+            and (packet.frame_index - last_boundary_reject_warn_frame) >= config.focus_rejection_log_interval_frames
         ):
             logger.warning(
-                "All %d Stage-2 candidates were rejected by boundary filter. "
-                "This often indicates illumination mismatch for boundary detection; current mode=%s. "
-                "You can temporarily set realtime_mode.stage3.enable_boundary_filter=false to confirm flow.",
+                "All %d Stage-2 candidates were rejected by boundary filter (mode=%s).",
                 s2.pre_threshold_count,
                 str(config.stage1_config.get("source_image_illumination", "darkfield")).strip().lower(),
             )
+            last_boundary_reject_warn_frame = packet.frame_index
 
         saved_count = 0
         accepted_for_csv = _make_csv_friendly(s3.accepted_df.reset_index(drop=True))

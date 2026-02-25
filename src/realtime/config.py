@@ -11,9 +11,9 @@ class RealtimeConfig:
     enabled: bool = False
     default_grayscale: bool = True
     output_root_dir: str = "data/output/realtime"
-    target_fps: float = 10.0
+    target_fps: float = 5.0
     max_processing_latency_ms: int = 250
-    drop_frame_if_backlogged: bool = True
+    drop_frame_if_backlogged: bool = False
     queue_size: int = 2
     bgi_min_age_s: float = 2.0
     bgi_max_age_s: float = 4.0
@@ -28,6 +28,7 @@ class RealtimeConfig:
     png_compression: int = 3
     metric_print_interval_s: float = 5.0
     etl_status_interval_frames: int = 30
+    focus_rejection_log_interval_frames: int = 30
     acquisition_source: str = "camera"
     camera_index: int = 0
     input_dir: Optional[str] = None
@@ -63,9 +64,9 @@ def load_realtime_config(config_path: str) -> RealtimeConfig:
         enabled=bool(rt.get("enabled", False)),
         default_grayscale=bool(rt.get("default_grayscale", True)),
         output_root_dir=str(rt.get("output_root_dir", "data/output/realtime")),
-        target_fps=float(runtime.get("target_fps", 10.0)),
+        target_fps=float(runtime.get("target_fps", 5.0)),
         max_processing_latency_ms=int(runtime.get("max_processing_latency_ms", 250)),
-        drop_frame_if_backlogged=bool(runtime.get("drop_frame_if_backlogged", True)),
+        drop_frame_if_backlogged=bool(runtime.get("drop_frame_if_backlogged", False)),
         queue_size=int(runtime.get("queue_size", 2)),
         bgi_min_age_s=float(background.get("bgi_min_age_s", 2.0)),
         bgi_max_age_s=float(background.get("bgi_max_age_s", 4.0)),
@@ -80,6 +81,7 @@ def load_realtime_config(config_path: str) -> RealtimeConfig:
         png_compression=int(persistence.get("png_compression", 3)),
         metric_print_interval_s=float(logging_cfg.get("metric_print_interval_s", 5.0)),
         etl_status_interval_frames=int(logging_cfg.get("etl_status_interval_frames", 30)),
+        focus_rejection_log_interval_frames=int(logging_cfg.get("focus_rejection_log_interval_frames", 30)),
         acquisition_source=str(acquisition_cfg.get("source", "camera")).lower(),
         camera_index=int(acquisition_cfg.get("camera_index", 0)),
         input_dir=acquisition_cfg.get("input_dir"),
@@ -103,5 +105,7 @@ def load_realtime_config(config_path: str) -> RealtimeConfig:
     _must_be_nonnegative("acquisition.retrieve_timeout_margin_ms", parsed.retrieve_timeout_margin_ms)
     if parsed.etl_status_interval_frames < 1:
         raise ValueError("realtime_mode.logging.etl_status_interval_frames must be >= 1")
+    if parsed.focus_rejection_log_interval_frames < 1:
+        raise ValueError("realtime_mode.logging.focus_rejection_log_interval_frames must be >= 1")
 
     return parsed
