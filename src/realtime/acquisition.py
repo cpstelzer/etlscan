@@ -2,8 +2,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import os
+import re
 import time
-from typing import Iterator, Optional
+from typing import Iterator, Optional, Tuple
 
 import numpy as np
 
@@ -15,11 +16,30 @@ class FramePacket:
     frame_index: int
     timestamp_s: float
     image_gray: np.ndarray
+    diopter: Optional[float] = None
+    focusing_distance_mm: Optional[float] = None
 
 
 class FrameSource:
     def __iter__(self) -> Iterator[FramePacket]:
         raise NotImplementedError
+
+
+_FILENAME_DPT_FD_RE = re.compile(
+    r"_dpt(?P<dpt>[-+]?[0-9]*\.?[0-9]+)_fd(?P<fd_mm>[-+]?[0-9]*\.?[0-9]+)mm",
+    flags=re.IGNORECASE,
+)
+
+
+def _parse_etl_from_filename(path: str) -> Tuple[Optional[float], Optional[float]]:
+    name = os.path.basename(path)
+    m = _FILENAME_DPT_FD_RE.search(name)
+    if not m:
+        return None, None
+    try:
+        return float(m.group("dpt")), float(m.group("fd_mm"))
+    except ValueError:
+        return None, None
 
 
 class DirectoryFrameSource(FrameSource):
@@ -40,7 +60,14 @@ class DirectoryFrameSource(FrameSource):
             img = load_image(path, mode="gray")
             if img is None:
                 continue
-            yield FramePacket(frame_index=idx, timestamp_s=time.monotonic(), image_gray=img)
+            dpt, fd_mm = _parse_etl_from_filename(path)
+            yield FramePacket(
+                frame_index=idx,
+                timestamp_s=time.monotonic(),
+                image_gray=img,
+                diopter=dpt,
+                focusing_distance_mm=fd_mm,
+            )
             next_t = start + (idx + 1) * self._target_period_s
             sleep_s = max(0.0, next_t - time.monotonic())
             if sleep_s > 0:
@@ -75,7 +102,6 @@ class CameraFrameSource(FrameSource):
         camera.Open()
 
         try:
-            # Reuse the same mono-first strategy as src/acquire for realtime grayscale mode.
             if hasattr(camera, "PixelFormat"):
                 available_formats = list(camera.PixelFormat.Symbolics)
                 if "Mono8" in available_formats:
@@ -104,11 +130,16 @@ class CameraFrameSource(FrameSource):
                     if raw_frame is None:
                         continue
                     if raw_frame.ndim == 3:
-                        # Should be rare because PixelFormat is set to mono where possible.
                         image_gray = np.mean(raw_frame, axis=2).astype(np.uint8)
                     else:
                         image_gray = raw_frame
-                    yield FramePacket(frame_index=frame_idx, timestamp_s=time.monotonic(), image_gray=image_gray)
+                    yield FramePacket(
+                        frame_index=frame_idx,
+                        timestamp_s=time.monotonic(),
+                        image_gray=image_gray,
+                        diopter=None,
+                        focusing_distance_mm=None,
+                    )
                     frame_idx += 1
                 finally:
                     grab_result.Release()
@@ -132,7 +163,7 @@ def build_frame_source(
         if not input_dir:
             raise ValueError("realtime_mode.acquisition.input_dir is required when source=directory")
         return DirectoryFrameSource(input_dir=input_dir, target_fps=target_fps, max_frames=max_frames)
-    _ = camera_index  # Unused for pypylon single-device enumeration; kept for backward config compatibility.
+    _ = camera_index
     return CameraFrameSource(
         target_fps=target_fps,
         max_frames=max_frames,

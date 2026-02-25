@@ -27,6 +27,7 @@ class RealtimeConfig:
     image_format: str = "png"
     png_compression: int = 3
     metric_print_interval_s: float = 5.0
+    etl_status_interval_frames: int = 30
     acquisition_source: str = "camera"
     camera_index: int = 0
     input_dir: Optional[str] = None
@@ -78,6 +79,7 @@ def load_realtime_config(config_path: str) -> RealtimeConfig:
         image_format=str(persistence.get("image_format", "png")).lower(),
         png_compression=int(persistence.get("png_compression", 3)),
         metric_print_interval_s=float(logging_cfg.get("metric_print_interval_s", 5.0)),
+        etl_status_interval_frames=int(logging_cfg.get("etl_status_interval_frames", 30)),
         acquisition_source=str(acquisition_cfg.get("source", "camera")).lower(),
         camera_index=int(acquisition_cfg.get("camera_index", 0)),
         input_dir=acquisition_cfg.get("input_dir"),
@@ -99,5 +101,7 @@ def load_realtime_config(config_path: str) -> RealtimeConfig:
     if parsed.image_format not in {"png", "jpg", "jpeg", "bmp"}:
         raise ValueError("realtime_mode.persistence.image_format must be one of png/jpg/jpeg/bmp")
     _must_be_nonnegative("acquisition.retrieve_timeout_margin_ms", parsed.retrieve_timeout_margin_ms)
+    if parsed.etl_status_interval_frames < 1:
+        raise ValueError("realtime_mode.logging.etl_status_interval_frames must be >= 1")
 
     return parsed

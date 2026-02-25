@@ -86,6 +86,7 @@ def run_realtime_session(config: RealtimeConfig, plate: int, well: int) -> str:
     bg_buffer = BackgroundBuffer(config.bgi_min_age_s, config.bgi_max_age_s)
     monitor = RuntimeMonitor(config.metric_print_interval_s)
     accepted_rows_for_csv: list[pd.DataFrame] = []
+    warned_etl_unavailable = False
 
     frame_queue: queue.Queue[Optional[FramePacket]] = queue.Queue(maxsize=config.queue_size)
     acq_thread = _start_acquisition_thread(config, frame_queue, monitor)
@@ -96,6 +97,20 @@ def run_realtime_session(config: RealtimeConfig, plate: int, well: int) -> str:
             break
 
         frame_start = time.monotonic()
+        if packet.diopter is not None or packet.focusing_distance_mm is not None:
+            if packet.frame_index % config.etl_status_interval_frames == 0:
+                logger.info(
+                    "ETL status (frame=%d): diopters=%s, focusing_distance_mm=%s",
+                    packet.frame_index,
+                    f"{packet.diopter:.3f}" if packet.diopter is not None else "n/a",
+                    f"{packet.focusing_distance_mm:.3f}" if packet.focusing_distance_mm is not None else "n/a",
+                )
+        elif not warned_etl_unavailable and config.acquisition_source == "camera":
+            logger.info(
+                "ETL status unavailable for source=camera in realtime mode (no live ETL telemetry wired). "
+                "If you replay acquisition filenames with _dpt..._fd...mm, ETL values will be shown.")
+            warned_etl_unavailable = True
+
         bg_buffer.update(packet.image_gray, packet.timestamp_s)
         bg_img = bg_buffer.get_valid_aged_background(packet.timestamp_s)
         if bg_img is None:
