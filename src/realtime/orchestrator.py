@@ -105,17 +105,17 @@ def run_realtime_session(config: RealtimeConfig, plate: int, well: int) -> str:
 
     expected_bg_steps = 0
     if use_etl_bg_library:
-        expected_bg_steps = len(
-            build_focus_cycle_pattern(
-                start_dpt=config.start_dpt,
-                pattern=config.focus_pattern,
-                scan_height_mm=config.scan_height_mm,
-                scan_step_um=config.scan_step_um,
-                scan_ratio=config.scan_ratio,
-            )
+        focus_cycle = build_focus_cycle_pattern(
+            start_dpt=config.start_dpt,
+            pattern=config.focus_pattern,
+            scan_height_mm=config.scan_height_mm,
+            scan_step_um=config.scan_step_um,
+            scan_ratio=config.scan_ratio,
         )
+        # Only unique ETL steps need one background each. Zigzag cycles contain mirrored duplicates.
+        expected_bg_steps = len({f"{d:.3f}" for d in focus_cycle})
         logger.info(
-            "Background mode: fixed ETL-step library from first cycle (%d images in bg_images/).",
+            "Background mode: fixed ETL-step library from initial sweep (%d unique ETL-step images in bg_images/).",
             expected_bg_steps,
         )
 
@@ -134,6 +134,7 @@ def run_realtime_session(config: RealtimeConfig, plate: int, well: int) -> str:
     last_boundary_reject_warn_frame = -10**9
 
     bg_library_paths: dict[str, str] = {}
+    bg_library_ready = False
 
     frame_queue: queue.Queue[Optional[FramePacket]] = queue.Queue(maxsize=config.queue_size)
     acq_thread = _start_acquisition_thread(config, frame_queue, monitor)
@@ -164,11 +165,20 @@ def run_realtime_session(config: RealtimeConfig, plate: int, well: int) -> str:
             if saved_bg:
                 bg_library_paths[key] = saved_bg
                 logger.info("Captured background reference %d/%d for %s -> %s", len(bg_library_paths), expected_bg_steps, key, saved_bg)
-            monitor.counters.frames_skipped_no_bg += 1
-            monitor.maybe_log()
-            if len(bg_library_paths) == expected_bg_steps:
-                logger.info("Background reference library complete (%d ETL steps). Realtime processing now active.", expected_bg_steps)
-            continue
+
+        if not bg_library_ready:
+            if len(bg_library_paths) >= expected_bg_steps:
+                bg_library_ready = True
+                logger.info("Background reference library complete (%d unique ETL steps). Realtime processing now active.", expected_bg_steps)
+            else:
+                monitor.counters.frames_skipped_no_bg += 1
+                monitor.maybe_log()
+                continue
+
+        if key not in bg_library_paths:
+            raise RuntimeError(
+                f"Missing background image for ETL step {key} after library initialization."
+            )
 
         bg_img = load_image(bg_library_paths[key], mode="gray")
         if bg_img is None:
