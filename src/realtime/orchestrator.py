@@ -7,6 +7,8 @@ import threading
 import time
 from typing import Optional
 
+import pandas as pd
+
 from src.core.image_io_operations import FlatFieldCorrectionAssets, load_flat_field_assets
 
 from .acquisition import FramePacket, build_frame_source
@@ -55,6 +57,18 @@ def _load_optional_ffc_assets(config: RealtimeConfig) -> Optional[FlatFieldCorre
     return load_flat_field_assets(config.flat_field_dir, mode="gray")
 
 
+def _make_csv_friendly(df: pd.DataFrame) -> pd.DataFrame:
+    csv_df = df.copy()
+    drop_cols = [
+        col
+        for col in ["crop_gray", "raw_mask", "filled_mask", "crop_metadata"]
+        if col in csv_df.columns
+    ]
+    if drop_cols:
+        csv_df = csv_df.drop(columns=drop_cols)
+    return csv_df
+
+
 def run_realtime_session(config: RealtimeConfig, plate: int, well: int) -> str:
     session = create_session(config, plate=plate, well=well)
     logger.info("Realtime session started: %s", session.output_dir)
@@ -71,6 +85,7 @@ def run_realtime_session(config: RealtimeConfig, plate: int, well: int) -> str:
     ffc_assets = _load_optional_ffc_assets(config)
     bg_buffer = BackgroundBuffer(config.bgi_min_age_s, config.bgi_max_age_s)
     monitor = RuntimeMonitor(config.metric_print_interval_s)
+    accepted_rows_for_csv: list[pd.DataFrame] = []
 
     frame_queue: queue.Queue[Optional[FramePacket]] = queue.Queue(maxsize=config.queue_size)
     acq_thread = _start_acquisition_thread(config, frame_queue, monitor)
@@ -147,9 +162,17 @@ def run_realtime_session(config: RealtimeConfig, plate: int, well: int) -> str:
             )
 
         saved_count = 0
+        accepted_for_csv = _make_csv_friendly(s3.accepted_df.reset_index(drop=True))
         if config.save_accepted_crops:
             saved_paths = save_accepted_crops(s3.accepted_df, session, config.image_format, config.png_compression)
             saved_count = len(saved_paths)
+            if not accepted_for_csv.empty:
+                accepted_for_csv["saved_crop_path"] = None
+                n = min(len(accepted_for_csv), len(saved_paths))
+                if n > 0:
+                    accepted_for_csv.loc[: n - 1, "saved_crop_path"] = saved_paths[:n]
+        if not accepted_for_csv.empty:
+            accepted_rows_for_csv.append(accepted_for_csv)
 
         monitor.counters.saved_crops += saved_count
         monitor.counters.accepted_particles += len(s3.accepted_df)
@@ -162,5 +185,14 @@ def run_realtime_session(config: RealtimeConfig, plate: int, well: int) -> str:
 
     acq_thread.join(timeout=2.0)
     monitor.maybe_log(force=True)
+
+    accepted_csv_path = os.path.join(session.output_dir, "accepted_particles.csv")
+    if accepted_rows_for_csv:
+        accepted_df = pd.concat(accepted_rows_for_csv, ignore_index=True)
+    else:
+        accepted_df = pd.DataFrame()
+    accepted_df.to_csv(accepted_csv_path, index=False)
+    logger.info("Accepted particle dataframe written to: %s (rows=%d)", accepted_csv_path, len(accepted_df))
+
     logger.info("Realtime session finished. output_dir=%s", session.output_dir)
     return session.output_dir

@@ -78,7 +78,7 @@ watermark:
 
 # --- Realtime acquisition + processing mode ---
 realtime_mode:
-  enabled: false
+  enabled: true
   default_grayscale: true
   output_root_dir: "data/output/realtime"
   runtime:
@@ -106,7 +106,7 @@ realtime_mode:
     crop_config:
       mode: "rotational_rectangle"
       rotational_padding: 10
-    min_focus_score: 0
+    min_focus_score: 50
     min_particle_area: 500
   stage3:
     enable_artifact_filter: true
