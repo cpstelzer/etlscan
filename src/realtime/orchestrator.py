@@ -112,6 +112,20 @@ def run_realtime_session(config: RealtimeConfig, plate: int, well: int) -> str:
         monitor.counters.stage3_rejected_artifact += s3.rejected_artifact_count
         monitor.counters.stage3_rejected_boundary += s3.rejected_boundary_count
 
+        if (
+            s2.pre_threshold_count > 0
+            and s2.rejected_focus_count == s2.pre_threshold_count
+            and len(s3.accepted_df) == 0
+        ):
+            logger.warning(
+                "All %d Stage-2 candidates rejected by focus threshold (min_focus_score=%.3f, observed variance_laplacian range=[%s, %s]). "
+                "Try lowering realtime_mode.stage2.min_focus_score.",
+                s2.pre_threshold_count,
+                float(config.min_focus_score),
+                f"{s2.focus_min:.3f}" if s2.focus_min is not None else "n/a",
+                f"{s2.focus_max:.3f}" if s2.focus_max is not None else "n/a",
+            )
+
         saved_count = 0
         if config.save_accepted_crops:
             saved_paths = save_accepted_crops(s3.accepted_df, session, config.image_format, config.png_compression)

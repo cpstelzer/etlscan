@@ -19,7 +19,7 @@ class RealtimeConfig:
     bgi_max_age_s: float = 4.0
     stage1_config: Dict[str, Any] = field(default_factory=dict)
     stage2_crop_config: Dict[str, Any] = field(default_factory=lambda: {"mode": "rotational_rectangle", "rotational_padding": 10})
-    min_focus_score: float = 100.0
+    min_focus_score: float = 0.0
     min_particle_area: float = 500.0
     stage3_enable_artifact_filter: bool = True
     stage3_enable_boundary_filter: bool = True
@@ -70,7 +70,7 @@ def load_realtime_config(config_path: str) -> RealtimeConfig:
         bgi_max_age_s=float(background.get("bgi_max_age_s", 4.0)),
         stage1_config=rt.get("stage1", {}) or {},
         stage2_crop_config=stage2.get("crop_config", {"mode": "rotational_rectangle", "rotational_padding": 10}),
-        min_focus_score=float(stage2.get("min_focus_score", 100.0)),
+        min_focus_score=float(stage2.get("min_focus_score", 0.0)),
         min_particle_area=float(stage2.get("min_particle_area", 500.0)),
         stage3_enable_artifact_filter=bool(stage3.get("enable_artifact_filter", True)),
         stage3_enable_boundary_filter=bool(stage3.get("enable_boundary_filter", True)),

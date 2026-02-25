@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 import pandas as pd
 import skimage.util
@@ -18,6 +18,8 @@ class Stage2Result:
     pre_threshold_count: int = 0
     rejected_focus_count: int = 0
     rejected_area_count: int = 0
+    focus_min: Optional[float] = None
+    focus_max: Optional[float] = None
 
 
 def run_stage2_realtime(
@@ -57,10 +59,11 @@ def run_stage2_realtime(
         return Stage2Result(particles_df=segmented_df)
 
     rows: List[Dict[str, Any]] = []
-    min_focus = float(stage2_cfg.get("min_focus_score", 100.0))
+    min_focus = float(stage2_cfg.get("min_focus_score", 0.0))
     min_area = float(stage2_cfg.get("min_particle_area", 500.0))
     rejected_focus = 0
     rejected_area = 0
+    focus_values: List[float] = []
 
     for _, row in segmented_df.iterrows():
         crop_gray = row["crop_gray"]
@@ -75,7 +78,9 @@ def run_stage2_realtime(
         morph = calculate_detailed_body_morphology(raw_mask, filled_mask, intensity)
         feature_row.update({k.replace("_s4", ""): v for k, v in morph.items()})
 
-        if float(feature_row.get("variance_laplacian", 0.0)) <= min_focus:
+        focus_score = float(feature_row.get("variance_laplacian", 0.0))
+        focus_values.append(focus_score)
+        if focus_score <= min_focus:
             rejected_focus += 1
             continue
         if float(feature_row.get("main_area_filled", 0.0)) <= min_area:
@@ -88,4 +93,6 @@ def run_stage2_realtime(
         pre_threshold_count=len(segmented_df),
         rejected_focus_count=rejected_focus,
         rejected_area_count=rejected_area,
+        focus_min=min(focus_values) if focus_values else None,
+        focus_max=max(focus_values) if focus_values else None,
     )
