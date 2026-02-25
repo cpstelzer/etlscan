@@ -180,7 +180,15 @@ def run_realtime_session(config: RealtimeConfig, plate: int, well: int) -> str:
                 f"Missing background image for ETL step {key} after library initialization."
             )
 
-        bg_img = load_image(bg_library_paths[key], mode="gray")
+        bg_path_for_frame = bg_library_paths[key]
+        logger.info(
+            "BG match: frame=%d fg_diopter=%.3f bg_image=%s",
+            packet.frame_index,
+            float(packet.diopter),
+            os.path.basename(bg_path_for_frame),
+        )
+
+        bg_img = load_image(bg_path_for_frame, mode="gray")
         if bg_img is None:
             monitor.counters.frames_skipped_no_bg += 1
             monitor.maybe_log()
