@@ -200,6 +200,7 @@ def run_realtime_session(config: RealtimeConfig, plate: int, well: int) -> str:
             "crop_config": config.stage2_crop_config,
             "min_focus_score": config.min_focus_score,
             "min_particle_area": config.min_particle_area,
+            "max_candidates_per_frame": config.max_stage2_candidates_per_frame,
             "source_image_illumination": config.stage1_config.get("source_image_illumination", "darkfield"),
         })
         monitor.counters.stage2_candidates += s2.pre_threshold_count

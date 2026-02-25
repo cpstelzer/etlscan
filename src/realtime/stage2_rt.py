@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import logging
 from typing import Any, Dict, List, Optional
 
 import pandas as pd
@@ -10,6 +11,8 @@ from src.core.feature_calculators.morphology_calculator import calculate_detaile
 from src.core.feature_calculators.quality_calculator import calculate_quality_features
 from src.core.particle_operations import normalized_crop_config
 from src.stages.stage_02_characterization import crop_particles, segment_particles
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -33,6 +36,20 @@ def run_stage2_realtime(
 
     working = s1_df.copy()
     working["s1_original_index"] = working.index
+
+    max_candidates = int(stage2_cfg.get("max_candidates_per_frame", 200))
+    if len(working) > max_candidates:
+        priority_col = "main_area_filled" if "main_area_filled" in working.columns else ("area" if "area" in working.columns else None)
+        if priority_col is not None:
+            working = working.sort_values(priority_col, ascending=False).head(max_candidates).copy()
+        else:
+            working = working.head(max_candidates).copy()
+        logger.warning(
+            "Frame %d: Stage-1 yielded %d detections; limiting Stage-2 cropping to top %d candidates to prevent memory pressure.",
+            frame_index,
+            len(s1_df),
+            max_candidates,
+        )
     crop_cfg = normalized_crop_config(stage2_cfg.get("crop_config", {"mode": "rotational_rectangle", "rotational_padding": 10}))
     illumination_mode = str(stage2_cfg.get("source_image_illumination", "darkfield")).strip().lower()
     boundary_threshold_params = {

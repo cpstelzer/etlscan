@@ -21,6 +21,7 @@ class RealtimeConfig:
     stage2_crop_config: Dict[str, Any] = field(default_factory=lambda: {"mode": "rotational_rectangle", "rotational_padding": 10})
     min_focus_score: float = 0.0
     min_particle_area: float = 500.0
+    max_stage2_candidates_per_frame: int = 200
     stage3_enable_artifact_filter: bool = True
     stage3_enable_boundary_filter: bool = False
     save_accepted_crops: bool = True
@@ -87,6 +88,7 @@ def load_realtime_config(config_path: str) -> RealtimeConfig:
         stage2_crop_config=stage2.get("crop_config", {"mode": "rotational_rectangle", "rotational_padding": 10}),
         min_focus_score=float(stage2.get("min_focus_score", 0.0)),
         min_particle_area=float(stage2.get("min_particle_area", 500.0)),
+        max_stage2_candidates_per_frame=int(stage2.get("max_candidates_per_frame", 200)),
         stage3_enable_artifact_filter=bool(stage3.get("enable_artifact_filter", True)),
         stage3_enable_boundary_filter=bool(stage3.get("enable_boundary_filter", False)),
         save_accepted_crops=bool(persistence.get("save_accepted_crops", True)),
@@ -123,6 +125,8 @@ def load_realtime_config(config_path: str) -> RealtimeConfig:
         raise ValueError("realtime_mode.background.bgi_max_age_s must be > bgi_min_age_s")
     _must_be_nonnegative("stage2.min_focus_score", parsed.min_focus_score)
     _must_be_nonnegative("stage2.min_particle_area", parsed.min_particle_area)
+    if parsed.max_stage2_candidates_per_frame < 1:
+        raise ValueError("realtime_mode.stage2.max_candidates_per_frame must be >= 1")
     if parsed.image_format not in {"png", "jpg", "jpeg", "bmp"}:
         raise ValueError("realtime_mode.persistence.image_format must be one of png/jpg/jpeg/bmp")
     _must_be_nonnegative("acquisition.retrieve_timeout_margin_ms", parsed.retrieve_timeout_margin_ms)

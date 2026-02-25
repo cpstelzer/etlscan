@@ -110,6 +110,7 @@ realtime_mode:
       rotational_padding: 10
     min_focus_score: 50
     min_particle_area: 500
+    max_candidates_per_frame: 200
   stage3:
     enable_artifact_filter: true
     enable_boundary_filter: false
