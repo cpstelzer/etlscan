@@ -55,3 +55,29 @@ class BackgroundBuffer:
             self.bg_image_aged = None
             return None
         return self.bg_image_aged.image
+
+
+class StepMatchedBackgroundBuffer:
+    """Background cache keyed by ETL step/diopter.
+
+    Returns the previous frame from the same step as background and then stores
+    the current frame for the next cycle.
+    """
+
+    def __init__(self, max_keys: int = 256) -> None:
+        self.max_keys = max_keys
+        self._images: dict[str, np.ndarray] = {}
+        self._order: list[str] = []
+
+    def update_and_get(self, key: str, frame: np.ndarray) -> Optional[np.ndarray]:
+        prev = self._images.get(key)
+        self._images[key] = frame.copy()
+        if key in self._order:
+            self._order.remove(key)
+        self._order.append(key)
+
+        while len(self._order) > self.max_keys:
+            oldest = self._order.pop(0)
+            self._images.pop(oldest, None)
+
+        return prev

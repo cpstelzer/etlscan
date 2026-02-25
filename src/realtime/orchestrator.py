@@ -12,7 +12,7 @@ import pandas as pd
 from src.core.image_io_operations import FlatFieldCorrectionAssets, load_flat_field_assets
 
 from .acquisition import FramePacket, build_frame_source
-from .background_buffer import BackgroundBuffer
+from .background_buffer import BackgroundBuffer, StepMatchedBackgroundBuffer
 from .config import RealtimeConfig
 from .monitoring import RuntimeMonitor
 from .persistence import save_accepted_crops
@@ -91,6 +91,10 @@ def run_realtime_session(config: RealtimeConfig, plate: int, well: int) -> str:
         config.stage3_enable_artifact_filter,
         config.stage3_enable_boundary_filter,
     )
+    if config.acquisition_source == "camera" and config.etl_control_enabled:
+        logger.info("Background mode: ETL step-matched subtraction (same-diopter previous cycle).")
+    else:
+        logger.info("Background mode: time-aged subtraction (BGI_MIN/MAX aging window).")
     logger.info(
         "Realtime acquisition policy: target_fps=%.2f drop_frame_if_backlogged=%s",
         config.target_fps,
@@ -101,6 +105,7 @@ def run_realtime_session(config: RealtimeConfig, plate: int, well: int) -> str:
 
     ffc_assets = _load_optional_ffc_assets(config)
     bg_buffer = BackgroundBuffer(config.bgi_min_age_s, config.bgi_max_age_s)
+    step_bg_buffer = StepMatchedBackgroundBuffer()
     monitor = RuntimeMonitor(config.metric_print_interval_s)
     accepted_rows_for_csv: list[pd.DataFrame] = []
     warned_etl_unavailable = False
@@ -130,8 +135,15 @@ def run_realtime_session(config: RealtimeConfig, plate: int, well: int) -> str:
                 "If you replay acquisition filenames with _dpt..._fd...mm, ETL values will be shown.")
             warned_etl_unavailable = True
 
-        bg_buffer.update(packet.image_gray, packet.timestamp_s)
-        bg_img = bg_buffer.get_valid_aged_background(packet.timestamp_s)
+        # For ETL-stepped camera runs, use same-step background from previous cycle.
+        # This avoids subtracting different focus planes, which can create many false detections.
+        if packet.diopter is not None:
+            step_key = f"dpt_{packet.diopter:.3f}"
+            bg_img = step_bg_buffer.update_and_get(step_key, packet.image_gray)
+        else:
+            bg_buffer.update(packet.image_gray, packet.timestamp_s)
+            bg_img = bg_buffer.get_valid_aged_background(packet.timestamp_s)
+
         if bg_img is None:
             monitor.counters.frames_skipped_no_bg += 1
             monitor.maybe_log()
