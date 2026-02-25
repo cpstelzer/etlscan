@@ -12,7 +12,6 @@ import pandas as pd
 from src.core.image_io_operations import FlatFieldCorrectionAssets, load_flat_field_assets, load_image, save_image
 
 from .acquisition import FramePacket, build_focus_cycle_pattern, build_frame_source
-from .background_buffer import BackgroundBuffer
 from .config import RealtimeConfig
 from .monitoring import RuntimeMonitor
 from .persistence import save_accepted_crops
@@ -98,6 +97,12 @@ def run_realtime_session(config: RealtimeConfig, plate: int, well: int) -> str:
     )
 
     use_etl_bg_library = config.acquisition_source == "camera" and config.etl_control_enabled
+    if not use_etl_bg_library:
+        raise RuntimeError(
+            "Realtime mode requires ETL-controlled camera acquisition with fixed bg_images library. "
+            "Set realtime_mode.acquisition.source=camera and etl_control_enabled=true."
+        )
+
     expected_bg_steps = 0
     if use_etl_bg_library:
         expected_bg_steps = len(
@@ -113,8 +118,6 @@ def run_realtime_session(config: RealtimeConfig, plate: int, well: int) -> str:
             "Background mode: fixed ETL-step library from first cycle (%d images in bg_images/).",
             expected_bg_steps,
         )
-    else:
-        logger.info("Background mode: time-aged subtraction (BGI_MIN/MAX aging window).")
 
     logger.info(
         "Realtime acquisition policy: target_fps=%.2f drop_frame_if_backlogged=%s",
@@ -125,10 +128,8 @@ def run_realtime_session(config: RealtimeConfig, plate: int, well: int) -> str:
         logger.info("No-intentional-skip mode enabled: queue backpressure will block instead of dropping software frames.")
 
     ffc_assets = _load_optional_ffc_assets(config)
-    bg_buffer = BackgroundBuffer(config.bgi_min_age_s, config.bgi_max_age_s)
     monitor = RuntimeMonitor(config.metric_print_interval_s)
     accepted_rows_for_csv: list[pd.DataFrame] = []
-    warned_etl_unavailable = False
     last_focus_reject_warn_frame = -10**9
     last_boundary_reject_warn_frame = -10**9
 
@@ -151,38 +152,29 @@ def run_realtime_session(config: RealtimeConfig, plate: int, well: int) -> str:
                     f"{packet.diopter:.3f}" if packet.diopter is not None else "n/a",
                     f"{packet.focusing_distance_mm:.3f}" if packet.focusing_distance_mm is not None else "n/a",
                 )
-        elif not warned_etl_unavailable and config.acquisition_source == "camera":
-            logger.info(
-                "ETL status unavailable for source=camera in realtime mode (no live ETL telemetry wired). "
-                "If you replay acquisition filenames with _dpt..._fd...mm, ETL values will be shown.")
-            warned_etl_unavailable = True
+        if packet.diopter is None:
+            raise RuntimeError(
+                "ETL telemetry missing for camera frame. Fixed bg_images subtraction requires per-frame diopter values."
+            )
 
-        if use_etl_bg_library and packet.diopter is not None:
-            key = f"dpt_{packet.diopter:.3f}"
-            if key not in bg_library_paths:
-                filename = _bg_filename(packet.diopter)
-                saved_bg = save_image(packet.image_gray, session.bg_dir, filename)
-                if saved_bg:
-                    bg_library_paths[key] = saved_bg
-                    logger.info("Captured background reference %d/%d for %s -> %s", len(bg_library_paths), expected_bg_steps, key, saved_bg)
-                monitor.counters.frames_skipped_no_bg += 1
-                monitor.maybe_log()
-                if len(bg_library_paths) == expected_bg_steps:
-                    logger.info("Background reference library complete (%d ETL steps). Realtime processing now active.", expected_bg_steps)
-                continue
+        key = f"dpt_{packet.diopter:.3f}"
+        if key not in bg_library_paths:
+            filename = _bg_filename(packet.diopter)
+            saved_bg = save_image(packet.image_gray, session.bg_dir, filename)
+            if saved_bg:
+                bg_library_paths[key] = saved_bg
+                logger.info("Captured background reference %d/%d for %s -> %s", len(bg_library_paths), expected_bg_steps, key, saved_bg)
+            monitor.counters.frames_skipped_no_bg += 1
+            monitor.maybe_log()
+            if len(bg_library_paths) == expected_bg_steps:
+                logger.info("Background reference library complete (%d ETL steps). Realtime processing now active.", expected_bg_steps)
+            continue
 
-            bg_img = load_image(bg_library_paths[key], mode="gray")
-            if bg_img is None:
-                monitor.counters.frames_skipped_no_bg += 1
-                monitor.maybe_log()
-                continue
-        else:
-            bg_buffer.update(packet.image_gray, packet.timestamp_s)
-            bg_img = bg_buffer.get_valid_aged_background(packet.timestamp_s)
-            if bg_img is None:
-                monitor.counters.frames_skipped_no_bg += 1
-                monitor.maybe_log()
-                continue
+        bg_img = load_image(bg_library_paths[key], mode="gray")
+        if bg_img is None:
+            monitor.counters.frames_skipped_no_bg += 1
+            monitor.maybe_log()
+            continue
 
         s1 = run_stage1_realtime(
             packet.image_gray,
