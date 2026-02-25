@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import logging
 import os
 import re
 import time
@@ -9,6 +10,8 @@ from typing import Iterator, Optional, Tuple
 import numpy as np
 
 from src.core.image_io_operations import load_image
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -100,6 +103,18 @@ class DirectoryFrameSource(FrameSource):
                 time.sleep(sleep_s)
 
 
+def _to_uint8_grayscale(raw_frame: np.ndarray) -> np.ndarray:
+    if raw_frame.ndim == 3:
+        raw_frame = np.mean(raw_frame, axis=2)
+    if raw_frame.dtype == np.uint8:
+        return raw_frame
+    if raw_frame.dtype == np.uint16:
+        return np.right_shift(raw_frame, 8).astype(np.uint8)
+    frame = np.asarray(raw_frame, dtype=np.float32)
+    frame = np.clip(frame, 0.0, 255.0)
+    return frame.astype(np.uint8)
+
+
 class CameraFrameSource(FrameSource):
     """Realtime camera source using pypylon and explicit ETL command-per-frame stepping."""
 
@@ -186,12 +201,21 @@ class CameraFrameSource(FrameSource):
                 elif "Mono12" in available_formats:
                     camera.PixelFormat.SetValue("Mono12")
 
+            if hasattr(camera, "AcquisitionMode"):
+                symbols = list(camera.AcquisitionMode.Symbolics)
+                if "Continuous" in symbols:
+                    camera.AcquisitionMode.SetValue("Continuous")
+            if hasattr(camera, "TriggerMode"):
+                symbols = list(camera.TriggerMode.Symbolics)
+                if "Off" in symbols:
+                    camera.TriggerMode.SetValue("Off")
             if hasattr(camera, "AcquisitionFrameRateEnable"):
                 camera.AcquisitionFrameRateEnable.SetValue(True)
             if hasattr(camera, "AcquisitionFrameRate"):
                 camera.AcquisitionFrameRate.SetValue(float(self._target_fps))
 
             retrieve_timeout = int(1000 / max(self._target_fps, 1.0) + self._retrieve_timeout_margin_ms)
+            consecutive_timeouts = 0
             camera.StartGrabbing(pylon.GrabStrategy_OneByOne)
 
             frame_idx = 0
@@ -218,17 +242,28 @@ class CameraFrameSource(FrameSource):
                         time.sleep(settle_time_this_frame)
                     previous_diopter = current_diopter
 
-                grab_result = camera.RetrieveResult(retrieve_timeout, pylon.TimeoutHandling_ThrowException)
                 try:
+                    grab_result = camera.RetrieveResult(retrieve_timeout, pylon.TimeoutHandling_ThrowException)
+                except Exception as exc:  # noqa: BLE001
+                    consecutive_timeouts += 1
+                    logger.warning(
+                        "Camera RetrieveResult timeout/failure (count=%d, timeout=%dms): %s",
+                        consecutive_timeouts,
+                        retrieve_timeout,
+                        exc,
+                    )
+                    if consecutive_timeouts >= 15:
+                        raise RuntimeError("Camera acquisition repeatedly timed out; stopping realtime session.") from exc
+                    continue
+
+                try:
+                    consecutive_timeouts = 0
                     if not grab_result.GrabSucceeded():
                         continue
                     raw_frame = grab_result.Array
                     if raw_frame is None:
                         continue
-                    if raw_frame.ndim == 3:
-                        image_gray = np.mean(raw_frame, axis=2).astype(np.uint8)
-                    else:
-                        image_gray = raw_frame
+                    image_gray = _to_uint8_grayscale(raw_frame)
                     yield FramePacket(
                         frame_index=frame_idx,
                         timestamp_s=time.monotonic(),
