@@ -32,6 +32,16 @@ def _start_acquisition_thread(config: RealtimeConfig, out_queue: queue.Queue[Opt
         target_fps=config.target_fps,
         max_frames=config.max_frames,
         retrieve_timeout_margin_ms=config.retrieve_timeout_margin_ms,
+        etl_control_enabled=config.etl_control_enabled,
+        start_dpt=config.start_dpt,
+        focus_pattern=config.focus_pattern,
+        scan_height_mm=config.scan_height_mm,
+        scan_step_um=config.scan_step_um,
+        scan_ratio=config.scan_ratio,
+        lens_settle_time_sec=config.lens_settle_time_sec,
+        large_jump_threshold_dpt=config.large_jump_threshold_dpt,
+        large_jump_settle_sec=config.large_jump_settle_sec,
+        lens_controller_port=config.lens_controller_port,
     )
 
     def _run() -> None:

@@ -42,6 +42,32 @@ def _parse_etl_from_filename(path: str) -> Tuple[Optional[float], Optional[float
         return None, None
 
 
+def _build_focus_cycle_pattern(
+    start_dpt: float,
+    pattern: str,
+    scan_height_mm: float,
+    scan_step_um: float,
+    scan_ratio: float,
+) -> list[float]:
+    end_dpt = start_dpt + scan_height_mm / scan_ratio
+    step_dpt = (scan_step_um / 1000.0) / scan_ratio
+    if abs(step_dpt) < 1e-9:
+        return [round(start_dpt, 3)]
+
+    diopter_values_up = np.arange(start_dpt, end_dpt + (step_dpt / 2.0), step_dpt)
+    if diopter_values_up.size == 0:
+        diopter_values_up = np.array([start_dpt])
+    diopter_values_up = diopter_values_up.round(3).tolist()
+
+    if pattern.strip().lower() == "sawtooth":
+        return diopter_values_up
+
+    diopter_values_down: list[float] = []
+    if len(diopter_values_up) > 1:
+        diopter_values_down = diopter_values_up[-2:0:-1]
+    return diopter_values_up + diopter_values_down
+
+
 class DirectoryFrameSource(FrameSource):
     def __init__(self, input_dir: str, target_fps: float, max_frames: Optional[int] = None) -> None:
         self._paths = [
@@ -75,23 +101,74 @@ class DirectoryFrameSource(FrameSource):
 
 
 class CameraFrameSource(FrameSource):
-    """Realtime camera source using the same pypylon grab method as src/acquire."""
+    """Realtime camera source using pypylon and explicit ETL command-per-frame stepping."""
 
     def __init__(
         self,
         target_fps: float,
         max_frames: Optional[int] = None,
         retrieve_timeout_margin_ms: int = 150,
+        *,
+        etl_control_enabled: bool = True,
+        start_dpt: float = -2.0,
+        focus_pattern: str = "zigzag",
+        scan_height_mm: float = 11.2,
+        scan_step_um: float = 350.0,
+        scan_ratio: float = 2.25,
+        lens_settle_time_sec: float = 0.025,
+        large_jump_threshold_dpt: float = -3.0,
+        large_jump_settle_sec: float = 0.04,
+        lens_controller_port: Optional[str] = "COM5",
     ) -> None:
         self._target_fps = target_fps
         self._max_frames = max_frames
         self._retrieve_timeout_margin_ms = retrieve_timeout_margin_ms
+        self._etl_control_enabled = etl_control_enabled
+        self._start_dpt = start_dpt
+        self._focus_pattern = focus_pattern
+        self._scan_height_mm = scan_height_mm
+        self._scan_step_um = scan_step_um
+        self._scan_ratio = scan_ratio
+        self._lens_settle_time_sec = lens_settle_time_sec
+        self._large_jump_threshold_dpt = large_jump_threshold_dpt
+        self._large_jump_settle_sec = large_jump_settle_sec
+        self._lens_controller_port = lens_controller_port
 
     def __iter__(self) -> Iterator[FramePacket]:
         try:
             from pypylon import pylon
         except Exception as exc:  # noqa: BLE001
             raise RuntimeError("pypylon is required for realtime camera acquisition") from exc
+
+        lens = None
+        ecc1c = None
+        focus_cycle = [round(self._start_dpt, 3)]
+        if self._etl_control_enabled:
+            try:
+                import optoICC
+            except Exception as exc:  # noqa: BLE001
+                raise RuntimeError("optoICC is required for ETL-controlled realtime camera acquisition") from exc
+
+            if not self._lens_controller_port:
+                raise RuntimeError("focusing.lens_controller_port must be set when ETL control is enabled")
+            ecc1c = optoICC.connectEcc(port=self._lens_controller_port)
+            lens = ecc1c.Lens
+            if lens is None:
+                raise RuntimeError("Failed to get valid Lens object from ECC-1C")
+
+            focus_cycle = _build_focus_cycle_pattern(
+                start_dpt=self._start_dpt,
+                pattern=self._focus_pattern,
+                scan_height_mm=self._scan_height_mm,
+                scan_step_um=self._scan_step_um,
+                scan_ratio=self._scan_ratio,
+            )
+            if not focus_cycle:
+                focus_cycle = [round(self._start_dpt, 3)]
+
+            lens.StaticInput.SetAsInput()
+            lens.StaticInput.SetFocalPower(self._start_dpt)
+            time.sleep(1.0)
 
         tl_factory = pylon.TlFactory.GetInstance()
         devices = tl_factory.EnumerateDevices()
@@ -118,9 +195,28 @@ class CameraFrameSource(FrameSource):
             camera.StartGrabbing(pylon.GrabStrategy_OneByOne)
 
             frame_idx = 0
+            previous_diopter = self._start_dpt
             while camera.IsGrabbing():
                 if self._max_frames is not None and frame_idx >= int(self._max_frames):
                     break
+
+                current_diopter = None
+                current_fd_mm = None
+                if lens is not None:
+                    current_diopter = float(focus_cycle[frame_idx % len(focus_cycle)])
+                    current_fd_mm = (current_diopter - self._start_dpt) * self._scan_ratio
+
+                    diopter_change = current_diopter - previous_diopter
+                    settle_time_this_frame = (
+                        self._large_jump_settle_sec
+                        if diopter_change < self._large_jump_threshold_dpt
+                        else self._lens_settle_time_sec
+                    )
+                    lens.StaticInput.SetAsInput()
+                    lens.StaticInput.SetFocalPower(current_diopter)
+                    if settle_time_this_frame > 0:
+                        time.sleep(settle_time_this_frame)
+                    previous_diopter = current_diopter
 
                 grab_result = camera.RetrieveResult(retrieve_timeout, pylon.TimeoutHandling_ThrowException)
                 try:
@@ -137,8 +233,8 @@ class CameraFrameSource(FrameSource):
                         frame_index=frame_idx,
                         timestamp_s=time.monotonic(),
                         image_gray=image_gray,
-                        diopter=None,
-                        focusing_distance_mm=None,
+                        diopter=current_diopter,
+                        focusing_distance_mm=current_fd_mm,
                     )
                     frame_idx += 1
                 finally:
@@ -148,6 +244,14 @@ class CameraFrameSource(FrameSource):
                 camera.StopGrabbing()
             if camera.IsOpen():
                 camera.Close()
+            if ecc1c is not None:
+                try:
+                    if hasattr(ecc1c, "disconnect") and callable(ecc1c.disconnect):
+                        ecc1c.disconnect()
+                    elif hasattr(ecc1c, "close") and callable(ecc1c.close):
+                        ecc1c.close()
+                except Exception:
+                    pass
 
 
 def build_frame_source(
@@ -158,6 +262,16 @@ def build_frame_source(
     target_fps: float,
     max_frames: Optional[int],
     retrieve_timeout_margin_ms: int = 150,
+    etl_control_enabled: bool = True,
+    start_dpt: float = -2.0,
+    focus_pattern: str = "zigzag",
+    scan_height_mm: float = 11.2,
+    scan_step_um: float = 350.0,
+    scan_ratio: float = 2.25,
+    lens_settle_time_sec: float = 0.025,
+    large_jump_threshold_dpt: float = -3.0,
+    large_jump_settle_sec: float = 0.04,
+    lens_controller_port: Optional[str] = "COM5",
 ) -> FrameSource:
     if source == "directory":
         if not input_dir:
@@ -168,4 +282,14 @@ def build_frame_source(
         target_fps=target_fps,
         max_frames=max_frames,
         retrieve_timeout_margin_ms=retrieve_timeout_margin_ms,
+        etl_control_enabled=etl_control_enabled,
+        start_dpt=start_dpt,
+        focus_pattern=focus_pattern,
+        scan_height_mm=scan_height_mm,
+        scan_step_um=scan_step_um,
+        scan_ratio=scan_ratio,
+        lens_settle_time_sec=lens_settle_time_sec,
+        large_jump_threshold_dpt=large_jump_threshold_dpt,
+        large_jump_settle_sec=large_jump_settle_sec,
+        lens_controller_port=lens_controller_port,
     )

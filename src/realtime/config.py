@@ -36,6 +36,18 @@ class RealtimeConfig:
     flat_field_dir: Optional[str] = None
     retrieve_timeout_margin_ms: int = 150
 
+    # ETL control (wired from src/acquire focusing config)
+    etl_control_enabled: bool = True
+    start_dpt: float = -2.0
+    focus_pattern: str = "zigzag"
+    scan_height_mm: float = 11.2
+    scan_step_um: float = 350.0
+    scan_ratio: float = 2.25
+    lens_settle_time_sec: float = 0.025
+    large_jump_threshold_dpt: float = -3.0
+    large_jump_settle_sec: float = 0.04
+    lens_controller_port: Optional[str] = "COM5"
+
 
 def _must_be_positive(name: str, value: float) -> None:
     if value <= 0:
@@ -59,6 +71,7 @@ def load_realtime_config(config_path: str) -> RealtimeConfig:
     persistence = rt.get("persistence", {}) or {}
     logging_cfg = rt.get("logging", {}) or {}
     acquisition_cfg = rt.get("acquisition", {}) or {}
+    focusing_cfg = cfg.get("focusing", {}) or {}
 
     parsed = RealtimeConfig(
         enabled=bool(rt.get("enabled", False)),
@@ -88,6 +101,16 @@ def load_realtime_config(config_path: str) -> RealtimeConfig:
         max_frames=acquisition_cfg.get("max_frames"),
         flat_field_dir=acquisition_cfg.get("flat_field_dir"),
         retrieve_timeout_margin_ms=int(acquisition_cfg.get("retrieve_timeout_margin_ms", 150)),
+        etl_control_enabled=bool(acquisition_cfg.get("etl_control_enabled", True)),
+        start_dpt=float(acquisition_cfg.get("start_dpt", -2.0)),
+        focus_pattern=str(focusing_cfg.get("pattern", "zigzag")),
+        scan_height_mm=float(focusing_cfg.get("scan_height_mm", 11.2)),
+        scan_step_um=float(focusing_cfg.get("scan_step_um", 350.0)),
+        scan_ratio=float(focusing_cfg.get("scan_ratio", 2.25)),
+        lens_settle_time_sec=float(focusing_cfg.get("lens_settle_time_sec", 0.025)),
+        large_jump_threshold_dpt=float(focusing_cfg.get("large_jump_threshold_dpt", -3.0)),
+        large_jump_settle_sec=float(focusing_cfg.get("large_jump_settle_sec", 0.04)),
+        lens_controller_port=focusing_cfg.get("lens_controller_port", "COM5"),
     )
 
     _must_be_positive("runtime.target_fps", parsed.target_fps)
@@ -107,5 +130,12 @@ def load_realtime_config(config_path: str) -> RealtimeConfig:
         raise ValueError("realtime_mode.logging.etl_status_interval_frames must be >= 1")
     if parsed.focus_rejection_log_interval_frames < 1:
         raise ValueError("realtime_mode.logging.focus_rejection_log_interval_frames must be >= 1")
+
+    if abs(parsed.scan_ratio) < 1e-9:
+        raise ValueError("focusing.scan_ratio must not be 0 for ETL stepping")
+    _must_be_positive("focusing.scan_height_mm", parsed.scan_height_mm)
+    _must_be_positive("focusing.scan_step_um", parsed.scan_step_um)
+    _must_be_nonnegative("focusing.lens_settle_time_sec", parsed.lens_settle_time_sec)
+    _must_be_nonnegative("focusing.large_jump_settle_sec", parsed.large_jump_settle_sec)
 
     return parsed
