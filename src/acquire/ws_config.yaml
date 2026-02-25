@@ -95,6 +95,7 @@ realtime_mode:
     input_dir: null
     max_frames: null
     flat_field_dir: null
+    retrieve_timeout_margin_ms: 150
   stage1:
     source_image_illumination: "collimated"
     local_otsu_roi_size: 150

@@ -32,6 +32,7 @@ class RealtimeConfig:
     input_dir: Optional[str] = None
     max_frames: Optional[int] = None
     flat_field_dir: Optional[str] = None
+    retrieve_timeout_margin_ms: int = 150
 
 
 def _must_be_positive(name: str, value: float) -> None:
@@ -82,6 +83,7 @@ def load_realtime_config(config_path: str) -> RealtimeConfig:
         input_dir=acquisition_cfg.get("input_dir"),
         max_frames=acquisition_cfg.get("max_frames"),
         flat_field_dir=acquisition_cfg.get("flat_field_dir"),
+        retrieve_timeout_margin_ms=int(acquisition_cfg.get("retrieve_timeout_margin_ms", 150)),
     )
 
     _must_be_positive("runtime.target_fps", parsed.target_fps)
@@ -96,5 +98,6 @@ def load_realtime_config(config_path: str) -> RealtimeConfig:
     _must_be_nonnegative("stage2.min_particle_area", parsed.min_particle_area)
     if parsed.image_format not in {"png", "jpg", "jpeg", "bmp"}:
         raise ValueError("realtime_mode.persistence.image_format must be one of png/jpg/jpeg/bmp")
+    _must_be_nonnegative("acquisition.retrieve_timeout_margin_ms", parsed.retrieve_timeout_margin_ms)
 
     return parsed

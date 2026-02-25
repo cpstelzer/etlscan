@@ -28,6 +28,7 @@ def _start_acquisition_thread(config: RealtimeConfig, out_queue: queue.Queue[Opt
         camera_index=config.camera_index,
         target_fps=config.target_fps,
         max_frames=config.max_frames,
+        retrieve_timeout_margin_ms=config.retrieve_timeout_margin_ms,
     )
 
     def _run() -> None:

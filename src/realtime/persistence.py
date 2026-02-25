@@ -3,8 +3,9 @@ from __future__ import annotations
 import os
 from typing import List
 
-import cv2
 import pandas as pd
+
+from src.core.image_io_operations import save_image
 
 from .session import RealtimeSession
 
@@ -27,15 +28,17 @@ def save_accepted_crops(df: pd.DataFrame, session: RealtimeSession, image_format
         crop = row.get("crop_gray")
         if crop is None:
             continue
+
         frame = int(row.get("frame", 0))
         x = int(row.get("X", 0))
         y = int(row.get("Y", 0))
         filename = _crop_filename(session, frame, i, x, y, ext)
-        out_path = os.path.join(session.accepted_dir, filename)
-        params = []
-        if ext == "png":
-            params = [cv2.IMWRITE_PNG_COMPRESSION, int(png_compression)]
-        ok = cv2.imwrite(out_path, crop, params)
-        if ok:
-            saved_paths.append(out_path)
+
+        # Keep ext controlled by realtime config; writer uses OpenCV if available,
+        # otherwise PIL fallback from src.core.image_io_operations.
+        saved_path = save_image(crop, session.accepted_dir, filename)
+        if saved_path:
+            saved_paths.append(saved_path)
+
+    _ = png_compression  # Compression tuning currently only applies when OpenCV is available.
     return saved_paths
