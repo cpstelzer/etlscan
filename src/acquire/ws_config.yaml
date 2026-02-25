@@ -100,6 +100,9 @@ realtime_mode:
     start_dpt: -2.0
   stage1:
     source_image_illumination: "collimated"
+    enable_brightness_adjustment: true
+    foreground_diff_threshold: 10
+    max_foreground_fraction: 0.08
     local_otsu_roi_size: 150
     particle_analysis_subtracted_config: {}
     global_threshold_config: {}

@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import logging
 from typing import Any, Dict, Optional
 
+import cv2
 import numpy as np
 import pandas as pd
 
@@ -13,6 +15,8 @@ from src.stages.stage_01_initial_detection import (
     refine_with_local_otsu,
 )
 from src.core.image_enhancement import subtract_images
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -39,7 +43,7 @@ def run_stage1_realtime(
     prep = prepare_masked_foreground(
         fg_img_uint8,
         bg_img_uint8,
-        enable_brightness_adjustment=bool(config.get("enable_brightness_adjustment", False)),
+        enable_brightness_adjustment=bool(config.get("enable_brightness_adjustment", True)),
         brightness_config=config.get("config_black_plate_well", {}),
         well_masking_cfg=config.get("well_masking", {}),
         system_cfg=config.get("system_cfg", {}),
@@ -47,6 +51,25 @@ def run_stage1_realtime(
     )
 
     subtracted_img_uint8 = subtract_images(prep["fg_for_sub"], prep["bg_for_sub"])
+
+    if subtracted_img_uint8 is None:
+        return Stage1Result(detections_df=pd.DataFrame())
+
+    foreground_diff_threshold = int(config.get("foreground_diff_threshold", 10))
+    max_foreground_fraction = float(config.get("max_foreground_fraction", 0.08))
+    _, motion_mask = cv2.threshold(subtracted_img_uint8, foreground_diff_threshold, 255, cv2.THRESH_BINARY)
+    foreground_fraction = float(np.count_nonzero(motion_mask)) / float(motion_mask.size) if motion_mask.size else 0.0
+
+    if foreground_fraction > max_foreground_fraction:
+        if frame_index % 30 == 0:
+            logger.warning(
+                "Frame %d skipped: foreground fraction %.3f exceeds max_foreground_fraction %.3f (possible bg mismatch/illumination drift).",
+                frame_index,
+                foreground_fraction,
+                max_foreground_fraction,
+            )
+        return Stage1Result(detections_df=pd.DataFrame())
+
     sub_cfg = config.get("particle_analysis_subtracted_config", {})
     global_cfg = config.get("global_threshold_config", {})
     local_cfg = config.get("unsubtracted_analysis_config", {})
