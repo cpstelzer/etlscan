@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import queue
 import threading
 import time
@@ -57,6 +58,10 @@ def _load_optional_ffc_assets(config: RealtimeConfig) -> Optional[FlatFieldCorre
 def run_realtime_session(config: RealtimeConfig, plate: int, well: int) -> str:
     session = create_session(config, plate=plate, well=well)
     logger.info("Realtime session started: %s", session.output_dir)
+    logger.info("Accepted crops directory: %s", os.path.abspath(session.accepted_dir))
+
+    if not config.save_accepted_crops:
+        logger.warning("realtime_mode.persistence.save_accepted_crops=false, so accepted crops will NOT be written to disk.")
 
     ffc_assets = _load_optional_ffc_assets(config)
     bg_buffer = BackgroundBuffer(config.bgi_min_age_s, config.bgi_max_age_s)
@@ -86,11 +91,17 @@ def run_realtime_session(config: RealtimeConfig, plate: int, well: int) -> str:
             config=config.stage1_config,
             ffc_assets=ffc_assets,
         )
+        monitor.counters.stage1_detections += len(s1.detections_df)
+
         s2 = run_stage2_realtime(packet.image_gray, s1.detections_df, packet.frame_index, {
             "crop_config": config.stage2_crop_config,
             "min_focus_score": config.min_focus_score,
             "min_particle_area": config.min_particle_area,
         })
+        monitor.counters.stage2_candidates += s2.pre_threshold_count
+        monitor.counters.stage2_rejected_focus += s2.rejected_focus_count
+        monitor.counters.stage2_rejected_area += s2.rejected_area_count
+
         s3 = run_stage3_realtime(
             s2.particles_df,
             {
@@ -98,9 +109,15 @@ def run_realtime_session(config: RealtimeConfig, plate: int, well: int) -> str:
                 "enable_boundary_filter": config.stage3_enable_boundary_filter,
             },
         )
+        monitor.counters.stage3_rejected_artifact += s3.rejected_artifact_count
+        monitor.counters.stage3_rejected_boundary += s3.rejected_boundary_count
 
+        saved_count = 0
         if config.save_accepted_crops:
-            save_accepted_crops(s3.accepted_df, session, config.image_format, config.png_compression)
+            saved_paths = save_accepted_crops(s3.accepted_df, session, config.image_format, config.png_compression)
+            saved_count = len(saved_paths)
+
+        monitor.counters.saved_crops += saved_count
         monitor.counters.accepted_particles += len(s3.accepted_df)
         monitor.counters.frames_processed += 1
         monitor.maybe_log()
@@ -110,5 +127,6 @@ def run_realtime_session(config: RealtimeConfig, plate: int, well: int) -> str:
             logger.warning("Frame %d processing latency %.2fms > budget %dms", packet.frame_index, elapsed_ms, config.max_processing_latency_ms)
 
     acq_thread.join(timeout=2.0)
+    monitor.maybe_log(force=True)
     logger.info("Realtime session finished. output_dir=%s", session.output_dir)
     return session.output_dir

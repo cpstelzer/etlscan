@@ -15,6 +15,9 @@ from src.stages.stage_02_characterization import crop_particles, segment_particl
 @dataclass
 class Stage2Result:
     particles_df: pd.DataFrame
+    pre_threshold_count: int = 0
+    rejected_focus_count: int = 0
+    rejected_area_count: int = 0
 
 
 def run_stage2_realtime(
@@ -56,6 +59,8 @@ def run_stage2_realtime(
     rows: List[Dict[str, Any]] = []
     min_focus = float(stage2_cfg.get("min_focus_score", 100.0))
     min_area = float(stage2_cfg.get("min_particle_area", 500.0))
+    rejected_focus = 0
+    rejected_area = 0
 
     for _, row in segmented_df.iterrows():
         crop_gray = row["crop_gray"]
@@ -71,9 +76,16 @@ def run_stage2_realtime(
         feature_row.update({k.replace("_s4", ""): v for k, v in morph.items()})
 
         if float(feature_row.get("variance_laplacian", 0.0)) <= min_focus:
+            rejected_focus += 1
             continue
         if float(feature_row.get("main_area_filled", 0.0)) <= min_area:
+            rejected_area += 1
             continue
         rows.append(feature_row)
 
-    return Stage2Result(particles_df=pd.DataFrame(rows))
+    return Stage2Result(
+        particles_df=pd.DataFrame(rows),
+        pre_threshold_count=len(segmented_df),
+        rejected_focus_count=rejected_focus,
+        rejected_area_count=rejected_area,
+    )
