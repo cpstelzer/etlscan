@@ -27,20 +27,15 @@ sys.path.insert(0, project_root)
 import cv2
 import numpy as np
 import pandas as pd
-import skimage.util
 
-from src.core.feature_calculators.morphology_calculator import calculate_detailed_body_morphology
-from src.core.feature_calculators.quality_calculator import calculate_quality_features
 from src.core.image_enhancement import subtract_images
 from src.core.image_io_operations import load_flat_field_assets, apply_flat_field_correction
-from src.core.particle_operations import normalized_crop_config
 from src.core.well_analysis import create_well_mask_black_plate, match_well_brightness
 from src.realtime.config import load_realtime_config
 from src.realtime.stage1_rt import run_stage1_realtime
 from src.realtime.stage2_rt import run_stage2_realtime
 from src.realtime.stage3_rt import run_stage3_realtime
 from src.stages.stage_01_initial_detection import prepare_masked_foreground
-from src.stages.stage_02_characterization import crop_particles, segment_particles
 
 # ---------------------------------------------------------------------------
 # HARDWIRED INPUT PATHS (edit as needed)
@@ -133,133 +128,25 @@ def _save_category_crops(category_name: str, category_df: pd.DataFrame, output_d
     logger.info("Category '%s': saved %d crops", category_name, saved)
 
 
-def _build_stage2_diagnostic_categories(
-    fg: np.ndarray,
-    s1_df: pd.DataFrame,
-    stage2_cfg: Dict[str, Any],
-    frame_index: int,
-) -> Dict[str, pd.DataFrame]:
-    if s1_df is None or s1_df.empty:
-        empty = pd.DataFrame()
-        return {
-            "stage1_detections": empty,
-            "stage2_pre_threshold": empty,
-            "stage2_after_threshold": empty,
-            "stage2_rejected_focus": empty,
-            "stage2_rejected_area": empty,
-            "stage3_accepted": empty,
-            "stage3_rejected_artifact": empty,
-            "stage3_rejected_boundary": empty,
-        }
+def _row_key(df: pd.DataFrame) -> pd.Series:
+    if df is None or df.empty:
+        return pd.Series([], dtype=str)
+    if "crop_filename" in df.columns:
+        return df["crop_filename"].astype(str)
+    cols = [c for c in ["frame", "X", "Y", "main_X", "main_Y", "s1_original_index"] if c in df.columns]
+    if not cols:
+        return pd.Series([str(i) for i in df.index], index=df.index)
+    return df[cols].astype(str).agg("|".join, axis=1)
 
-    working = s1_df.copy()
-    working["s1_original_index"] = working.index
 
-    crop_cfg = normalized_crop_config(stage2_cfg.get("crop_config", {"mode": "rotational_rectangle", "rotational_padding": 10}))
-    illumination_mode = str(stage2_cfg.get("source_image_illumination", "darkfield")).strip().lower()
-    boundary_threshold_params = {
-        "thresholding_mode": "otsu",
-        "otsu_threshold_multiplier": 0.45,
-        "fixed_threshold_value": 70,
-    }
-    crop_records = crop_particles(
-        main_img_color=fg,
-        main_img_gray=fg,
-        particles_df=working,
-        crop_config=crop_cfg,
-        sample_id="REALTIME_DIAG",
-        image_filename=f"diag_frame_{frame_index:06d}.png",
-        frame_num=frame_index,
-        illumination_mode=illumination_mode,
-        boundary_threshold_params=boundary_threshold_params,
-    )
-    crops_df = pd.DataFrame(crop_records)
-    if crops_df.empty:
-        empty = pd.DataFrame()
-        return {
-            "stage1_detections": s1_df,
-            "stage2_pre_threshold": empty,
-            "stage2_after_threshold": empty,
-            "stage2_rejected_focus": empty,
-            "stage2_rejected_area": empty,
-            "stage3_accepted": empty,
-            "stage3_rejected_artifact": empty,
-            "stage3_rejected_boundary": empty,
-        }
-
-    segmented_df = segment_particles(crops_df, {"source_image_illumination_type": illumination_mode})
-    if segmented_df.empty:
-        empty = pd.DataFrame()
-        return {
-            "stage1_detections": s1_df,
-            "stage2_pre_threshold": empty,
-            "stage2_after_threshold": empty,
-            "stage2_rejected_focus": empty,
-            "stage2_rejected_area": empty,
-            "stage3_accepted": empty,
-            "stage3_rejected_artifact": empty,
-            "stage3_rejected_boundary": empty,
-        }
-
-    pre_rows = []
-    accepted_rows = []
-    rejected_focus_rows = []
-    rejected_area_rows = []
-
-    min_focus = float(stage2_cfg.get("min_focus_score", 0.0))
-    min_area = float(stage2_cfg.get("min_particle_area", 500.0))
-
-    for _, row in segmented_df.iterrows():
-        crop_gray = row["crop_gray"]
-        raw_mask = row["raw_mask"]
-        filled_mask = row["filled_mask"]
-
-        feature_row = row.to_dict()
-        quality = calculate_quality_features(crop_gray, saved_crop_path=None, config={})
-        feature_row.update(quality)
-        intensity = skimage.util.img_as_float(crop_gray)
-        morph = calculate_detailed_body_morphology(raw_mask, filled_mask, intensity)
-        feature_row.update({k.replace("_s4", ""): v for k, v in morph.items()})
-
-        pre_rows.append(feature_row)
-        focus_score = float(feature_row.get("variance_laplacian", 0.0))
-        if focus_score <= min_focus:
-            rejected_focus_rows.append(feature_row)
-            continue
-        if float(feature_row.get("main_area_filled", 0.0)) <= min_area:
-            rejected_area_rows.append(feature_row)
-            continue
-        accepted_rows.append(feature_row)
-
-    stage2_pre_threshold = pd.DataFrame(pre_rows)
-    stage2_after_threshold = pd.DataFrame(accepted_rows)
-    stage2_rejected_focus = pd.DataFrame(rejected_focus_rows)
-    stage2_rejected_area = pd.DataFrame(rejected_area_rows)
-
-    if stage2_after_threshold.empty:
-        stage3_rejected_artifact = pd.DataFrame()
-        stage3_rejected_boundary = pd.DataFrame()
-        stage3_accepted = pd.DataFrame()
-    else:
-        artifact_mask = stage2_after_threshold.get("has_black_mask_artifact", pd.Series(False, index=stage2_after_threshold.index)).fillna(False).astype(bool)
-        boundary_mask = stage2_after_threshold.get("is_on_crop_boundary", pd.Series(False, index=stage2_after_threshold.index)).fillna(False).astype(bool)
-
-        stage3_rejected_artifact = stage2_after_threshold[artifact_mask].copy()
-        post_artifact = stage2_after_threshold[~artifact_mask].copy()
-        boundary_mask_post = post_artifact.get("is_on_crop_boundary", pd.Series(False, index=post_artifact.index)).fillna(False).astype(bool)
-        stage3_rejected_boundary = post_artifact[boundary_mask_post].copy()
-        stage3_accepted = post_artifact[~boundary_mask_post].copy()
-
-    return {
-        "stage1_detections": s1_df,
-        "stage2_pre_threshold": stage2_pre_threshold,
-        "stage2_after_threshold": stage2_after_threshold,
-        "stage2_rejected_focus": stage2_rejected_focus,
-        "stage2_rejected_area": stage2_rejected_area,
-        "stage3_accepted": stage3_accepted,
-        "stage3_rejected_artifact": stage3_rejected_artifact,
-        "stage3_rejected_boundary": stage3_rejected_boundary,
-    }
+def _diff_df(a: pd.DataFrame, b: pd.DataFrame) -> pd.DataFrame:
+    if a is None or a.empty:
+        return pd.DataFrame()
+    if b is None or b.empty:
+        return a.copy()
+    b_keys = set(_row_key(b).tolist())
+    a_keys = _row_key(a)
+    return a.loc[~a_keys.isin(b_keys)].copy()
 
 
 def run() -> int:
@@ -292,9 +179,10 @@ def run() -> int:
     _save_image(output_dir / "02_bg_raw.png", bg, logger)
 
     # Flat-field correction using the same logic as realtime stage 1
-    ffc_assets = load_flat_field_assets(str(FG_IMAGE_PATH.parent), mode="gray")
+    ffc_dir = Path(cfg.flat_field_dir) if cfg.flat_field_dir else FG_IMAGE_PATH.parent
+    ffc_assets = load_flat_field_assets(str(ffc_dir), mode="gray")
     if ffc_assets is not None:
-        logger.info("Flat-field assets found and loaded from %s", FG_IMAGE_PATH.parent)
+        logger.info("Flat-field assets found and loaded from %s", ffc_dir)
         fg_ffc = _to_uint8(apply_flat_field_correction(fg, ffc_assets))
         bg_ffc = _to_uint8(apply_flat_field_correction(bg, ffc_assets))
     else:
@@ -399,19 +287,38 @@ def run() -> int:
     )
     s3.accepted_df.to_csv(output_dir / "14_stage3_accepted.csv", index=False)
 
-    # Build/save category crops requested for richer diagnostics
-    diagnostic_categories = _build_stage2_diagnostic_categories(
-        fg=fg,
-        s1_df=s1.detections_df,
-        stage2_cfg={
-            "crop_config": cfg.stage2_crop_config,
-            "min_focus_score": cfg.min_focus_score,
-            "min_particle_area": cfg.min_particle_area,
-            "max_candidates_per_frame": cfg.max_stage2_candidates_per_frame,
-            "source_image_illumination": cfg.stage1_config.get("source_image_illumination", "darkfield"),
+    # Build/save category crops while preserving realtime behavior.
+    # We only use additional Stage-2 calls with altered thresholds to recover
+    # category membership, but still through the same realtime functions.
+    stage2_base_cfg = {
+        "crop_config": cfg.stage2_crop_config,
+        "min_focus_score": cfg.min_focus_score,
+        "min_particle_area": cfg.min_particle_area,
+        "max_candidates_per_frame": cfg.max_stage2_candidates_per_frame,
+        "source_image_illumination": cfg.stage1_config.get("source_image_illumination", "darkfield"),
+    }
+
+    s2_all = run_stage2_realtime(fg, s1.detections_df, frame_index=1, stage2_cfg={**stage2_base_cfg, "min_focus_score": -1.0, "min_particle_area": -1.0})
+    s2_focus_only = run_stage2_realtime(fg, s1.detections_df, frame_index=1, stage2_cfg={**stage2_base_cfg, "min_particle_area": -1.0})
+
+    post_artifact = run_stage3_realtime(
+        s2.particles_df,
+        {
+            "enable_artifact_filter": cfg.stage3_enable_artifact_filter,
+            "enable_boundary_filter": False,
         },
-        frame_index=1,
-    )
+    ).accepted_df
+
+    diagnostic_categories = {
+        "stage1_detections": s2_all.particles_df,
+        "stage2_pre_threshold": s2_all.particles_df,
+        "stage2_after_threshold": s2.particles_df,
+        "stage2_rejected_focus": _diff_df(s2_all.particles_df, s2_focus_only.particles_df),
+        "stage2_rejected_area": _diff_df(s2_focus_only.particles_df, s2.particles_df),
+        "stage3_accepted": s3.accepted_df,
+        "stage3_rejected_artifact": _diff_df(s2.particles_df, post_artifact),
+        "stage3_rejected_boundary": _diff_df(post_artifact, s3.accepted_df),
+    }
     for category_name, category_df in diagnostic_categories.items():
         _save_category_crops(category_name, category_df, output_dir, logger)
 
