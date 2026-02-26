@@ -28,6 +28,13 @@ def _as_uint8(image_float01: np.ndarray) -> np.ndarray:
     return np.round(np.clip(image_float01, 0.0, 1.0) * 255.0).astype(np.uint8)
 
 
+def _has_brightness_config_sections(cfg: Dict[str, Any]) -> bool:
+    return all(
+        section in cfg and isinstance(cfg.get(section), dict) and bool(cfg.get(section))
+        for section in ("well_identification", "brightness_peak_calculation", "brightness_matching")
+    )
+
+
 def run_stage1_realtime(
     fg_img_uint8: np.ndarray,
     bg_img_uint8: np.ndarray,
@@ -40,11 +47,21 @@ def run_stage1_realtime(
         fg_img_uint8 = _as_uint8(apply_flat_field_correction(fg_img_uint8, ffc_assets))
         bg_img_uint8 = _as_uint8(apply_flat_field_correction(bg_img_uint8, ffc_assets))
 
+    brightness_cfg = config.get("config_black_plate_well", {})
+    enable_brightness_adjustment = bool(config.get("enable_brightness_adjustment", True))
+    if enable_brightness_adjustment and not _has_brightness_config_sections(brightness_cfg):
+        if frame_index % 60 == 0:
+            logger.warning(
+                "Realtime Stage-1 brightness adjustment requested but config_black_plate_well is incomplete; "
+                "running without brightness matching for this frame."
+            )
+        enable_brightness_adjustment = False
+
     prep = prepare_masked_foreground(
         fg_img_uint8,
         bg_img_uint8,
-        enable_brightness_adjustment=bool(config.get("enable_brightness_adjustment", True)),
-        brightness_config=config.get("config_black_plate_well", {}),
+        enable_brightness_adjustment=enable_brightness_adjustment,
+        brightness_config=brightness_cfg,
         well_masking_cfg=config.get("well_masking", {}),
         system_cfg=config.get("system_cfg", {}),
         source_illumination=str(config.get("source_image_illumination", "darkfield")).strip().lower(),
