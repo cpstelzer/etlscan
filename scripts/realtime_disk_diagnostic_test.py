@@ -15,9 +15,14 @@ folder so failures and parameter mismatches are easy to inspect.
 from __future__ import annotations
 
 import logging
+import os
+import sys
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict
+
+current_dir = os.path.dirname(os.path.abspath(__file__))
+project_root = os.path.dirname(current_dir)
+sys.path.insert(0, project_root)
 
 import cv2
 import numpy as np
