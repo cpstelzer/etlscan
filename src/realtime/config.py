@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import logging
 from typing import Any, Dict, Optional
 
 import yaml
 
 from src.utils.config_loader import load_config_once
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -113,6 +116,37 @@ def _must_be_nonnegative(name: str, value: float) -> None:
         raise ValueError(f"realtime_mode.{name} must be >= 0, got {value}")
 
 
+def _reject_duplicated_realtime_analysis_keys(rt: Dict[str, Any]) -> None:
+    stage1 = rt.get("stage1", {}) or {}
+    stage2 = rt.get("stage2", {}) or {}
+    stage3 = rt.get("stage3", {}) or {}
+
+    forbidden = []
+    if "source_image_illumination" in stage1:
+        forbidden.append("realtime_mode.stage1.source_image_illumination")
+    if "enable_brightness_adjustment" in stage1:
+        forbidden.append("realtime_mode.stage1.enable_brightness_adjustment")
+    if "config_black_plate_well" in stage1:
+        forbidden.append("realtime_mode.stage1.config_black_plate_well")
+    if "local_otsu_roi_size" in stage1:
+        forbidden.append("realtime_mode.stage1.local_otsu_roi_size")
+    if "crop_config" in stage2:
+        forbidden.append("realtime_mode.stage2.crop_config")
+    if "min_focus_score" in stage2:
+        forbidden.append("realtime_mode.stage2.min_focus_score")
+    if "enable_artifact_filter" in stage3:
+        forbidden.append("realtime_mode.stage3.enable_artifact_filter")
+    if "enable_boundary_filter" in stage3:
+        forbidden.append("realtime_mode.stage3.enable_boundary_filter")
+
+    if forbidden:
+        raise ValueError(
+            "Duplicated realtime analysis keys are no longer supported in ws_config.yaml. "
+            "Move these to config/pipeline_config.yml and remove them from realtime_mode: "
+            + ", ".join(forbidden)
+        )
+
+
 def load_realtime_config(config_path: str, pipeline_config_path: str = "config/pipeline_config.yml") -> RealtimeConfig:
     with open(config_path, "r", encoding="utf-8") as handle:
         ws_cfg = yaml.safe_load(handle) or {}
@@ -120,6 +154,7 @@ def load_realtime_config(config_path: str, pipeline_config_path: str = "config/p
     pipeline_cfg = load_config_once(pipeline_config_path)
 
     rt = ws_cfg.get("realtime_mode", {}) or {}
+    _reject_duplicated_realtime_analysis_keys(rt)
     runtime = rt.get("runtime", {}) or {}
     background = rt.get("background", {}) or {}
     stage2 = rt.get("stage2", {}) or {}
@@ -135,6 +170,12 @@ def load_realtime_config(config_path: str, pipeline_config_path: str = "config/p
     stage2_cropping = stage2_offline.get("cropping", {}) or {}
     stage2_focus_cfg = stage2_offline.get("focussed_particles", {}) or {}
     stage3_quality_cfg = stage3_offline.get("quality_flags_filter", {}) or {}
+
+    logger.info(
+        "Realtime config sources: runtime/acquisition from %s, shared analysis from %s",
+        config_path,
+        pipeline_config_path,
+    )
 
     parsed = RealtimeConfig(
         enabled=bool(rt.get("enabled", False)),
