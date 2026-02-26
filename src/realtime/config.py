@@ -54,18 +54,19 @@ class RealtimeConfig:
 
 def _default_black_plate_well_analysis() -> Dict[str, Any]:
     return {
+        "enable_brightness_adjustment": True,
         "well_identification": {
             "low_threshold_value": 10,
-            "min_expected_diameter_px": 100,
-            "max_expected_diameter_px": 190,
-            "min_circularity": 0.80,
+            "min_expected_diameter_px": 1500,
+            "max_expected_diameter_px": 4000,
+            "min_circularity": 0.6,
         },
         "brightness_peak_calculation": {
             "min_intensity_for_peak_search": 75,
             "percentile_for_peak_proxy": 75,
         },
         "brightness_matching": {
-            "max_peak_difference_allowed": 10,
+            "max_peak_difference_allowed": 15,
             "adjustment_method": "global_shift",
             "target_peak_offset_after_shift": 3,
         },
@@ -74,16 +75,29 @@ def _default_black_plate_well_analysis() -> Dict[str, Any]:
 
 def _resolve_stage1_config(cfg: Dict[str, Any], rt: Dict[str, Any]) -> Dict[str, Any]:
     stage1_cfg = dict((rt.get("stage1", {}) or {}))
-
-    if "config_black_plate_well" in stage1_cfg:
-        return stage1_cfg
-
+    system_cfg = cfg.get("system", {}) or {}
     stage1_root = cfg.get("stage_01_initial_detection", {}) or {}
     legacy_black_plate = stage1_root.get("black_plate_well_analysis", {}) or {}
+
+    stage1_cfg["source_image_illumination"] = str(
+        system_cfg.get("source_image_illumination_type", stage1_cfg.get("source_image_illumination", "collimated"))
+    )
+
     if legacy_black_plate:
         stage1_cfg["config_black_plate_well"] = legacy_black_plate
+        stage1_cfg["enable_brightness_adjustment"] = bool(
+            legacy_black_plate.get("enable_brightness_adjustment", True)
+        )
     else:
-        stage1_cfg["config_black_plate_well"] = _default_black_plate_well_analysis()
+        defaults = _default_black_plate_well_analysis()
+        stage1_cfg["config_black_plate_well"] = defaults
+        stage1_cfg["enable_brightness_adjustment"] = bool(
+            defaults.get("enable_brightness_adjustment", True)
+        )
+
+    unsub_cfg = stage1_root.get("unsubtracted_particle_analysis", {}) or {}
+    if "local_otsu_roi_size" in unsub_cfg:
+        stage1_cfg["local_otsu_roi_size"] = int(unsub_cfg["local_otsu_roi_size"])
 
     return stage1_cfg
 
@@ -105,13 +119,18 @@ def load_realtime_config(config_path: str) -> RealtimeConfig:
     runtime = rt.get("runtime", {}) or {}
     background = rt.get("background", {}) or {}
     stage2 = rt.get("stage2", {}) or {}
-    stage3 = rt.get("stage3", {}) or {}
     persistence = rt.get("persistence", {}) or {}
     logging_cfg = rt.get("logging", {}) or {}
     acquisition_cfg = rt.get("acquisition", {}) or {}
     focusing_cfg = cfg.get("focusing", {}) or {}
+    stage2_offline = cfg.get("stage_02_characterization", {}) or {}
+    stage3_offline = cfg.get("stage_03_filtering_and_classification", {}) or {}
 
     stage1_cfg = _resolve_stage1_config(cfg, rt)
+
+    stage2_cropping = stage2_offline.get("cropping", {}) or {}
+    stage2_focus_cfg = stage2_offline.get("focussed_particles", {}) or {}
+    stage3_quality_cfg = stage3_offline.get("quality_flags_filter", {}) or {}
 
     parsed = RealtimeConfig(
         enabled=bool(rt.get("enabled", False)),
@@ -124,12 +143,12 @@ def load_realtime_config(config_path: str) -> RealtimeConfig:
         bgi_min_age_s=float(background.get("bgi_min_age_s", 2.0)),
         bgi_max_age_s=float(background.get("bgi_max_age_s", 4.0)),
         stage1_config=stage1_cfg,
-        stage2_crop_config=stage2.get("crop_config", {"mode": "rotational_rectangle", "rotational_padding": 10}),
-        min_focus_score=float(stage2.get("min_focus_score", 0.0)),
+        stage2_crop_config=stage2_cropping or {"mode": "rotational_rectangle", "rotational_padding": 30},
+        min_focus_score=float(stage2_focus_cfg.get("sharpness_min_threshold", 80.0)),
         min_particle_area=float(stage2.get("min_particle_area", 500.0)),
         max_stage2_candidates_per_frame=int(stage2.get("max_candidates_per_frame", 200)),
-        stage3_enable_artifact_filter=bool(stage3.get("enable_artifact_filter", True)),
-        stage3_enable_boundary_filter=bool(stage3.get("enable_boundary_filter", False)),
+        stage3_enable_artifact_filter=bool(stage3_quality_cfg.get("filter_black_mask", True)),
+        stage3_enable_boundary_filter=bool(stage3_quality_cfg.get("filter_on_boundary", True)),
         save_accepted_crops=bool(persistence.get("save_accepted_crops", True)),
         image_format=str(persistence.get("image_format", "png")).lower(),
         png_compression=int(persistence.get("png_compression", 3)),
