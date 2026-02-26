@@ -101,6 +101,19 @@ realtime_mode:
   stage1:
     source_image_illumination: "collimated"
     enable_brightness_adjustment: true
+    config_black_plate_well:
+      well_identification:
+        low_threshold_value: 10
+        min_expected_diameter_px: 100
+        max_expected_diameter_px: 190
+        min_circularity: 0.80
+      brightness_peak_calculation:
+        min_intensity_for_peak_search: 75
+        percentile_for_peak_proxy: 75
+      brightness_matching:
+        max_peak_difference_allowed: 10
+        adjustment_method: "global_shift"
+        target_peak_offset_after_shift: 3
     foreground_diff_threshold: 10
     max_foreground_fraction: 0.08
     local_otsu_roi_size: 150

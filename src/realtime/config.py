@@ -50,6 +50,43 @@ class RealtimeConfig:
     lens_controller_port: Optional[str] = "COM5"
 
 
+
+
+def _default_black_plate_well_analysis() -> Dict[str, Any]:
+    return {
+        "well_identification": {
+            "low_threshold_value": 10,
+            "min_expected_diameter_px": 100,
+            "max_expected_diameter_px": 190,
+            "min_circularity": 0.80,
+        },
+        "brightness_peak_calculation": {
+            "min_intensity_for_peak_search": 75,
+            "percentile_for_peak_proxy": 75,
+        },
+        "brightness_matching": {
+            "max_peak_difference_allowed": 10,
+            "adjustment_method": "global_shift",
+            "target_peak_offset_after_shift": 3,
+        },
+    }
+
+
+def _resolve_stage1_config(cfg: Dict[str, Any], rt: Dict[str, Any]) -> Dict[str, Any]:
+    stage1_cfg = dict((rt.get("stage1", {}) or {}))
+
+    if "config_black_plate_well" in stage1_cfg:
+        return stage1_cfg
+
+    stage1_root = cfg.get("stage_01_initial_detection", {}) or {}
+    legacy_black_plate = stage1_root.get("black_plate_well_analysis", {}) or {}
+    if legacy_black_plate:
+        stage1_cfg["config_black_plate_well"] = legacy_black_plate
+    else:
+        stage1_cfg["config_black_plate_well"] = _default_black_plate_well_analysis()
+
+    return stage1_cfg
+
 def _must_be_positive(name: str, value: float) -> None:
     if value <= 0:
         raise ValueError(f"realtime_mode.{name} must be > 0, got {value}")
@@ -74,6 +111,8 @@ def load_realtime_config(config_path: str) -> RealtimeConfig:
     acquisition_cfg = rt.get("acquisition", {}) or {}
     focusing_cfg = cfg.get("focusing", {}) or {}
 
+    stage1_cfg = _resolve_stage1_config(cfg, rt)
+
     parsed = RealtimeConfig(
         enabled=bool(rt.get("enabled", False)),
         default_grayscale=bool(rt.get("default_grayscale", True)),
@@ -84,7 +123,7 @@ def load_realtime_config(config_path: str) -> RealtimeConfig:
         queue_size=int(runtime.get("queue_size", 2)),
         bgi_min_age_s=float(background.get("bgi_min_age_s", 2.0)),
         bgi_max_age_s=float(background.get("bgi_max_age_s", 4.0)),
-        stage1_config=rt.get("stage1", {}) or {},
+        stage1_config=stage1_cfg,
         stage2_crop_config=stage2.get("crop_config", {"mode": "rotational_rectangle", "rotational_padding": 10}),
         min_focus_score=float(stage2.get("min_focus_score", 0.0)),
         min_particle_area=float(stage2.get("min_particle_area", 500.0)),
