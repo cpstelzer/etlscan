@@ -5,6 +5,8 @@ from typing import Any, Dict, Optional
 
 import yaml
 
+from src.utils.config_loader import load_config_once
+
 
 @dataclass(frozen=True)
 class RealtimeConfig:
@@ -73,10 +75,10 @@ def _default_black_plate_well_analysis() -> Dict[str, Any]:
     }
 
 
-def _resolve_stage1_config(cfg: Dict[str, Any], rt: Dict[str, Any]) -> Dict[str, Any]:
+def _resolve_stage1_config(pipeline_cfg: Dict[str, Any], rt: Dict[str, Any]) -> Dict[str, Any]:
     stage1_cfg = dict((rt.get("stage1", {}) or {}))
-    system_cfg = cfg.get("system", {}) or {}
-    stage1_root = cfg.get("stage_01_initial_detection", {}) or {}
+    system_cfg = pipeline_cfg.get("system", {}) or {}
+    stage1_root = pipeline_cfg.get("stage_01_initial_detection", {}) or {}
     legacy_black_plate = stage1_root.get("black_plate_well_analysis", {}) or {}
 
     stage1_cfg["source_image_illumination"] = str(
@@ -111,22 +113,24 @@ def _must_be_nonnegative(name: str, value: float) -> None:
         raise ValueError(f"realtime_mode.{name} must be >= 0, got {value}")
 
 
-def load_realtime_config(config_path: str) -> RealtimeConfig:
+def load_realtime_config(config_path: str, pipeline_config_path: str = "config/pipeline_config.yml") -> RealtimeConfig:
     with open(config_path, "r", encoding="utf-8") as handle:
-        cfg = yaml.safe_load(handle) or {}
+        ws_cfg = yaml.safe_load(handle) or {}
 
-    rt = cfg.get("realtime_mode", {}) or {}
+    pipeline_cfg = load_config_once(pipeline_config_path)
+
+    rt = ws_cfg.get("realtime_mode", {}) or {}
     runtime = rt.get("runtime", {}) or {}
     background = rt.get("background", {}) or {}
     stage2 = rt.get("stage2", {}) or {}
     persistence = rt.get("persistence", {}) or {}
     logging_cfg = rt.get("logging", {}) or {}
     acquisition_cfg = rt.get("acquisition", {}) or {}
-    focusing_cfg = cfg.get("focusing", {}) or {}
-    stage2_offline = cfg.get("stage_02_characterization", {}) or {}
-    stage3_offline = cfg.get("stage_03_filtering_and_classification", {}) or {}
+    focusing_cfg = ws_cfg.get("focusing", {}) or {}
+    stage2_offline = pipeline_cfg.get("stage_02_characterization", {}) or {}
+    stage3_offline = pipeline_cfg.get("stage_03_filtering_and_classification", {}) or {}
 
-    stage1_cfg = _resolve_stage1_config(cfg, rt)
+    stage1_cfg = _resolve_stage1_config(pipeline_cfg, rt)
 
     stage2_cropping = stage2_offline.get("cropping", {}) or {}
     stage2_focus_cfg = stage2_offline.get("focussed_particles", {}) or {}

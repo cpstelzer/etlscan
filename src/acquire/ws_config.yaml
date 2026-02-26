@@ -115,37 +115,3 @@ realtime_mode:
     metric_print_interval_s: 5
     etl_status_interval_frames: 30
     focus_rejection_log_interval_frames: 30
-
-# --- Shared offline-style analysis parameters reused by realtime mode ---
-system:
-  source_image_illumination_type: "collimated"
-
-stage_01_initial_detection:
-  black_plate_well_analysis:
-    enable_brightness_adjustment: true
-    well_identification:
-      low_threshold_value: 10
-      min_expected_diameter_px: 1500
-      max_expected_diameter_px: 4000
-      min_circularity: 0.6
-    brightness_peak_calculation:
-      min_intensity_for_peak_search: 75
-      percentile_for_peak_proxy: 75
-    brightness_matching:
-      max_peak_difference_allowed: 15
-      adjustment_method: "global_shift"
-      target_peak_offset_after_shift: 3
-  unsubtracted_particle_analysis:
-    local_otsu_roi_size: 150
-
-stage_02_characterization:
-  cropping:
-    mode: "rotational_rectangle"
-    rotational_padding: 30
-  focussed_particles:
-    sharpness_min_threshold: 80
-
-stage_03_filtering_and_classification:
-  quality_flags_filter:
-    filter_on_boundary: true
-    filter_black_mask: true
