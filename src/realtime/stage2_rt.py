@@ -53,9 +53,9 @@ def run_stage2_realtime(
     crop_cfg = normalized_crop_config(stage2_cfg.get("crop_config", {"mode": "rotational_rectangle", "rotational_padding": 10}))
     illumination_mode = str(stage2_cfg.get("source_image_illumination", "darkfield")).strip().lower()
     boundary_threshold_params = {
-        "thresholding_mode": "otsu",
-        "otsu_threshold_multiplier": 0.45,
-        "fixed_threshold_value": 70,
+        "thresholding_mode": str(stage2_cfg.get("segmentation_params", {}).get("thresholding_mode", "otsu")),
+        "otsu_threshold_multiplier": float(stage2_cfg.get("segmentation_params", {}).get("otsu_threshold_multiplier", 0.45)),
+        "fixed_threshold_value": int(stage2_cfg.get("segmentation_params", {}).get("fixed_threshold_value", 70)),
     }
     crop_records = crop_particles(
         main_img_color=fg_gray,
@@ -72,7 +72,9 @@ def run_stage2_realtime(
     if crops_df.empty:
         return Stage2Result(particles_df=crops_df)
 
-    segmented_df = segment_particles(crops_df, {"source_image_illumination_type": illumination_mode})
+    segmentation_params = dict(stage2_cfg.get("segmentation_params", {}) or {})
+    segmentation_params["source_image_illumination_type"] = illumination_mode
+    segmented_df = segment_particles(crops_df, segmentation_params)
     if segmented_df.empty:
         return Stage2Result(particles_df=segmented_df)
 

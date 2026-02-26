@@ -7,6 +7,7 @@ from typing import Any, Dict, Optional
 import yaml
 
 from src.utils.config_loader import load_config_once
+from src.utils.config_loader import get_unified_segmentation_params
 
 logger = logging.getLogger(__name__)
 
@@ -24,6 +25,7 @@ class RealtimeConfig:
     bgi_max_age_s: float = 4.0
     stage1_config: Dict[str, Any] = field(default_factory=dict)
     stage2_crop_config: Dict[str, Any] = field(default_factory=lambda: {"mode": "rotational_rectangle", "rotational_padding": 10})
+    stage2_segmentation_params: Dict[str, Any] = field(default_factory=dict)
     min_focus_score: float = 0.0
     min_particle_area: float = 500.0
     max_stage2_candidates_per_frame: int = 200
@@ -104,6 +106,14 @@ def _resolve_stage1_config(pipeline_cfg: Dict[str, Any], rt: Dict[str, Any]) -> 
     if "local_otsu_roi_size" in unsub_cfg:
         stage1_cfg["local_otsu_roi_size"] = int(unsub_cfg["local_otsu_roi_size"])
 
+    # Reuse offline Stage-1 parameter namespaces directly for realtime.
+    stage1_cfg["system_cfg"] = system_cfg
+    stage1_cfg["well_masking"] = stage1_root.get("well_masking", {}) or {}
+    stage1_cfg["particle_analysis_subtracted_config"] = stage1_root.get("particle_analysis", {}) or {}
+    stage1_cfg["particle_comparison_config"] = stage1_root.get("particle_comparison", {}) or {}
+    stage1_cfg["unsubtracted_analysis_config"] = stage1_root.get("unsubtracted_particle_analysis", {}) or {}
+    stage1_cfg["global_threshold_config"] = system_cfg.get("thresholding", {}) or {}
+
     return stage1_cfg
 
 def _must_be_positive(name: str, value: float) -> None:
@@ -164,6 +174,7 @@ def load_realtime_config(config_path: str, pipeline_config_path: str = "config/p
     focusing_cfg = ws_cfg.get("focusing", {}) or {}
     stage2_offline = pipeline_cfg.get("stage_02_characterization", {}) or {}
     stage3_offline = pipeline_cfg.get("stage_03_filtering_and_classification", {}) or {}
+    unified_segmentation_params = get_unified_segmentation_params(pipeline_cfg)
 
     stage1_cfg = _resolve_stage1_config(pipeline_cfg, rt)
 
@@ -189,6 +200,7 @@ def load_realtime_config(config_path: str, pipeline_config_path: str = "config/p
         bgi_max_age_s=float(background.get("bgi_max_age_s", 4.0)),
         stage1_config=stage1_cfg,
         stage2_crop_config=stage2_cropping or {"mode": "rotational_rectangle", "rotational_padding": 30},
+        stage2_segmentation_params=unified_segmentation_params,
         min_focus_score=float(stage2_focus_cfg.get("sharpness_min_threshold", 80.0)),
         min_particle_area=float(stage2.get("min_particle_area", 500.0)),
         max_stage2_candidates_per_frame=int(stage2.get("max_candidates_per_frame", 200)),

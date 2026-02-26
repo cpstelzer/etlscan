@@ -45,7 +45,11 @@ def test_realtime_loader_uses_pipeline_for_shared_analysis(tmp_path: Path) -> No
         },
     }
     pipeline_cfg = {
-        "system": {"source_image_illumination_type": "collimated"},
+        "system": {
+            "source_image_illumination_type": "collimated",
+            "thresholding": {"mode": "otsu", "otsu_threshold_multiplier": 0.7, "fixed_threshold_value": 70},
+            "segmentation": {"min_noise_size": 99, "closing_selem_size": 3},
+        },
         "stage_01_initial_detection": {
             "black_plate_well_analysis": {
                 "enable_brightness_adjustment": True,
@@ -78,6 +82,9 @@ def test_realtime_loader_uses_pipeline_for_shared_analysis(tmp_path: Path) -> No
     assert cfg.stage1_config["source_image_illumination"] == "collimated"
     assert cfg.stage1_config["local_otsu_roi_size"] == 150
     assert cfg.stage2_crop_config["rotational_padding"] == 30
+    assert cfg.stage2_segmentation_params["otsu_threshold_multiplier"] == 0.7
+    assert cfg.stage2_segmentation_params["closing_selem_size"] == 3
+    assert cfg.stage1_config["global_threshold_config"]["otsu_threshold_multiplier"] == 0.7
     assert cfg.min_focus_score == 80
     assert cfg.stage3_enable_artifact_filter is True
     assert cfg.stage3_enable_boundary_filter is True
@@ -104,7 +111,11 @@ def test_realtime_loader_rejects_duplicated_ws_analysis_keys(tmp_path: Path) -> 
         },
     }
     pipeline_cfg = {
-        "system": {"source_image_illumination_type": "collimated"},
+        "system": {
+            "source_image_illumination_type": "collimated",
+            "thresholding": {"mode": "otsu", "otsu_threshold_multiplier": 0.7, "fixed_threshold_value": 70},
+            "segmentation": {"min_noise_size": 99, "closing_selem_size": 3},
+        },
     }
 
     ws_path = tmp_path / "ws_config.yaml"

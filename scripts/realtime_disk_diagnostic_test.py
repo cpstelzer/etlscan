@@ -245,6 +245,7 @@ def run() -> int:
         frame_index=1,
         stage2_cfg={
             "crop_config": cfg.stage2_crop_config,
+            "segmentation_params": cfg.stage2_segmentation_params,
             "min_focus_score": cfg.min_focus_score,
             "min_particle_area": cfg.min_particle_area,
             "max_candidates_per_frame": cfg.max_stage2_candidates_per_frame,
@@ -292,6 +293,7 @@ def run() -> int:
     # category membership, but still through the same realtime functions.
     stage2_base_cfg = {
         "crop_config": cfg.stage2_crop_config,
+        "segmentation_params": cfg.stage2_segmentation_params,
         "min_focus_score": cfg.min_focus_score,
         "min_particle_area": cfg.min_particle_area,
         "max_candidates_per_frame": cfg.max_stage2_candidates_per_frame,
