@@ -43,6 +43,8 @@ def test_realtime_loader_uses_pipeline_for_shared_analysis(tmp_path: Path) -> No
             "persistence": {"save_accepted_crops": True, "image_format": "png", "png_compression": 3},
             "logging": {"metric_print_interval_s": 5, "etl_status_interval_frames": 30, "focus_rejection_log_interval_frames": 30},
         },
+        "camera": {"exposure_us": 1234},
+        "roi": {"width": 3333, "height": 2222},
     }
     pipeline_cfg = {
         "system": {
@@ -88,6 +90,9 @@ def test_realtime_loader_uses_pipeline_for_shared_analysis(tmp_path: Path) -> No
     assert cfg.min_focus_score == 80
     assert cfg.stage3_enable_artifact_filter is True
     assert cfg.stage3_enable_boundary_filter is True
+    assert cfg.exposure_us == 1234
+    assert cfg.roi_width == 3333
+    assert cfg.roi_height == 2222
 
 
 def test_realtime_loader_rejects_duplicated_ws_analysis_keys(tmp_path: Path) -> None:

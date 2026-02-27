@@ -123,6 +123,9 @@ class CameraFrameSource(FrameSource):
         target_fps: float,
         max_frames: Optional[int] = None,
         retrieve_timeout_margin_ms: int = 150,
+        exposure_us: float = 750.0,
+        roi_width: Optional[int] = None,
+        roi_height: Optional[int] = None,
         *,
         etl_control_enabled: bool = True,
         start_dpt: float = -2.0,
@@ -138,6 +141,9 @@ class CameraFrameSource(FrameSource):
         self._target_fps = target_fps
         self._max_frames = max_frames
         self._retrieve_timeout_margin_ms = retrieve_timeout_margin_ms
+        self._exposure_us = exposure_us
+        self._roi_width = roi_width
+        self._roi_height = roi_height
         self._etl_control_enabled = etl_control_enabled
         self._start_dpt = start_dpt
         self._focus_pattern = focus_pattern
@@ -194,12 +200,43 @@ class CameraFrameSource(FrameSource):
         camera.Open()
 
         try:
+            def _set_node_value_with_clamp(node: object, requested_value: float) -> float:
+                value = float(requested_value)
+                try:
+                    if hasattr(node, "Min"):
+                        value = max(value, float(node.Min))
+                    if hasattr(node, "Max"):
+                        value = min(value, float(node.Max))
+                    if hasattr(node, "Inc"):
+                        inc = float(node.Inc)
+                        min_v = float(node.Min) if hasattr(node, "Min") else 0.0
+                        if inc > 0:
+                            steps = round((value - min_v) / inc)
+                            value = min_v + steps * inc
+                    node.SetValue(value)
+                    if hasattr(node, "GetValue"):
+                        return float(node.GetValue())
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning("Failed to set camera node value to %s: %s", requested_value, exc)
+                return value
+
             if hasattr(camera, "PixelFormat"):
                 available_formats = list(camera.PixelFormat.Symbolics)
                 if "Mono8" in available_formats:
                     camera.PixelFormat.SetValue("Mono8")
                 elif "Mono12" in available_formats:
                     camera.PixelFormat.SetValue("Mono12")
+
+            if hasattr(camera, "ExposureTime"):
+                actual_exp = _set_node_value_with_clamp(camera.ExposureTime, self._exposure_us)
+                logger.info("Realtime camera exposure set to %.3f us (requested %.3f us)", actual_exp, self._exposure_us)
+
+            if self._roi_width is not None and hasattr(camera, "Width"):
+                actual_w = _set_node_value_with_clamp(camera.Width, float(self._roi_width))
+                logger.info("Realtime camera ROI width set to %.0f (requested %d)", actual_w, self._roi_width)
+            if self._roi_height is not None and hasattr(camera, "Height"):
+                actual_h = _set_node_value_with_clamp(camera.Height, float(self._roi_height))
+                logger.info("Realtime camera ROI height set to %.0f (requested %d)", actual_h, self._roi_height)
 
             if hasattr(camera, "AcquisitionMode"):
                 symbols = list(camera.AcquisitionMode.Symbolics)
@@ -297,6 +334,9 @@ def build_frame_source(
     target_fps: float,
     max_frames: Optional[int],
     retrieve_timeout_margin_ms: int = 150,
+    exposure_us: float = 750.0,
+    roi_width: Optional[int] = None,
+    roi_height: Optional[int] = None,
     etl_control_enabled: bool = True,
     start_dpt: float = -2.0,
     focus_pattern: str = "zigzag",
@@ -317,6 +357,9 @@ def build_frame_source(
         target_fps=target_fps,
         max_frames=max_frames,
         retrieve_timeout_margin_ms=retrieve_timeout_margin_ms,
+        exposure_us=exposure_us,
+        roi_width=roi_width,
+        roi_height=roi_height,
         etl_control_enabled=etl_control_enabled,
         start_dpt=start_dpt,
         focus_pattern=focus_pattern,

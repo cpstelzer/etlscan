@@ -43,6 +43,9 @@ class RealtimeConfig:
     max_frames: Optional[int] = None
     flat_field_dir: Optional[str] = None
     retrieve_timeout_margin_ms: int = 150
+    exposure_us: float = 750.0
+    roi_width: Optional[int] = None
+    roi_height: Optional[int] = None
 
     # ETL control (wired from src/acquire focusing config)
     etl_control_enabled: bool = True
@@ -171,6 +174,8 @@ def load_realtime_config(config_path: str, pipeline_config_path: str = "config/p
     persistence = rt.get("persistence", {}) or {}
     logging_cfg = rt.get("logging", {}) or {}
     acquisition_cfg = rt.get("acquisition", {}) or {}
+    camera_cfg = ws_cfg.get("camera", {}) or {}
+    roi_cfg = ws_cfg.get("roi", {}) or {}
     focusing_cfg = ws_cfg.get("focusing", {}) or {}
     stage2_offline = pipeline_cfg.get("stage_02_characterization", {}) or {}
     stage3_offline = pipeline_cfg.get("stage_03_filtering_and_classification", {}) or {}
@@ -218,6 +223,9 @@ def load_realtime_config(config_path: str, pipeline_config_path: str = "config/p
         max_frames=acquisition_cfg.get("max_frames"),
         flat_field_dir=acquisition_cfg.get("flat_field_dir"),
         retrieve_timeout_margin_ms=int(acquisition_cfg.get("retrieve_timeout_margin_ms", 150)),
+        exposure_us=float(camera_cfg.get("exposure_us", 750.0)),
+        roi_width=int(roi_cfg["width"]) if roi_cfg.get("width") is not None else None,
+        roi_height=int(roi_cfg["height"]) if roi_cfg.get("height") is not None else None,
         etl_control_enabled=bool(acquisition_cfg.get("etl_control_enabled", True)),
         start_dpt=float(acquisition_cfg.get("start_dpt", -2.0)),
         focus_pattern=str(focusing_cfg.get("pattern", "zigzag")),
@@ -245,6 +253,11 @@ def load_realtime_config(config_path: str, pipeline_config_path: str = "config/p
     if parsed.image_format not in {"png", "jpg", "jpeg", "bmp"}:
         raise ValueError("realtime_mode.persistence.image_format must be one of png/jpg/jpeg/bmp")
     _must_be_nonnegative("acquisition.retrieve_timeout_margin_ms", parsed.retrieve_timeout_margin_ms)
+    _must_be_positive("camera.exposure_us", parsed.exposure_us)
+    if parsed.roi_width is not None and parsed.roi_width < 1:
+        raise ValueError("roi.width must be >= 1 when provided")
+    if parsed.roi_height is not None and parsed.roi_height < 1:
+        raise ValueError("roi.height must be >= 1 when provided")
     if parsed.etl_status_interval_frames < 1:
         raise ValueError("realtime_mode.logging.etl_status_interval_frames must be >= 1")
     if parsed.focus_rejection_log_interval_frames < 1:
