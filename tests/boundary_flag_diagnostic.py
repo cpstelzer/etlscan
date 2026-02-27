@@ -1,6 +1,6 @@
 """Small diagnostic utility for crop-boundary flag behavior.
 
-This script evaluates a single cropped particle image with
+This script evaluates all cropped particle images under an input directory with
 `detect_cropped_particle_on_boundary` and writes human-readable + visual
 artifacts under `data/boundary_flag/output`.
 """
@@ -11,7 +11,7 @@ import argparse
 import os
 import sys
 from pathlib import Path
-from typing import Dict, List, Tuple
+from typing import Any, Callable, Dict, List, Tuple
 
 import numpy as np
 import skimage.io
@@ -21,10 +21,17 @@ current_dir = os.path.dirname(os.path.abspath(__file__))
 project_root = os.path.dirname(current_dir)
 sys.path.insert(0, project_root)
 
-from src.core.particle_operations import (
-    detect_cropped_particle_on_boundary,
-    generate_binary_mask_from_float_image,
-)
+VALID_IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff"}
+
+
+def _load_boundary_functions() -> tuple[Callable[..., bool], Callable[..., Any]]:
+    """Lazy-load heavy imports so --help works in constrained environments."""
+    from src.core.particle_operations import (  # pylint: disable=import-outside-toplevel
+        detect_cropped_particle_on_boundary,
+        generate_binary_mask_from_float_image,
+    )
+
+    return detect_cropped_particle_on_boundary, generate_binary_mask_from_float_image
 
 
 def _build_threshold_params(args: argparse.Namespace) -> Dict[str, float | int | str]:
@@ -39,6 +46,7 @@ def _compute_binary_mask(
     image_crop_gray: np.ndarray,
     illumination_mode: str,
     threshold_params: Dict[str, float | int | str],
+    generate_binary_mask_from_float_image: Callable[..., Any],
 ) -> np.ndarray:
     img_float = skimage.util.img_as_float(image_crop_gray)
     if illumination_mode == "collimated":
@@ -84,9 +92,32 @@ def _render_overlay(image_crop_gray: np.ndarray, coords: List[Tuple[int, int]]) 
     return overlay
 
 
+def _load_as_grayscale_u8(image_path: Path) -> np.ndarray:
+    image = skimage.io.imread(str(image_path))
+    if image is None:
+        raise FileNotFoundError(f"Could not read input image: {image_path}")
+
+    if image.ndim == 3:
+        return skimage.util.img_as_ubyte(np.mean(image[..., :3], axis=2) / 255.0)
+    if image.ndim == 2:
+        return skimage.util.img_as_ubyte(skimage.util.img_as_float(image))
+
+    raise ValueError(f"Unsupported image shape {image.shape}; expected 2D or 3D.")
+
+
+def _iter_input_images(input_dir: Path) -> List[Path]:
+    return sorted(
+        [
+            p
+            for p in input_dir.iterdir()
+            if p.is_file() and p.suffix.lower() in VALID_IMAGE_EXTENSIONS
+        ]
+    )
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Diagnostic for detect_cropped_particle_on_boundary")
-    parser.add_argument("--input-image", required=True, help="Path to a cropped particle image (grayscale or color).")
+    parser.add_argument("--input-dir", default="data/boundary_flag/input", help="Directory with cropped particle images.")
     parser.add_argument("--output-dir", default="data/boundary_flag/output", help="Directory for diagnostic outputs.")
     parser.add_argument(
         "--illumination-mode",
@@ -104,59 +135,85 @@ def main() -> int:
     parser.add_argument("--fixed-threshold-value", type=int, default=70)
     args = parser.parse_args()
 
-    input_image_path = Path(args.input_image)
+    input_dir = Path(args.input_dir)
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    image = skimage.io.imread(str(input_image_path))
-    if image is None:
-        raise FileNotFoundError(f"Could not read input image: {input_image_path}")
+    if not input_dir.is_dir():
+        raise FileNotFoundError(f"Input directory not found: {input_dir}")
 
-    if image.ndim == 3:
-        image = skimage.util.img_as_ubyte(np.mean(image[..., :3], axis=2) / 255.0)
-    elif image.ndim == 2:
-        image = skimage.util.img_as_ubyte(skimage.util.img_as_float(image))
-    else:
-        raise ValueError(f"Unsupported image shape {image.shape}; expected 2D or 3D.")
+    input_images = _iter_input_images(input_dir)
+    if not input_images:
+        print(f"No supported images found in: {input_dir}")
+        return 0
 
+    detect_cropped_particle_on_boundary, generate_binary_mask_from_float_image = _load_boundary_functions()
     threshold_params = _build_threshold_params(args)
 
-    is_on_crop_boundary = detect_cropped_particle_on_boundary(
-        image,
-        str(input_image_path),
-        args.illumination_mode,
-        threshold_params,
-    )
+    summary_lines = [
+        f"input_dir={input_dir}",
+        f"illumination_mode={args.illumination_mode}",
+        f"threshold_params={threshold_params}",
+        f"image_count={len(input_images)}",
+        "",
+    ]
 
-    binary_mask = _compute_binary_mask(image, args.illumination_mode, threshold_params)
-    boundary_coords = _find_boundary_foreground_pixels(binary_mask)
+    for image_path in input_images:
+        image = _load_as_grayscale_u8(image_path)
 
-    overlay = _render_overlay(image, boundary_coords)
-    mask_u8 = (binary_mask.astype(np.uint8) * 255)
+        is_on_crop_boundary = detect_cropped_particle_on_boundary(
+            image,
+            str(image_path),
+            args.illumination_mode,
+            threshold_params,
+        )
 
-    stem = input_image_path.stem
-    mask_path = output_dir / f"{stem}_binary_mask.png"
-    overlay_path = output_dir / f"{stem}_boundary_overlay.png"
-    report_path = output_dir / f"{stem}_boundary_report.txt"
+        binary_mask = _compute_binary_mask(
+            image,
+            args.illumination_mode,
+            threshold_params,
+            generate_binary_mask_from_float_image,
+        )
+        boundary_coords = _find_boundary_foreground_pixels(binary_mask)
 
-    skimage.io.imsave(str(mask_path), mask_u8, check_contrast=False)
-    skimage.io.imsave(str(overlay_path), overlay, check_contrast=False)
+        overlay = _render_overlay(image, boundary_coords)
+        mask_u8 = (binary_mask.astype(np.uint8) * 255)
 
-    with report_path.open("w", encoding="utf-8") as report_file:
-        report_file.write(f"input_image={input_image_path}\n")
-        report_file.write(f"illumination_mode={args.illumination_mode}\n")
-        report_file.write(f"threshold_params={threshold_params}\n")
-        report_file.write(f"is_on_crop_boundary={bool(is_on_crop_boundary)}\n")
-        report_file.write(f"boundary_foreground_pixel_count={len(boundary_coords)}\n")
-        report_file.write("boundary_foreground_pixels_xy=\n")
-        for x, y in boundary_coords:
-            report_file.write(f"  ({x}, {y})\n")
+        stem = image_path.stem
+        mask_path = output_dir / f"{stem}_binary_mask.png"
+        overlay_path = output_dir / f"{stem}_boundary_overlay.png"
+        report_path = output_dir / f"{stem}_boundary_report.txt"
 
-    print(f"is_on_crop_boundary={bool(is_on_crop_boundary)}")
-    print(f"boundary_foreground_pixel_count={len(boundary_coords)}")
-    print(f"report={report_path}")
-    print(f"mask={mask_path}")
-    print(f"overlay={overlay_path}")
+        skimage.io.imsave(str(mask_path), mask_u8, check_contrast=False)
+        skimage.io.imsave(str(overlay_path), overlay, check_contrast=False)
+
+        with report_path.open("w", encoding="utf-8") as report_file:
+            report_file.write(f"input_image={image_path}\n")
+            report_file.write(f"illumination_mode={args.illumination_mode}\n")
+            report_file.write(f"threshold_params={threshold_params}\n")
+            report_file.write(f"is_on_crop_boundary={bool(is_on_crop_boundary)}\n")
+            report_file.write(f"boundary_foreground_pixel_count={len(boundary_coords)}\n")
+            report_file.write("boundary_foreground_pixels_xy=\n")
+            for x, y in boundary_coords:
+                report_file.write(f"  ({x}, {y})\n")
+
+        summary_lines.extend(
+            [
+                f"input_image={image_path}",
+                f"is_on_crop_boundary={bool(is_on_crop_boundary)}",
+                f"boundary_foreground_pixel_count={len(boundary_coords)}",
+                f"report={report_path}",
+                f"mask={mask_path}",
+                f"overlay={overlay_path}",
+                "",
+            ]
+        )
+
+        print(f"[{image_path.name}] is_on_crop_boundary={bool(is_on_crop_boundary)} | boundary_foreground_pixel_count={len(boundary_coords)}")
+
+    summary_path = output_dir / "boundary_diagnostic_summary.txt"
+    summary_path.write_text("\n".join(summary_lines), encoding="utf-8")
+    print(f"Summary written to: {summary_path}")
     return 0
 
 
