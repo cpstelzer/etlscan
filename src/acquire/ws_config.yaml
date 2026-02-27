@@ -99,37 +99,14 @@ realtime_mode:
     etl_control_enabled: true
     start_dpt: -2.0
   stage1:
-    source_image_illumination: "collimated"
-    enable_brightness_adjustment: true
-    config_black_plate_well:
-      well_identification:
-        low_threshold_value: 10
-        min_expected_diameter_px: 100
-        max_expected_diameter_px: 190
-        min_circularity: 0.80
-      brightness_peak_calculation:
-        min_intensity_for_peak_search: 75
-        percentile_for_peak_proxy: 75
-      brightness_matching:
-        max_peak_difference_allowed: 10
-        adjustment_method: "global_shift"
-        target_peak_offset_after_shift: 3
     foreground_diff_threshold: 10
     max_foreground_fraction: 0.08
-    local_otsu_roi_size: 150
     particle_analysis_subtracted_config: {}
     global_threshold_config: {}
     unsubtracted_analysis_config: {}
   stage2:
-    crop_config:
-      mode: "rotational_rectangle"
-      rotational_padding: 10
-    min_focus_score: 50
     min_particle_area: 500
     max_candidates_per_frame: 200
-  stage3:
-    enable_artifact_filter: true
-    enable_boundary_filter: false
   persistence:
     save_accepted_crops: true
     image_format: "png"

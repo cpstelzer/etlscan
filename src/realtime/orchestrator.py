@@ -31,6 +31,9 @@ def _start_acquisition_thread(config: RealtimeConfig, out_queue: queue.Queue[Opt
         target_fps=config.target_fps,
         max_frames=config.max_frames,
         retrieve_timeout_margin_ms=config.retrieve_timeout_margin_ms,
+        exposure_us=config.exposure_us,
+        roi_width=config.roi_width,
+        roi_height=config.roi_height,
         etl_control_enabled=config.etl_control_enabled,
         start_dpt=config.start_dpt,
         focus_pattern=config.focus_pattern,
@@ -209,6 +212,7 @@ def run_realtime_session(config: RealtimeConfig, plate: int, well: int) -> str:
 
             s2 = run_stage2_realtime(packet.image_gray, s1.detections_df, packet.frame_index, {
                 "crop_config": config.stage2_crop_config,
+                "segmentation_params": config.stage2_segmentation_params,
                 "min_focus_score": config.min_focus_score,
                 "min_particle_area": config.min_particle_area,
                 "max_candidates_per_frame": config.max_stage2_candidates_per_frame,
