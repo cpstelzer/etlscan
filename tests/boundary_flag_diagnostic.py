@@ -1,8 +1,11 @@
-"""Small diagnostic utility for crop-boundary flag behavior.
+"""Diagnostic utility for crop-boundary flag behavior.
 
-This script evaluates all cropped particle images under an input directory with
-`detect_cropped_particle_on_boundary` and writes human-readable + visual
-artifacts under `data/boundary_flag/output`.
+Processes all image files in an input directory, evaluates
+`detect_cropped_particle_on_boundary`, and writes outputs under
+`data/boundary_flag/output`.
+
+Important: threshold defaults are loaded from the shared pipeline config to
+stay consistent with offline/realtime behavior.
 """
 
 from __future__ import annotations
@@ -21,6 +24,8 @@ current_dir = os.path.dirname(os.path.abspath(__file__))
 project_root = os.path.dirname(current_dir)
 sys.path.insert(0, project_root)
 
+from src.utils.config_loader import get_unified_segmentation_params, load_config_once
+
 VALID_IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff"}
 
 
@@ -34,11 +39,31 @@ def _load_boundary_functions() -> tuple[Callable[..., bool], Callable[..., Any]]
     return detect_cropped_particle_on_boundary, generate_binary_mask_from_float_image
 
 
-def _build_threshold_params(args: argparse.Namespace) -> Dict[str, float | int | str]:
+def _resolve_threshold_params(args: argparse.Namespace) -> Dict[str, float | int | str]:
+    """Resolve threshold parameters using shared pipeline config as source of truth."""
+    config = load_config_once(args.config)
+    segmentation_params = get_unified_segmentation_params(config)
+
+    thresholding_mode = (
+        args.thresholding_mode
+        if args.thresholding_mode is not None
+        else str(segmentation_params.get("thresholding_mode", "otsu"))
+    )
+    otsu_threshold_multiplier = (
+        float(args.otsu_threshold_multiplier)
+        if args.otsu_threshold_multiplier is not None
+        else float(segmentation_params.get("otsu_threshold_multiplier", 0.45))
+    )
+    fixed_threshold_value = (
+        int(args.fixed_threshold_value)
+        if args.fixed_threshold_value is not None
+        else int(segmentation_params.get("fixed_threshold_value", 70))
+    )
+
     return {
-        "thresholding_mode": args.thresholding_mode,
-        "otsu_threshold_multiplier": float(args.otsu_threshold_multiplier),
-        "fixed_threshold_value": int(args.fixed_threshold_value),
+        "thresholding_mode": thresholding_mode,
+        "otsu_threshold_multiplier": otsu_threshold_multiplier,
+        "fixed_threshold_value": fixed_threshold_value,
     }
 
 
@@ -117,22 +142,33 @@ def _iter_input_images(input_dir: Path) -> List[Path]:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Diagnostic for detect_cropped_particle_on_boundary")
+    parser.add_argument("--config", default="config/pipeline_config.yml", help="Path to pipeline config YAML.")
     parser.add_argument("--input-dir", default="data/boundary_flag/input", help="Directory with cropped particle images.")
     parser.add_argument("--output-dir", default="data/boundary_flag/output", help="Directory for diagnostic outputs.")
     parser.add_argument(
         "--illumination-mode",
         choices=["darkfield", "collimated"],
-        default="darkfield",
+        default="collimated",
         help="Illumination mode passed into boundary detection.",
     )
     parser.add_argument(
         "--thresholding-mode",
         choices=["otsu", "fixed"],
-        default="otsu",
-        help="Thresholding mode used inside boundary detection.",
+        default=None,
+        help="Optional override. Default comes from shared pipeline config.",
     )
-    parser.add_argument("--otsu-threshold-multiplier", type=float, default=0.45)
-    parser.add_argument("--fixed-threshold-value", type=int, default=70)
+    parser.add_argument(
+        "--otsu-threshold-multiplier",
+        type=float,
+        default=None,
+        help="Optional override. Default comes from shared pipeline config.",
+    )
+    parser.add_argument(
+        "--fixed-threshold-value",
+        type=int,
+        default=None,
+        help="Optional override. Default comes from shared pipeline config.",
+    )
     args = parser.parse_args()
 
     input_dir = Path(args.input_dir)
@@ -148,7 +184,7 @@ def main() -> int:
         return 0
 
     detect_cropped_particle_on_boundary, generate_binary_mask_from_float_image = _load_boundary_functions()
-    threshold_params = _build_threshold_params(args)
+    threshold_params = _resolve_threshold_params(args)
 
     summary_lines = [
         f"input_dir={input_dir}",
@@ -157,6 +193,8 @@ def main() -> int:
         f"image_count={len(input_images)}",
         "",
     ]
+
+    print(f"Using threshold params: {threshold_params}")
 
     for image_path in input_images:
         image = _load_as_grayscale_u8(image_path)
