@@ -10,6 +10,7 @@ from typing import Iterator, Optional, Tuple
 import numpy as np
 
 from src.core.image_io_operations import load_image
+from src.acquire.roi import set_centered_roi
 
 logger = logging.getLogger(__name__)
 
@@ -231,12 +232,22 @@ class CameraFrameSource(FrameSource):
                 actual_exp = _set_node_value_with_clamp(camera.ExposureTime, self._exposure_us)
                 logger.info("Realtime camera exposure set to %.3f us (requested %.3f us)", actual_exp, self._exposure_us)
 
-            if self._roi_width is not None and hasattr(camera, "Width"):
-                actual_w = _set_node_value_with_clamp(camera.Width, float(self._roi_width))
-                logger.info("Realtime camera ROI width set to %.0f (requested %d)", actual_w, self._roi_width)
-            if self._roi_height is not None and hasattr(camera, "Height"):
-                actual_h = _set_node_value_with_clamp(camera.Height, float(self._roi_height))
-                logger.info("Realtime camera ROI height set to %.0f (requested %d)", actual_h, self._roi_height)
+            if (self._roi_width is None) ^ (self._roi_height is None):
+                raise ValueError("Realtime ROI requires both width and height when either is set.")
+            if self._roi_width is not None and self._roi_height is not None:
+                actual_w, actual_h = set_centered_roi(
+                    camera,
+                    self._roi_width,
+                    self._roi_height,
+                    emit=lambda msg: logger.info(msg),
+                )
+                logger.info(
+                    "Realtime camera centered ROI set to %sx%s (requested %dx%d)",
+                    actual_w,
+                    actual_h,
+                    self._roi_width,
+                    self._roi_height,
+                )
 
             if hasattr(camera, "AcquisitionMode"):
                 symbols = list(camera.AcquisitionMode.Symbolics)
