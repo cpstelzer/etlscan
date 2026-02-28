@@ -375,7 +375,12 @@ def detect_cropped_particle_on_boundary(
     illumination_mode_of_crop: str,
     threshold_params: Dict[str, Any]
 ) -> bool:
-    """Determine whether a cropped particle touches the border of its crop."""
+    """Determine whether the main segmented particle touches the crop border.
+
+    Boundary dust/scratches can produce tiny disconnected foreground blobs on the
+    crop edge. To avoid false positives, this check evaluates only the largest
+    connected foreground component (the main particle candidate).
+    """
     h, w = image_crop_gray.shape
     if h < 3 or w < 3: return True
     
@@ -391,8 +396,21 @@ def detect_cropped_particle_on_boundary(
         logger.warning(f"Boundary check failed for {crop_filename} due to mask generation error.")
         return True 
 
-    if (binary_mask[0, :].any() or binary_mask[-1, :].any() or
-        binary_mask[:, 0].any() or binary_mask[:, -1].any()):
+    binary_uint8 = binary_mask.astype(np.uint8)
+    num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(binary_uint8, connectivity=8)
+    if num_labels <= 1:
+        return False
+
+    component_areas = stats[1:, cv2.CC_STAT_AREA]
+    largest_component_label = 1 + int(np.argmax(component_areas))
+    main_particle_mask = labels == largest_component_label
+
+    if (
+        main_particle_mask[0, :].any() or
+        main_particle_mask[-1, :].any() or
+        main_particle_mask[:, 0].any() or
+        main_particle_mask[:, -1].any()
+    ):
         return True
         
     return False
