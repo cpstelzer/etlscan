@@ -26,6 +26,7 @@ class RealtimeConfig:
     stage1_config: Dict[str, Any] = field(default_factory=dict)
     stage2_crop_config: Dict[str, Any] = field(default_factory=lambda: {"mode": "rotational_rectangle", "rotational_padding": 10})
     stage2_segmentation_params: Dict[str, Any] = field(default_factory=dict)
+    stage2_quality_features_config: Dict[str, Any] = field(default_factory=dict)
     min_focus_score: float = 0.0
     min_particle_area: float = 500.0
     max_stage2_candidates_per_frame: int = 200
@@ -206,6 +207,7 @@ def load_realtime_config(config_path: str, pipeline_config_path: str = "config/p
         stage1_config=stage1_cfg,
         stage2_crop_config=stage2_cropping or {"mode": "rotational_rectangle", "rotational_padding": 30},
         stage2_segmentation_params=unified_segmentation_params,
+        stage2_quality_features_config=stage2_offline.get("quality_features", {}) or {},
         min_focus_score=float(stage2_focus_cfg.get("sharpness_min_threshold", 80.0)),
         min_particle_area=float(stage2.get("min_particle_area", 500.0)),
         max_stage2_candidates_per_frame=int(stage2.get("max_candidates_per_frame", 200)),
@@ -250,6 +252,22 @@ def load_realtime_config(config_path: str, pipeline_config_path: str = "config/p
     _must_be_nonnegative("stage2.min_particle_area", parsed.min_particle_area)
     if parsed.max_stage2_candidates_per_frame < 1:
         raise ValueError("realtime_mode.stage2.max_candidates_per_frame must be >= 1")
+    black_mask_cfg = parsed.stage2_quality_features_config.get("black_mask_check")
+    if not isinstance(black_mask_cfg, dict):
+        raise ValueError(
+            "pipeline stage_02_characterization.quality_features.black_mask_check must be defined for realtime mode"
+        )
+    required_black_mask_keys = (
+        "min_area_ratio",
+        "max_black_pixel_value",
+        "min_edge_thickness_fraction",
+    )
+    missing_black_mask_keys = [k for k in required_black_mask_keys if k not in black_mask_cfg]
+    if missing_black_mask_keys:
+        raise ValueError(
+            "Missing required keys in stage_02_characterization.quality_features.black_mask_check: "
+            + ", ".join(missing_black_mask_keys)
+        )
     if parsed.image_format not in {"png", "jpg", "jpeg", "bmp"}:
         raise ValueError("realtime_mode.persistence.image_format must be one of png/jpg/jpeg/bmp")
     _must_be_nonnegative("acquisition.retrieve_timeout_margin_ms", parsed.retrieve_timeout_margin_ms)
