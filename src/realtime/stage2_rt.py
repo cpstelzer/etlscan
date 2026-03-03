@@ -91,7 +91,7 @@ def run_stage2_realtime(
         filled_mask = row["filled_mask"]
 
         feature_row: Dict[str, Any] = row.to_dict()
-        quality = calculate_quality_features(crop_gray, saved_crop_path=None, config={})
+        quality = calculate_quality_features(crop_gray, saved_crop_path=None, config=stage2_cfg)
         feature_row.update(quality)
 
         intensity = skimage.util.img_as_float(crop_gray)
