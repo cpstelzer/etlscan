@@ -70,7 +70,8 @@ def _default_black_plate_well_analysis() -> Dict[str, Any]:
             "low_threshold_value": 10,
             "min_expected_diameter_px": 1500,
             "max_expected_diameter_px": 4000,
-            "min_circularity": 0.6,
+            "min_fill_ratio_to_enclosing_circle": 0.8,
+            "center_offset_fraction_threshold": 0.1,
         },
         "brightness_peak_calculation": {
             "min_intensity_for_peak_search": 75,
