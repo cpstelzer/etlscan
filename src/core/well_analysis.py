@@ -26,9 +26,10 @@ def create_well_mask_black_plate(
         return None, None
 
     low_thresh = config_well_mask.get('low_threshold_value', 5)
-    min_diameter = config_well_mask.get('min_expected_diameter_px', 100) 
-    max_diameter = config_well_mask.get('max_expected_diameter_px', 4000) 
-    min_circularity_thresh = config_well_mask.get('min_circularity', 0.85) 
+    min_diameter = config_well_mask.get('min_expected_diameter_px', 100)
+    max_diameter = config_well_mask.get('max_expected_diameter_px', 4000)
+    min_fill_ratio_to_enclosing_circle = config_well_mask['min_fill_ratio_to_enclosing_circle']
+    center_offset_fraction_threshold = config_well_mask['center_offset_fraction_threshold']
 
     _, threshold_img = cv2.threshold(image_gray_uint8, low_thresh, 255, cv2.THRESH_BINARY)
 
@@ -53,23 +54,46 @@ def create_well_mask_black_plate(
 
     largest_contour = max(contours, key=cv2.contourArea)
     area = cv2.contourArea(largest_contour)
-    perimeter = cv2.arcLength(largest_contour, True)
-
-    if perimeter == 0:
-        logger.warning("create_well_mask_black_plate: Largest contour has zero perimeter.")
-        return None, None
-
-    circularity = (4 * np.pi * area) / (perimeter ** 2)
-    if circularity < min_circularity_thresh:
-        logger.warning(f"create_well_mask_black_plate: Largest contour circularity {circularity:.3f} is below threshold {min_circularity_thresh}.")
-        return None, None
 
     (x_f, y_f), radius_f = cv2.minEnclosingCircle(largest_contour)
     center_x, center_y, radius_px = int(x_f), int(y_f), int(radius_f)
     diameter_px = 2 * radius_px
 
+    # 1) Diameter range validation
     if not (min_diameter <= diameter_px <= max_diameter):
         logger.warning(f"create_well_mask_black_plate: Detected diameter {diameter_px}px is outside expected range [{min_diameter}-{max_diameter}]px.")
+        return None, None
+
+    # 2) Fill-ratio validation against the enclosing circle
+    enclosing_circle_area = np.pi * (radius_px ** 2)
+    if enclosing_circle_area <= 0:
+        logger.warning("create_well_mask_black_plate: Enclosing circle area is zero or negative.")
+        return None, None
+
+    fill_ratio = area / enclosing_circle_area
+    if fill_ratio < min_fill_ratio_to_enclosing_circle:
+        logger.warning(
+            "create_well_mask_black_plate: Contour fill ratio %.3f is below threshold %.3f.",
+            fill_ratio,
+            min_fill_ratio_to_enclosing_circle,
+        )
+        return None, None
+
+    # 3) Center proximity validation to image center
+    image_height, image_width = image_gray_uint8.shape
+    image_center_x = image_width / 2.0
+    image_center_y = image_height / 2.0
+    center_distance_px = np.sqrt((x_f - image_center_x) ** 2 + (y_f - image_center_y) ** 2)
+    max_center_offset_px = center_offset_fraction_threshold * image_width
+
+    if center_distance_px > max_center_offset_px:
+        logger.warning(
+            "create_well_mask_black_plate: Circle center offset %.2fpx exceeds limit %.2fpx (fraction=%.3f of width %dpx).",
+            center_distance_px,
+            max_center_offset_px,
+            center_offset_fraction_threshold,
+            image_width,
+        )
         return None, None
 
     well_mask = np.zeros_like(image_gray_uint8, dtype=np.uint8)
@@ -77,9 +101,20 @@ def create_well_mask_black_plate(
 
     well_properties = {
         'center_x': center_x, 'center_y': center_y, 'radius_px': radius_px,
-        'diameter_px': diameter_px, 'area_px': area, 'circularity': circularity
+        'diameter_px': diameter_px,
+        'area_px': area,
+        'fill_ratio_to_enclosing_circle': fill_ratio,
+        'center_distance_from_image_center_px': center_distance_px,
+        'center_offset_fraction_of_image_width': center_distance_px / image_width,
+        'max_center_offset_px': max_center_offset_px,
     }
-    logger.info(f"create_well_mask_black_plate: Well identified. Diameter: {diameter_px}px, Circularity: {circularity:.3f}")
+    logger.info(
+        "create_well_mask_black_plate: Well identified. Diameter=%dpx, FillRatio=%.3f, CenterOffset=%.2fpx (limit %.2fpx).",
+        diameter_px,
+        fill_ratio,
+        center_distance_px,
+        max_center_offset_px,
+    )
     return well_mask, well_properties
 
 def calculate_well_brightness_peak(
@@ -278,7 +313,8 @@ if __name__ == '__main__':
     test_config_match = {
         'well_identification': {
             'low_threshold_value': 10, 'min_expected_diameter_px': 100,
-            'max_expected_diameter_px': 190, 'min_circularity': 0.80
+            'max_expected_diameter_px': 190, 'min_fill_ratio_to_enclosing_circle': 0.80,
+            'center_offset_fraction_threshold': 0.1
         },
         'brightness_peak_calculation': {
             'min_intensity_for_peak_search': 75, 'percentile_for_peak_proxy': 75
