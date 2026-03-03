@@ -105,15 +105,15 @@ stage_02_characterization:
 
     # --- Settings for 'bounding_box' mode ---
     # Padding added around the simple bounding box.
-    bbox_padding: 15
+    bbox_padding: 20
 
   # Parameters for quality feature calculations.
   quality_features:
     # Configuration for detecting black corner mask artifacts in crops.
     black_mask_check:
-      min_area_ratio: 0.05
+      min_area_ratio: 0.03
       max_black_pixel_value: 15
-      min_edge_thickness_fraction: 0.2
+      min_edge_thickness_fraction: 0.1
 
   # Parameters for advanced shape and texture descriptors.
   shape_descriptors:
@@ -131,7 +131,7 @@ stage_02_characterization:
     min_sharpness_fraction: 0.3
     min_prominence_fraction: 0.05
     smooth_window: 3
-    sharpness_min_threshold: 80
+    sharpness_min_threshold: 100
     max_tracks_to_plot: 15
     save_plots: true
     crop_filename_prefix: null
@@ -170,7 +170,7 @@ stage_03_filtering_and_classification:
   sharpness_filter:
     enabled: true
     metric: "variance_laplacian"
-    min_threshold: 80 
+    min_threshold: 100 
 
   # Training parameters (if a training script is invoked)
     training_params:
