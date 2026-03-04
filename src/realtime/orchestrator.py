@@ -208,6 +208,7 @@ def run_realtime_session(config: RealtimeConfig, plate: int, well: int) -> str:
                 config=config.stage1_config,
                 ffc_assets=ffc_assets,
             )
+            logger.info("Frame %d: Stage-1 detections=%d", packet.frame_index, len(s1.detections_df))
             monitor.counters.stage1_detections += len(s1.detections_df)
 
             s2 = run_stage2_realtime(packet.image_gray, s1.detections_df, packet.frame_index, {
