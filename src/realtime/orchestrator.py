@@ -253,6 +253,17 @@ def run_realtime_session(config: RealtimeConfig, plate: int, well: int) -> str:
             )
             monitor.counters.stage3_rejected_artifact += s3.rejected_artifact_count
             monitor.counters.stage3_rejected_boundary += s3.rejected_boundary_count
+            logger.info(
+                "Frame %d filter summary: stage1_detections=%d stage2_candidates=%d filtered_focus=%d filtered_area=%d filtered_artifact=%d filtered_boundary=%d accepted=%d",
+                packet.frame_index,
+                stage1_detection_count,
+                s2.pre_threshold_count,
+                s2.rejected_focus_count,
+                s2.rejected_area_count,
+                s3.rejected_artifact_count,
+                s3.rejected_boundary_count,
+                len(s3.accepted_df),
+            )
 
             if (
                 s2.pre_threshold_count > 0
