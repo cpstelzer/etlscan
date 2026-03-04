@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import logging
+import threading
 import os
 import re
 import time
@@ -23,6 +24,24 @@ class FramePacket:
     diopter: Optional[float] = None
     focusing_distance_mm: Optional[float] = None
 
+
+
+
+class AcquisitionControl:
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._repeat_same_diopter_requests = 0
+
+    def request_repeat_same_diopter_once(self) -> None:
+        with self._lock:
+            self._repeat_same_diopter_requests += 1
+
+    def consume_repeat_same_diopter_request(self) -> bool:
+        with self._lock:
+            if self._repeat_same_diopter_requests <= 0:
+                return False
+            self._repeat_same_diopter_requests -= 1
+            return True
 
 class FrameSource:
     def __iter__(self) -> Iterator[FramePacket]:
@@ -138,6 +157,7 @@ class CameraFrameSource(FrameSource):
         large_jump_threshold_dpt: float = -3.0,
         large_jump_settle_sec: float = 0.04,
         lens_controller_port: Optional[str] = "COM5",
+        acquisition_control: Optional[AcquisitionControl] = None,
     ) -> None:
         self._target_fps = target_fps
         self._max_frames = max_frames
@@ -155,6 +175,7 @@ class CameraFrameSource(FrameSource):
         self._large_jump_threshold_dpt = large_jump_threshold_dpt
         self._large_jump_settle_sec = large_jump_settle_sec
         self._lens_controller_port = lens_controller_port
+        self._acquisition_control = acquisition_control
 
     def __iter__(self) -> Iterator[FramePacket]:
         try:
@@ -267,6 +288,7 @@ class CameraFrameSource(FrameSource):
             camera.StartGrabbing(pylon.GrabStrategy_OneByOne)
 
             frame_idx = 0
+            focus_step_idx = 0
             previous_diopter = self._start_dpt
             while camera.IsGrabbing():
                 if self._max_frames is not None and frame_idx >= int(self._max_frames):
@@ -275,7 +297,7 @@ class CameraFrameSource(FrameSource):
                 current_diopter = None
                 current_fd_mm = None
                 if lens is not None:
-                    current_diopter = float(focus_cycle[frame_idx % len(focus_cycle)])
+                    current_diopter = float(focus_cycle[focus_step_idx % len(focus_cycle)])
                     current_fd_mm = (current_diopter - self._start_dpt) * self._scan_ratio
 
                     diopter_change = current_diopter - previous_diopter
@@ -319,6 +341,8 @@ class CameraFrameSource(FrameSource):
                         diopter=current_diopter,
                         focusing_distance_mm=current_fd_mm,
                     )
+                    if not (self._acquisition_control and self._acquisition_control.consume_repeat_same_diopter_request()):
+                        focus_step_idx += 1
                     frame_idx += 1
                 finally:
                     grab_result.Release()
@@ -358,6 +382,7 @@ def build_frame_source(
     large_jump_threshold_dpt: float = -3.0,
     large_jump_settle_sec: float = 0.04,
     lens_controller_port: Optional[str] = "COM5",
+    acquisition_control: Optional[AcquisitionControl] = None,
 ) -> FrameSource:
     if source == "directory":
         if not input_dir:
@@ -381,4 +406,5 @@ def build_frame_source(
         large_jump_threshold_dpt=large_jump_threshold_dpt,
         large_jump_settle_sec=large_jump_settle_sec,
         lens_controller_port=lens_controller_port,
+        acquisition_control=acquisition_control,
     )
