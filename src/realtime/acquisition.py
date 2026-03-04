@@ -294,6 +294,12 @@ class CameraFrameSource(FrameSource):
                 if self._max_frames is not None and frame_idx >= int(self._max_frames):
                     break
 
+                repeat_same_diopter = bool(
+                    self._acquisition_control and self._acquisition_control.consume_repeat_same_diopter_request()
+                )
+                if frame_idx > 0 and not repeat_same_diopter:
+                    focus_step_idx += 1
+
                 current_diopter = None
                 current_fd_mm = None
                 if lens is not None:
@@ -341,8 +347,6 @@ class CameraFrameSource(FrameSource):
                         diopter=current_diopter,
                         focusing_distance_mm=current_fd_mm,
                     )
-                    if not (self._acquisition_control and self._acquisition_control.consume_repeat_same_diopter_request()):
-                        focus_step_idx += 1
                     frame_idx += 1
                 finally:
                     grab_result.Release()
