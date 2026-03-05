@@ -23,6 +23,7 @@ class RealtimeConfig:
     queue_size: int = 2
     bgi_min_age_s: float = 2.0
     bgi_max_age_s: float = 4.0
+    stage1_reacquire_detection_threshold: int = 20
     stage1_config: Dict[str, Any] = field(default_factory=dict)
     stage2_crop_config: Dict[str, Any] = field(default_factory=lambda: {"mode": "rotational_rectangle", "rotational_padding": 10})
     stage2_segmentation_params: Dict[str, Any] = field(default_factory=dict)
@@ -172,6 +173,7 @@ def load_realtime_config(config_path: str, pipeline_config_path: str = "config/p
     _reject_duplicated_realtime_analysis_keys(rt)
     runtime = rt.get("runtime", {}) or {}
     background = rt.get("background", {}) or {}
+    stage1 = rt.get("stage1", {}) or {}
     stage2 = rt.get("stage2", {}) or {}
     persistence = rt.get("persistence", {}) or {}
     logging_cfg = rt.get("logging", {}) or {}
@@ -205,6 +207,7 @@ def load_realtime_config(config_path: str, pipeline_config_path: str = "config/p
         queue_size=int(runtime.get("queue_size", 2)),
         bgi_min_age_s=float(background.get("bgi_min_age_s", 2.0)),
         bgi_max_age_s=float(background.get("bgi_max_age_s", 4.0)),
+        stage1_reacquire_detection_threshold=int(stage1.get("reacquire_detection_threshold", 20)),
         stage1_config=stage1_cfg,
         stage2_crop_config=stage2_cropping or {"mode": "rotational_rectangle", "rotational_padding": 30},
         stage2_segmentation_params=unified_segmentation_params,
@@ -249,6 +252,8 @@ def load_realtime_config(config_path: str, pipeline_config_path: str = "config/p
     _must_be_positive("background.bgi_max_age_s", parsed.bgi_max_age_s)
     if parsed.bgi_max_age_s <= parsed.bgi_min_age_s:
         raise ValueError("realtime_mode.background.bgi_max_age_s must be > bgi_min_age_s")
+    if parsed.stage1_reacquire_detection_threshold < 1:
+        raise ValueError("realtime_mode.stage1.reacquire_detection_threshold must be >= 1")
     _must_be_nonnegative("stage2.min_focus_score", parsed.min_focus_score)
     _must_be_nonnegative("stage2.min_particle_area", parsed.min_particle_area)
     if parsed.max_stage2_candidates_per_frame < 1:

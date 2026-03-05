@@ -11,7 +11,7 @@ import pandas as pd
 
 from src.core.image_io_operations import FlatFieldCorrectionAssets, load_flat_field_assets, load_image, save_image
 
-from .acquisition import FramePacket, build_focus_cycle_pattern, build_frame_source
+from .acquisition import AcquisitionControl, FramePacket, build_focus_cycle_pattern, build_frame_source
 from .config import RealtimeConfig
 from .monitoring import RuntimeMonitor
 from .persistence import save_accepted_crops
@@ -23,7 +23,12 @@ from .stage3_rt import run_stage3_realtime
 logger = logging.getLogger(__name__)
 
 
-def _start_acquisition_thread(config: RealtimeConfig, out_queue: queue.Queue[Optional[FramePacket]], monitor: RuntimeMonitor) -> threading.Thread:
+def _start_acquisition_thread(
+    config: RealtimeConfig,
+    out_queue: queue.Queue[Optional[FramePacket]],
+    monitor: RuntimeMonitor,
+    acquisition_control: AcquisitionControl,
+) -> threading.Thread:
     source = build_frame_source(
         config.acquisition_source,
         input_dir=config.input_dir,
@@ -44,6 +49,7 @@ def _start_acquisition_thread(config: RealtimeConfig, out_queue: queue.Queue[Opt
         large_jump_threshold_dpt=config.large_jump_threshold_dpt,
         large_jump_settle_sec=config.large_jump_settle_sec,
         lens_controller_port=config.lens_controller_port,
+        acquisition_control=acquisition_control,
     )
 
     def _run() -> None:
@@ -137,12 +143,14 @@ def run_realtime_session(config: RealtimeConfig, plate: int, well: int) -> str:
     accepted_rows_count = 0
     last_focus_reject_warn_frame = -10**9
     last_boundary_reject_warn_frame = -10**9
+    stage1_reacquire_threshold = config.stage1_reacquire_detection_threshold
 
     bg_library_paths: dict[str, str] = {}
     bg_library_ready = False
 
     frame_queue: queue.Queue[Optional[FramePacket]] = queue.Queue(maxsize=config.queue_size)
-    acq_thread = _start_acquisition_thread(config, frame_queue, monitor)
+    acquisition_control = AcquisitionControl()
+    acq_thread = _start_acquisition_thread(config, frame_queue, monitor, acquisition_control)
 
     try:
         while True:
@@ -208,7 +216,20 @@ def run_realtime_session(config: RealtimeConfig, plate: int, well: int) -> str:
                 config=config.stage1_config,
                 ffc_assets=ffc_assets,
             )
-            monitor.counters.stage1_detections += len(s1.detections_df)
+            stage1_detection_count = len(s1.detections_df)
+            logger.info("Frame %d: Stage-1 detections=%d", packet.frame_index, stage1_detection_count)
+            monitor.counters.stage1_detections += stage1_detection_count
+            if stage1_detection_count > stage1_reacquire_threshold:
+                acquisition_control.request_repeat_same_diopter_once()
+                logger.warning(
+                    "Frame %d skipped: Stage-1 detections=%d exceeds reacquire_detection_threshold=%d. Reacquiring next frame at same diopter.",
+                    packet.frame_index,
+                    stage1_detection_count,
+                    stage1_reacquire_threshold,
+                )
+                monitor.counters.frames_processed += 1
+                monitor.maybe_log()
+                continue
 
             s2 = run_stage2_realtime(packet.image_gray, s1.detections_df, packet.frame_index, {
                 "crop_config": config.stage2_crop_config,
@@ -232,6 +253,17 @@ def run_realtime_session(config: RealtimeConfig, plate: int, well: int) -> str:
             )
             monitor.counters.stage3_rejected_artifact += s3.rejected_artifact_count
             monitor.counters.stage3_rejected_boundary += s3.rejected_boundary_count
+            logger.info(
+                "Frame %d filter summary: stage1_detections=%d stage2_candidates=%d filtered_focus=%d filtered_area=%d filtered_artifact=%d filtered_boundary=%d accepted=%d",
+                packet.frame_index,
+                stage1_detection_count,
+                s2.pre_threshold_count,
+                s2.rejected_focus_count,
+                s2.rejected_area_count,
+                s3.rejected_artifact_count,
+                s3.rejected_boundary_count,
+                len(s3.accepted_df),
+            )
 
             if (
                 s2.pre_threshold_count > 0

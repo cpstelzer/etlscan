@@ -101,6 +101,7 @@ realtime_mode:
   stage1:
     foreground_diff_threshold: 10
     max_foreground_fraction: 0.08
+    reacquire_detection_threshold: 20
     particle_analysis_subtracted_config: {}
     global_threshold_config: {}
     unsubtracted_analysis_config: {}
