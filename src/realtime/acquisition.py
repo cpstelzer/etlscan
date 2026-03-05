@@ -306,17 +306,18 @@ class CameraFrameSource(FrameSource):
                     current_diopter = float(focus_cycle[focus_step_idx % len(focus_cycle)])
                     current_fd_mm = (current_diopter - self._start_dpt) * self._scan_ratio
 
-                    diopter_change = current_diopter - previous_diopter
-                    settle_time_this_frame = (
-                        self._large_jump_settle_sec
-                        if diopter_change < self._large_jump_threshold_dpt
-                        else self._lens_settle_time_sec
-                    )
-                    lens.StaticInput.SetAsInput()
-                    lens.StaticInput.SetFocalPower(current_diopter)
-                    if settle_time_this_frame > 0:
-                        time.sleep(settle_time_this_frame)
-                    previous_diopter = current_diopter
+                    if not repeat_same_diopter:
+                        diopter_change = current_diopter - previous_diopter
+                        settle_time_this_frame = (
+                            self._large_jump_settle_sec
+                            if diopter_change < self._large_jump_threshold_dpt
+                            else self._lens_settle_time_sec
+                        )
+                        lens.StaticInput.SetAsInput()
+                        lens.StaticInput.SetFocalPower(current_diopter)
+                        if settle_time_this_frame > 0:
+                            time.sleep(settle_time_this_frame)
+                        previous_diopter = current_diopter
 
                 try:
                     grab_result = camera.RetrieveResult(retrieve_timeout, pylon.TimeoutHandling_ThrowException)

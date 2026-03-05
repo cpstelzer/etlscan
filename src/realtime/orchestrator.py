@@ -144,7 +144,6 @@ def run_realtime_session(config: RealtimeConfig, plate: int, well: int) -> str:
     last_focus_reject_warn_frame = -10**9
     last_boundary_reject_warn_frame = -10**9
     stage1_reacquire_threshold = config.stage1_reacquire_detection_threshold
-    pending_reacquire_diopter: Optional[float] = None
 
     bg_library_paths: dict[str, str] = {}
     bg_library_ready = False
@@ -172,23 +171,6 @@ def run_realtime_session(config: RealtimeConfig, plate: int, well: int) -> str:
                 raise RuntimeError(
                     "ETL telemetry missing for camera frame. Fixed bg_images subtraction requires per-frame diopter values."
                 )
-
-            if pending_reacquire_diopter is not None:
-                if abs(float(packet.diopter) - pending_reacquire_diopter) > 1e-6:
-                    logger.warning(
-                        "Frame %d skipped while waiting for same-diopter reacquire: got %.3f, expected %.3f.",
-                        packet.frame_index,
-                        float(packet.diopter),
-                        pending_reacquire_diopter,
-                    )
-                    monitor.maybe_log()
-                    continue
-                logger.info(
-                    "Frame %d confirmed same-diopter reacquire at %.3f.",
-                    packet.frame_index,
-                    float(packet.diopter),
-                )
-                pending_reacquire_diopter = None
 
             key = f"dpt_{packet.diopter:.3f}"
             if key not in bg_library_paths:
@@ -239,13 +221,11 @@ def run_realtime_session(config: RealtimeConfig, plate: int, well: int) -> str:
             monitor.counters.stage1_detections += stage1_detection_count
             if stage1_detection_count > stage1_reacquire_threshold:
                 acquisition_control.request_repeat_same_diopter_once()
-                pending_reacquire_diopter = float(packet.diopter)
                 logger.warning(
-                    "Frame %d skipped: Stage-1 detections=%d exceeds reacquire_detection_threshold=%d. Reacquiring next frame at same diopter %.3f.",
+                    "Frame %d skipped: Stage-1 detections=%d exceeds reacquire_detection_threshold=%d. Reacquiring next frame at same diopter.",
                     packet.frame_index,
                     stage1_detection_count,
                     stage1_reacquire_threshold,
-                    pending_reacquire_diopter,
                 )
                 monitor.counters.frames_processed += 1
                 monitor.maybe_log()
