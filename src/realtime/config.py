@@ -25,7 +25,7 @@ class RealtimeConfig:
     bgi_max_age_s: float = 4.0
     stage1_reacquire_detection_threshold: int = 20
     stage1_config: Dict[str, Any] = field(default_factory=dict)
-    stage2_crop_config: Dict[str, Any] = field(default_factory=lambda: {"mode": "rotational_rectangle", "rotational_padding": 10})
+    stage2_crop_config: Dict[str, Any] = field(default_factory=lambda: {"mode": "rotational_rectangle", "adaptive_padding_factor": 0.2})
     stage2_segmentation_params: Dict[str, Any] = field(default_factory=dict)
     stage2_quality_features_config: Dict[str, Any] = field(default_factory=dict)
     min_focus_score: float = 0.0
@@ -109,8 +109,6 @@ def _resolve_stage1_config(pipeline_cfg: Dict[str, Any], rt: Dict[str, Any]) -> 
         )
 
     unsub_cfg = stage1_root.get("unsubtracted_particle_analysis", {}) or {}
-    if "local_otsu_roi_size" in unsub_cfg:
-        stage1_cfg["local_otsu_roi_size"] = int(unsub_cfg["local_otsu_roi_size"])
 
     # Reuse offline Stage-1 parameter namespaces directly for realtime.
     stage1_cfg["system_cfg"] = system_cfg
@@ -144,8 +142,6 @@ def _reject_duplicated_realtime_analysis_keys(rt: Dict[str, Any]) -> None:
         forbidden.append("realtime_mode.stage1.enable_brightness_adjustment")
     if "config_black_plate_well" in stage1:
         forbidden.append("realtime_mode.stage1.config_black_plate_well")
-    if "local_otsu_roi_size" in stage1:
-        forbidden.append("realtime_mode.stage1.local_otsu_roi_size")
     if "crop_config" in stage2:
         forbidden.append("realtime_mode.stage2.crop_config")
     if "min_focus_score" in stage2:
@@ -209,7 +205,7 @@ def load_realtime_config(config_path: str, pipeline_config_path: str = "config/p
         bgi_max_age_s=float(background.get("bgi_max_age_s", 4.0)),
         stage1_reacquire_detection_threshold=int(stage1.get("reacquire_detection_threshold", 20)),
         stage1_config=stage1_cfg,
-        stage2_crop_config=stage2_cropping or {"mode": "rotational_rectangle", "rotational_padding": 30},
+        stage2_crop_config=stage2_cropping or {"mode": "rotational_rectangle", "adaptive_padding_factor": 0.2},
         stage2_segmentation_params=unified_segmentation_params,
         stage2_quality_features_config=stage2_offline.get("quality_features", {}) or {},
         min_focus_score=float(stage2_focus_cfg.get("sharpness_min_threshold", 80.0)),

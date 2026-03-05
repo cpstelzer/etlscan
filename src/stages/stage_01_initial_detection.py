@@ -144,7 +144,7 @@ def analyze_subtracted_image(
 def refine_with_local_otsu(
     unsub_prepared_uint8: np.ndarray,
     candidate_particles: Union[List[Dict[str, Any]], pd.DataFrame],
-    roi_crop_size: int,
+    adaptive_padding_factor: float,
     analysis_config: Dict[str, Any],
     global_threshold_config: Dict[str, Any],
     source_illumination: str
@@ -157,7 +157,7 @@ def refine_with_local_otsu(
     particles_unsubtracted_list_dicts, composite_binary_mask_full_image, roi_debug = _analyze_unsubtracted_locally(
         unsub_prepared_uint8,
         candidate_records,
-        roi_crop_size,
+        adaptive_padding_factor,
         analysis_config,
         global_threshold_config,
         source_illumination
@@ -223,11 +223,12 @@ def process_frame_pair(
         config.get('sample_id', 'UNKNOWN_SAMPLE'),
         fg_row.get('filename', 'UNKNOWN_FILE')
     )
+    unsubtracted_cfg = config.get('unsubtracted_analysis_config', {})
     unsub_analysis = refine_with_local_otsu(
         prep_data["unsub_prepared"],
         sub_analysis["particles_df"],
-        config.get('local_otsu_roi_size', 150),
-        config.get('unsubtracted_analysis_config', {}),
+        float(unsubtracted_cfg.get('adaptive_padding_factor', 0.2)),
+        unsubtracted_cfg,
         config.get('global_threshold_config', {}),
         config.get('source_image_illumination', 'darkfield')
     )
@@ -406,7 +407,7 @@ def _analyze_single_subtracted_image_global_thresh( # Unchanged
 def _analyze_unsubtracted_locally( # Unchanged
     full_unsub_prepped_uint8: np.ndarray,
     candidate_particles_subtracted: List[Dict[str, Any]],
-    roi_crop_size: int,
+    adaptive_padding_factor: float,
     analysis_config: Dict[str, Any],
     global_threshold_config: Dict[str, Any],
     source_illumination: str
@@ -415,11 +416,17 @@ def _analyze_unsubtracted_locally( # Unchanged
     if full_unsub_prepped_uint8 is None: return [], None, (None, None, None)
     all_local_particle_data = []; composite_binary_mask_full_image = np.zeros_like(full_unsub_prepped_uint8, dtype=np.uint8)
     first_roi_img_2d_for_display, first_roi_hist_data_ravel, first_roi_effective_thresh_val_float = None, None, None
-    min_area_unsub = analysis_config.get('min_particle_area', 50); h_full, w_full = full_unsub_prepped_uint8.shape; half_crop = roi_crop_size // 2
-    logger.debug(f"Local Unsub: Processing {len(candidate_particles_subtracted)} candidate ROIs with crop_size {roi_crop_size}")
+    min_area_unsub = analysis_config.get('min_particle_area', 50); h_full, w_full = full_unsub_prepped_uint8.shape
+    logger.debug(f"Local Unsub: Processing {len(candidate_particles_subtracted)} candidate ROIs with adaptive padding factor {adaptive_padding_factor}")
     for i, cand_p_sub in enumerate(candidate_particles_subtracted):
         if 'X' not in cand_p_sub or 'Y' not in cand_p_sub: continue
-        cx, cy = int(cand_p_sub['X']), int(cand_p_sub['Y']); x1, y1 = max(0, cx - half_crop), max(0, cy - half_crop); x2, y2 = min(w_full, cx + half_crop), min(h_full, cy + half_crop)
+        cx, cy = int(cand_p_sub['X']), int(cand_p_sub['Y'])
+        candidate_w = max(float(cand_p_sub.get('bounding_w', 1.0)), 1.0)
+        candidate_h = max(float(cand_p_sub.get('bounding_h', 1.0)), 1.0)
+        pad_x = int(np.ceil(candidate_w * adaptive_padding_factor))
+        pad_y = int(np.ceil(candidate_h * adaptive_padding_factor))
+        adaptive_half_crop = int(np.ceil(max(candidate_w + 2 * pad_x, candidate_h + 2 * pad_y) / 2.0))
+        x1, y1 = max(0, cx - adaptive_half_crop), max(0, cy - adaptive_half_crop); x2, y2 = min(w_full, cx + adaptive_half_crop), min(h_full, cy + adaptive_half_crop)
         roi_img_uint8 = full_unsub_prepped_uint8[y1:y2, x1:x2]
         if roi_img_uint8.size == 0 or roi_img_uint8.shape[0] < 3 or roi_img_uint8.shape[1] < 3: continue
         roi_float_original_2d = skimage.util.img_as_float(roi_img_uint8); roi_float_for_segment_2d = roi_float_original_2d.copy()
@@ -652,7 +659,6 @@ def run_stage_01_initial_detection(
     
     particle_analysis_subtracted_config = config_s1.get('particle_analysis', {})
     unsubtracted_analysis_config = config_s1.get('unsubtracted_particle_analysis', {})
-    local_otsu_roi_size = unsubtracted_analysis_config.get('local_otsu_roi_size', 150)
     particle_comparison_config = config_s1.get('particle_comparison', {})
     bg_offset_mode = config_s1.get('BG_frame_offset_mode', 'fixed')
     bg_offset_default = config_s1.get('bg_offset_val', 110)
@@ -689,7 +695,6 @@ def run_stage_01_initial_detection(
         "source_image_illumination": source_image_illumination,
         "particle_analysis_subtracted_config": particle_analysis_subtracted_config,
         "global_threshold_config": global_threshold_config,
-        "local_otsu_roi_size": local_otsu_roi_size,
         "unsubtracted_analysis_config": unsubtracted_analysis_config,
         "particle_comparison_config": particle_comparison_config,
         "sample_id": sample_id,

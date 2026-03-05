@@ -102,7 +102,7 @@ def run_stage1_realtime(
     refined = refine_with_local_otsu(
         unsub_prepared_uint8=prep["unsub_prepared"],
         candidate_particles=sub_analysis["particles_df"],
-        roi_crop_size=int(config.get("local_otsu_roi_size", 150)),
+        adaptive_padding_factor=float(local_cfg.get("adaptive_padding_factor", 0.2)),
         analysis_config=local_cfg,
         global_threshold_config=global_cfg,
         source_illumination=str(config.get("source_image_illumination", "darkfield")).strip().lower(),
