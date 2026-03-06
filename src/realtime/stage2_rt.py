@@ -50,7 +50,7 @@ def run_stage2_realtime(
             len(s1_df),
             max_candidates,
         )
-    crop_cfg = normalized_crop_config(stage2_cfg.get("crop_config", {"mode": "rotational_rectangle", "rotational_padding": 10}))
+    crop_cfg = normalized_crop_config(stage2_cfg.get("crop_config", {"mode": "rotational_rectangle", "adaptive_padding_factor": 0.2}))
     illumination_mode = str(stage2_cfg.get("source_image_illumination", "darkfield")).strip().lower()
     boundary_threshold_params = {
         "thresholding_mode": str(stage2_cfg.get("segmentation_params", {}).get("thresholding_mode", "otsu")),

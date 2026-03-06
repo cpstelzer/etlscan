@@ -65,7 +65,7 @@ def run_stage_02_characterization(
     cropping_config = s2_config.get('cropping', {})
     if not cropping_config:
         logger.warning("Cropping configuration not found in 'stage_02_characterization'. Using defaults.")
-        cropping_config = {'mode': 'rotational_rectangle', 'rotational_padding': 10}
+        cropping_config = {'mode': 'rotational_rectangle', 'adaptive_padding_factor': 0.2}
 
     try:
         normalized_cropping = normalized_crop_config(cropping_config)

@@ -6,6 +6,7 @@ import queue
 import threading
 import time
 from typing import Optional
+from datetime import datetime, timezone
 
 import pandas as pd
 
@@ -91,6 +92,22 @@ def _bg_filename(diopter: float) -> str:
     return f"bg_dpt{diopter:.3f}.png".replace("-", "m").replace("+", "p")
 
 
+FRAME_METRICS_COLUMNS = [
+    "frame_no",
+    "BG_diopters",
+    "FG_diopters",
+    "timestamp",
+    "stage1_detections",
+    "stage2_candidates",
+    "filtered_focus",
+    "filtered_area",
+    "filtered_artifact",
+    "filtered_boundary",
+    "accepted",
+    "processing_latency_ms",
+]
+
+
 def run_realtime_session(config: RealtimeConfig, plate: int, well: int) -> str:
     session = create_session(config, plate=plate, well=well)
     logger.info("Realtime session started: %s", session.output_dir)
@@ -141,6 +158,8 @@ def run_realtime_session(config: RealtimeConfig, plate: int, well: int) -> str:
     accepted_csv_path = os.path.join(session.output_dir, "accepted_particles.csv")
     accepted_csv_header_written = False
     accepted_rows_count = 0
+    frame_metrics_csv_path = os.path.join(session.output_dir, "frame_metrics.csv")
+    frame_metrics_header_written = False
     last_focus_reject_warn_frame = -10**9
     last_boundary_reject_warn_frame = -10**9
     stage1_reacquire_threshold = config.stage1_reacquire_detection_threshold
@@ -195,6 +214,7 @@ def run_realtime_session(config: RealtimeConfig, plate: int, well: int) -> str:
                 )
 
             bg_path_for_frame = bg_library_paths[key]
+            bg_match_ts = datetime.now(timezone.utc).isoformat()
             logger.info(
                 "BG match: frame=%d fg_diopter=%.3f bg_image=%s",
                 packet.frame_index,
@@ -227,6 +247,28 @@ def run_realtime_session(config: RealtimeConfig, plate: int, well: int) -> str:
                     stage1_detection_count,
                     stage1_reacquire_threshold,
                 )
+                elapsed_ms = (time.monotonic() - frame_start) * 1000.0
+                frame_row = {
+                    "frame_no": packet.frame_index,
+                    "BG_diopters": float(packet.diopter),
+                    "FG_diopters": float(packet.diopter),
+                    "timestamp": bg_match_ts,
+                    "stage1_detections": stage1_detection_count,
+                    "stage2_candidates": float("nan"),
+                    "filtered_focus": float("nan"),
+                    "filtered_area": float("nan"),
+                    "filtered_artifact": float("nan"),
+                    "filtered_boundary": float("nan"),
+                    "accepted": float("nan"),
+                    "processing_latency_ms": elapsed_ms,
+                }
+                pd.DataFrame([frame_row], columns=FRAME_METRICS_COLUMNS).to_csv(
+                    frame_metrics_csv_path,
+                    mode="a",
+                    header=not frame_metrics_header_written,
+                    index=False,
+                )
+                frame_metrics_header_written = True
                 monitor.counters.frames_processed += 1
                 monitor.maybe_log()
                 continue
@@ -320,6 +362,27 @@ def run_realtime_session(config: RealtimeConfig, plate: int, well: int) -> str:
             monitor.maybe_log()
 
             elapsed_ms = (time.monotonic() - frame_start) * 1000.0
+            frame_row = {
+                "frame_no": packet.frame_index,
+                "BG_diopters": float(packet.diopter),
+                "FG_diopters": float(packet.diopter),
+                "timestamp": bg_match_ts,
+                "stage1_detections": stage1_detection_count,
+                "stage2_candidates": s2.pre_threshold_count,
+                "filtered_focus": s2.rejected_focus_count,
+                "filtered_area": s2.rejected_area_count,
+                "filtered_artifact": s3.rejected_artifact_count,
+                "filtered_boundary": s3.rejected_boundary_count,
+                "accepted": len(s3.accepted_df),
+                "processing_latency_ms": elapsed_ms,
+            }
+            pd.DataFrame([frame_row], columns=FRAME_METRICS_COLUMNS).to_csv(
+                frame_metrics_csv_path,
+                mode="a",
+                header=not frame_metrics_header_written,
+                index=False,
+            )
+            frame_metrics_header_written = True
             if elapsed_ms > config.max_processing_latency_ms:
                 logger.warning("Frame %d processing latency %.2fms > budget %dms", packet.frame_index, elapsed_ms, config.max_processing_latency_ms)
     except KeyboardInterrupt:
@@ -331,6 +394,9 @@ def run_realtime_session(config: RealtimeConfig, plate: int, well: int) -> str:
     if not accepted_csv_header_written:
         pd.DataFrame().to_csv(accepted_csv_path, index=False)
     logger.info("Accepted particle dataframe written to: %s (rows=%d)", accepted_csv_path, accepted_rows_count)
+    if not frame_metrics_header_written:
+        pd.DataFrame(columns=FRAME_METRICS_COLUMNS).to_csv(frame_metrics_csv_path, index=False)
+    logger.info("Frame metrics dataframe written to: %s", frame_metrics_csv_path)
 
     logger.info("Realtime session finished. output_dir=%s", session.output_dir)
     return session.output_dir
