@@ -199,7 +199,13 @@ def load_image(image_path: str, mode: str = 'color') -> Optional[np.ndarray]:
             return _load_image_with_pil(image_path, mode)
         return None
 
-def save_image(image_array: np.ndarray, output_path: str, filename: str) -> Optional[str]:
+def save_image(
+    image_array: np.ndarray,
+    output_path: str,
+    filename: str,
+    *,
+    jpeg_quality: Optional[int] = None,
+) -> Optional[str]:
     """
     Saves a NumPy image array to a file.
 
@@ -207,6 +213,7 @@ def save_image(image_array: np.ndarray, output_path: str, filename: str) -> Opti
         image_array (np.ndarray): The image to save.
         output_path (str): The directory where the image should be saved.
         filename (str): The name of the image file (e.g., "image.png").
+        jpeg_quality (Optional[int]): JPEG quality [0, 100] when saving .jpg/.jpeg files.
 
     Returns:
         The full path to the saved image file, or None if saving failed.
@@ -220,7 +227,12 @@ def save_image(image_array: np.ndarray, output_path: str, filename: str) -> Opti
 
     try:
         if cv2 is not None:
-            success = cv2.imwrite(full_image_path, image_array)
+            ext = os.path.splitext(filename)[1].lower()
+            write_params = []
+            if jpeg_quality is not None and ext in {".jpg", ".jpeg"}:
+                clamped_quality = int(max(0, min(100, jpeg_quality)))
+                write_params = [int(cv2.IMWRITE_JPEG_QUALITY), clamped_quality]
+            success = cv2.imwrite(full_image_path, image_array, write_params)
             if not success:
                 logger.error(f"Failed to save image (cv2.imwrite returned False): {full_image_path}")
                 return None
@@ -231,7 +243,12 @@ def save_image(image_array: np.ndarray, output_path: str, filename: str) -> Opti
         if image_array.ndim == 3 and image_array.shape[2] == 3:
             pil_img_array = image_array[:, :, ::-1]  # Convert BGR -> RGB
         pil_img = Image.fromarray(pil_img_array)
-        pil_img.save(full_image_path)
+        ext = os.path.splitext(filename)[1].lower()
+        if jpeg_quality is not None and ext in {".jpg", ".jpeg"}:
+            clamped_quality = int(max(0, min(100, jpeg_quality)))
+            pil_img.save(full_image_path, quality=clamped_quality)
+        else:
+            pil_img.save(full_image_path)
         logger.debug(f"Image saved successfully to: {full_image_path} via PIL fallback.")
         return full_image_path
     except Exception as e:

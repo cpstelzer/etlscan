@@ -8,6 +8,7 @@ import time
 from typing import Optional
 from datetime import datetime, timezone
 
+import numpy as np
 import pandas as pd
 
 from src.core.image_io_operations import FlatFieldCorrectionAssets, load_flat_field_assets, load_image, save_image
@@ -92,6 +93,41 @@ def _bg_filename(diopter: float) -> str:
     return f"bg_dpt{diopter:.3f}.png".replace("-", "m").replace("+", "p")
 
 
+def _save_subtracted_frame(image_array, output_dir: str, frame_index: int, quality: int = 80) -> Optional[str]:
+    if image_array is None:
+        return None
+    return save_image(
+        image_array,
+        output_dir,
+        f"subtracted_frame_{frame_index:06d}.jpg",
+        jpeg_quality=quality,
+    )
+
+
+def _center_circle_intensity_peak(image_array: np.ndarray, diameter_px: int = 2000) -> float:
+    if image_array is None or image_array.size == 0:
+        return float("nan")
+
+    if image_array.ndim != 2:
+        logger.warning("Expected grayscale image for intensity peak calculation, got ndim=%d", image_array.ndim)
+        return float("nan")
+
+    height, width = image_array.shape
+    cy = (height - 1) / 2.0
+    cx = (width - 1) / 2.0
+    radius = diameter_px / 2.0
+
+    yy, xx = np.ogrid[:height, :width]
+    mask = (yy - cy) ** 2 + (xx - cx) ** 2 <= radius ** 2
+    selected = image_array[mask]
+    if selected.size == 0:
+        return float("nan")
+
+    selected_uint8 = np.clip(selected, 0, 255).astype(np.uint8, copy=False)
+    hist = np.bincount(selected_uint8, minlength=256)
+    return float(int(np.argmax(hist)))
+
+
 FRAME_METRICS_COLUMNS = [
     "frame_no",
     "BG_diopters",
@@ -104,6 +140,8 @@ FRAME_METRICS_COLUMNS = [
     "filtered_artifact",
     "filtered_boundary",
     "accepted",
+    "fg_intensity_peak",
+    "bg_intensity_peak",
     "processing_latency_ms",
 ]
 
@@ -160,6 +198,10 @@ def run_realtime_session(config: RealtimeConfig, plate: int, well: int) -> str:
     accepted_rows_count = 0
     frame_metrics_csv_path = os.path.join(session.output_dir, "frame_metrics.csv")
     frame_metrics_header_written = False
+    subtracted_frames_normal_dir = os.path.join(session.output_dir, "subtracted_frames_normal")
+    subtracted_frames_error_dir = os.path.join(session.output_dir, "subtracted_frames_error")
+    os.makedirs(subtracted_frames_normal_dir, exist_ok=True)
+    os.makedirs(subtracted_frames_error_dir, exist_ok=True)
     last_focus_reject_warn_frame = -10**9
     last_boundary_reject_warn_frame = -10**9
     stage1_reacquire_threshold = config.stage1_reacquire_detection_threshold
@@ -228,6 +270,9 @@ def run_realtime_session(config: RealtimeConfig, plate: int, well: int) -> str:
                 monitor.maybe_log()
                 continue
 
+            fg_intensity_peak = _center_circle_intensity_peak(packet.image_gray, diameter_px=2000)
+            bg_intensity_peak = _center_circle_intensity_peak(bg_img, diameter_px=2000)
+
             s1 = run_stage1_realtime(
                 packet.image_gray,
                 bg_img,
@@ -240,6 +285,7 @@ def run_realtime_session(config: RealtimeConfig, plate: int, well: int) -> str:
             logger.info("Frame %d: Stage-1 detections=%d", packet.frame_index, stage1_detection_count)
             monitor.counters.stage1_detections += stage1_detection_count
             if stage1_detection_count > stage1_reacquire_threshold:
+                _save_subtracted_frame(s1.subtracted_img_uint8, subtracted_frames_error_dir, packet.frame_index, quality=80)
                 acquisition_control.request_repeat_same_diopter_once()
                 logger.warning(
                     "Frame %d skipped: Stage-1 detections=%d exceeds reacquire_detection_threshold=%d. Reacquiring next frame at same diopter.",
@@ -260,6 +306,8 @@ def run_realtime_session(config: RealtimeConfig, plate: int, well: int) -> str:
                     "filtered_artifact": float("nan"),
                     "filtered_boundary": float("nan"),
                     "accepted": float("nan"),
+                    "fg_intensity_peak": fg_intensity_peak,
+                    "bg_intensity_peak": bg_intensity_peak,
                     "processing_latency_ms": elapsed_ms,
                 }
                 pd.DataFrame([frame_row], columns=FRAME_METRICS_COLUMNS).to_csv(
@@ -272,6 +320,8 @@ def run_realtime_session(config: RealtimeConfig, plate: int, well: int) -> str:
                 monitor.counters.frames_processed += 1
                 monitor.maybe_log()
                 continue
+
+            _save_subtracted_frame(s1.subtracted_img_uint8, subtracted_frames_normal_dir, packet.frame_index, quality=80)
 
             s2 = run_stage2_realtime(packet.image_gray, s1.detections_df, packet.frame_index, {
                 "crop_config": config.stage2_crop_config,
@@ -374,6 +424,8 @@ def run_realtime_session(config: RealtimeConfig, plate: int, well: int) -> str:
                 "filtered_artifact": s3.rejected_artifact_count,
                 "filtered_boundary": s3.rejected_boundary_count,
                 "accepted": len(s3.accepted_df),
+                "fg_intensity_peak": fg_intensity_peak,
+                "bg_intensity_peak": bg_intensity_peak,
                 "processing_latency_ms": elapsed_ms,
             }
             pd.DataFrame([frame_row], columns=FRAME_METRICS_COLUMNS).to_csv(

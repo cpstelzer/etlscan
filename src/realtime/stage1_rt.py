@@ -22,6 +22,7 @@ logger = logging.getLogger(__name__)
 @dataclass
 class Stage1Result:
     detections_df: pd.DataFrame
+    subtracted_img_uint8: Optional[np.ndarray] = None
 
 
 def _as_uint8(image_float01: np.ndarray) -> np.ndarray:
@@ -70,7 +71,7 @@ def run_stage1_realtime(
     subtracted_img_uint8 = subtract_images(prep["fg_for_sub"], prep["bg_for_sub"])
 
     if subtracted_img_uint8 is None:
-        return Stage1Result(detections_df=pd.DataFrame())
+        return Stage1Result(detections_df=pd.DataFrame(), subtracted_img_uint8=None)
 
     foreground_diff_threshold = int(config.get("foreground_diff_threshold", 10))
     max_foreground_fraction = float(config.get("max_foreground_fraction", 0.08))
@@ -85,7 +86,7 @@ def run_stage1_realtime(
                 foreground_fraction,
                 max_foreground_fraction,
             )
-        return Stage1Result(detections_df=pd.DataFrame())
+        return Stage1Result(detections_df=pd.DataFrame(), subtracted_img_uint8=subtracted_img_uint8)
 
     sub_cfg = config.get("particle_analysis_subtracted_config", {})
     global_cfg = config.get("global_threshold_config", {})
@@ -110,10 +111,10 @@ def run_stage1_realtime(
 
     detections = refined["particles_df"].copy()
     if detections.empty:
-        return Stage1Result(detections_df=detections)
+        return Stage1Result(detections_df=detections, subtracted_img_uint8=subtracted_img_uint8)
 
     detections["frame"] = frame_index
     detections["timestamp_s"] = timestamp_s
     if "track_id" not in detections.columns:
         detections["track_id"] = [f"rt_{frame_index}_{i}" for i in range(len(detections))]
-    return Stage1Result(detections_df=detections)
+    return Stage1Result(detections_df=detections, subtracted_img_uint8=subtracted_img_uint8)
