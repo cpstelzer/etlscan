@@ -159,34 +159,3 @@ def segment_main_body_from_image_float(
     filled_mask_uint8 = filled_body_mask_bool_main_only.astype(np.uint8) * 255
     
     return raw_mask_uint8, filled_mask_uint8, main_props_object
-
-if __name__ == '__main__':
-    logging.basicConfig(level=logging.DEBUG)
-    # Test generate_binary_mask_from_float_image
-    test_img_float_for_thresh = np.array([[0.1, 0.2, 0.6], [0.3, 0.7, 0.4], [0.8, 0.5, 0.9]], dtype=float)
-    otsu_params = {'thresholding_mode': 'otsu', 'otsu_threshold_multiplier': 1.0}
-    fixed_params = {'thresholding_mode': 'fixed', 'fixed_threshold_value': int(0.5*255)} # 127
-    
-    logger.info("--- Testing generate_binary_mask_from_float_image (Otsu) ---")
-    mask_otsu = generate_binary_mask_from_float_image(test_img_float_for_thresh.copy(), otsu_params)
-    if mask_otsu is not None: print(mask_otsu.astype(int))
-
-    logger.info("--- Testing generate_binary_mask_from_float_image (Fixed) ---")
-    mask_fixed = generate_binary_mask_from_float_image(test_img_float_for_thresh.copy(), fixed_params)
-    if mask_fixed is not None: print(mask_fixed.astype(int))
-
-    # Test segment_main_body_from_image_float (already has tests, ensure they pass)
-    test_image_orig_float = np.ones((100, 100), dtype=float) * 0.8 
-    rr, cc = skimage.draw.ellipse(50, 50, 20, 30, rotation=np.deg2rad(15))
-    test_image_orig_float[rr, cc] = 0.2 
-    test_image_orig_float[40:45, 40:45] = 0.1 
-
-    test_params_collimated_unsharp = {
-        'source_image_illumination_type': 'collimated', 'thresholding_mode': 'otsu',
-        'otsu_threshold_multiplier': 0.5, 'enable_unsharp_masking': True,
-        'unsharp_mask_sigma': 1.0, 'unsharp_mask_amount': 1.5,
-        'min_noise_size': 10, 'closing_selem_size': 2,
-    }
-    logger.info("--- Testing segment_main_body (collimated, unsharp, via helper) ---")
-    raw_m, filled_m, props = segment_main_body_from_image_float(test_image_orig_float.copy(), test_params_collimated_unsharp)
-    if raw_m is not None: logger.info(f"SegmentMainBody (collimated) Raw mask sum: {np.sum(raw_m > 0)}")

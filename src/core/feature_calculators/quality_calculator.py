@@ -1,6 +1,5 @@
 # src/core/feature_calculators/quality_calculator.py
 import numpy as np
-import pandas as pd
 import logging
 from typing import Dict, Any, Optional
 

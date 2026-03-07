@@ -7,17 +7,15 @@ import numpy as np
 import logging
 from typing import Union, Optional, List, Dict, Any, Tuple
 from sklearn.neighbors import BallTree
-import shutil
 import skimage.util
 import skimage.filters
 import trackpy as tp
 import matplotlib.pyplot as plt
 
 from src.utils import (
-    get_config, load_dataframe_from_csv, save_dataframe_to_csv,
-    parse_date_plate_well, extract_frame_from_filename
+    get_config, save_dataframe_to_csv
 )
-from src.utils.common_exceptions import ProcessingError, ConfigError, DataValidationError
+from src.utils.common_exceptions import ConfigError, DataValidationError
 from src.core.image_io_operations import (
     load_image,
     load_flat_field_assets,
@@ -28,7 +26,6 @@ from src.core.masking_operations import mask_well_area, apply_mask
 from src.core.region_props_calculator import find_contours, calculate_contour_measurements, filter_contours_by_area
 from src.core.segmentation import generate_binary_mask_from_float_image
 from src.core.well_analysis import (
-    create_well_mask_black_plate,
     match_well_brightness
 )
 

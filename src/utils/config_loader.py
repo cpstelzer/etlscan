@@ -126,39 +126,3 @@ def get_unified_segmentation_params(config: Optional[Dict[str, Any]] = None) -> 
     # ... add defaults for other egg params if desired for extreme robustness
 
     return unified_params
-
-
-if __name__ == "__main__":
-    try:
-        config_file_path = os.path.join(os.path.dirname(__file__), '..', '..', 'config', 'pipeline_config.yml')
-        if not os.path.exists(config_file_path): 
-            config_file_path = os.path.join('..', 'config', 'pipeline_config.yml') 
-        if not os.path.exists(config_file_path):
-             config_file_path = "config/pipeline_config.yml"
-
-        main_config = load_config(config_file_path) 
-        print("Config loaded successfully.")
-        print(f"Log level: {main_config.get('logging', {}).get('level')}")
-        
-        rf_max_depth = main_config.get('stage_03_ml_classification', {})\
-                               .get('training_params', {})\
-                               .get('rf_param_grid', {})\
-                               .get('max_depth')
-        print(f"RF max_depth options: {rf_max_depth}")
-
-        print("\n--- Testing get_unified_segmentation_params (with new config structure) ---")
-        seg_params = get_unified_segmentation_params(main_config)
-        print("Unified Segmentation Parameters (should include main_body_seg and egg_detection):")
-        for key, value in seg_params.items():
-            print(f"  {key}: {value}")
-        
-        assert 'enable_unsharp_masking' in seg_params
-        assert 'min_noise_size' in seg_params
-        assert 'egg_threshold_quantile' in seg_params 
-        assert 'gaussian_sigma' in seg_params # From egg_detection params
-
-    except FileNotFoundError:
-        print("Run this from the 'utils' directory or project root, or adjust path for testing.")
-        print(f"Attempted to load config from: {config_file_path}")
-    except Exception as e:
-        print(f"An error occurred: {e}")

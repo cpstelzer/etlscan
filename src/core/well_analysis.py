@@ -1,15 +1,10 @@
 # src/core/well_analysis.py
 import cv2
 import numpy as np
-import skimage.measure
-import skimage.io
 import logging
-import os 
-import shutil
 from typing import Optional, Tuple, Dict, Any
 from skimage.exposure import rescale_intensity # For a potential adjustment method
 
-from src.utils.common_exceptions import ImageProcessingError, ConfigError, DataValidationError
 from src.core.region_props_calculator import find_contours 
 
 logger = logging.getLogger(__name__)
@@ -285,64 +280,3 @@ def match_well_brightness(
         logger.debug(f"match_well_brightness: Peak difference |{peak_diff:.2f}| is within allowed {max_diff_allowed}. No adjustment needed.")
 
     return adjusted_fg, adjusted_bg
-
-
-if __name__ == '__main__':
-    logging.basicConfig(level=logging.DEBUG)
-    logger.info("--- Testing well_analysis.py (including match_well_brightness) ---")
-
-    dummy_dir = "temp_well_analysis_test_images_match"
-    os.makedirs(dummy_dir, exist_ok=True)
-    
-    # Create FG image
-    fg_img = np.zeros((200, 200), dtype=np.uint8)
-    cv2.circle(fg_img, (100,100), 80, 180, -1) # Well BG = 180
-    cv2.circle(fg_img, (80,80), 10, 30, -1)   # Particle
-    skimage.io.imsave(os.path.join(dummy_dir, "fg_img.png"), fg_img)
-
-    # Create BG image (brighter)
-    bg_img_brighter = np.zeros((200, 200), dtype=np.uint8)
-    cv2.circle(bg_img_brighter, (100,100), 80, 210, -1) # Well BG = 210
-    skimage.io.imsave(os.path.join(dummy_dir, "bg_img_brighter.png"), bg_img_brighter)
-    
-    # Create BG image (similar)
-    bg_img_similar = np.zeros((200, 200), dtype=np.uint8)
-    cv2.circle(bg_img_similar, (100,100), 80, 183, -1) # Well BG = 183
-    skimage.io.imsave(os.path.join(dummy_dir, "bg_img_similar.png"), bg_img_similar)
-
-    test_config_match = {
-        'well_identification': {
-            'low_threshold_value': 10, 'min_expected_diameter_px': 100,
-            'max_expected_diameter_px': 190, 'min_fill_ratio_to_enclosing_circle': 0.80,
-            'center_offset_fraction_threshold': 0.1
-        },
-        'brightness_peak_calculation': {
-            'min_intensity_for_peak_search': 75, 'percentile_for_peak_proxy': 75
-        },
-        'brightness_matching': {
-            'max_peak_difference_allowed': 10, # BG can be 10 brighter
-            'adjustment_method': "global_shift",
-            'target_peak_offset_after_shift': 3 # Make BG 3 units dimmer than FG
-        }
-    }
-
-    logger.info("\n--- Testing match_well_brightness (BG Brighter) ---")
-    adj_fg1, adj_bg1 = match_well_brightness(fg_img, bg_img_brighter, test_config_match)
-    # For verification, calculate peak of adjusted_bg1
-    bg_mask1, _ = create_well_mask_black_plate(adj_bg1, test_config_match['well_identification'])
-    if bg_mask1 is not None:
-        new_bg_peak1 = calculate_well_brightness_peak(adj_bg1, bg_mask1, 
-                                                     test_config_match['brightness_peak_calculation']['min_intensity_for_peak_search'],
-                                                     test_config_match['brightness_peak_calculation']['percentile_for_peak_proxy'])
-        logger.info(f"Original BG peak ~210, Adjusted BG1 peak: {new_bg_peak1:.2f} (Expected ~177)")
-        if new_bg_peak1: assert 170 < new_bg_peak1 < 185
-
-    logger.info("\n--- Testing match_well_brightness (BG Similar) ---")
-    adj_fg2, adj_bg2 = match_well_brightness(fg_img, bg_img_similar, test_config_match)
-    # Expect no significant change in adj_bg2 from bg_img_similar
-    if np.all(adj_bg2 == bg_img_similar):
-        logger.info("BG similar, no adjustment made, as expected.")
-    else:
-        logger.error("BG similar, but adjustment was made unexpectedly.")
-
-    shutil.rmtree(dummy_dir)

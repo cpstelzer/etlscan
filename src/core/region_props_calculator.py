@@ -1,7 +1,6 @@
 # src/core/region_props_calculator.py
 import cv2
 import numpy as np
-import pandas as pd
 from typing import Optional, List, Dict, Any
 import logging
 
@@ -155,46 +154,3 @@ def filter_contours_by_area(contours: List[np.ndarray], min_area: float) -> List
             valid_contours.append(cnt)
     logger.debug(f"Filtered contours by area > {min_area}. Kept {len(valid_contours)} out of {len(contours)}.")
     return valid_contours
-
-
-if __name__ == '__main__':
-    if not logging.getLogger().hasHandlers():
-        logging.basicConfig(level=logging.DEBUG)
-
-    # Create a dummy binary image
-    binary_img = np.zeros((100, 100), dtype=np.uint8)
-    cv2.rectangle(binary_img, (20, 20), (50, 50), 255, -1) # A solid rectangle
-    cv2.circle(binary_img, (70, 70), 15, 255, -1)      # A solid circle
-
-    # Test find_contours
-    contours = find_contours(binary_img, mode="external", method="simple")
-    assert contours is not None and len(contours) == 2, f"Contour finding failed or found unexpected number: {len(contours if contours else [])}"
-    logger.info(f"find_contours test passed, found {len(contours)} contours.")
-
-    if contours:
-        # Test calculate_contour_measurements
-        all_measurements = []
-        for i, cnt in enumerate(contours):
-            measurements = calculate_contour_measurements(cnt)
-            assert measurements is not None, f"Measurement calculation failed for contour {i}"
-            logger.info(f"Measurements for contour {i}: {measurements}")
-            all_measurements.append(measurements)
-        
-        if all_measurements:
-            df = pd.DataFrame(all_measurements)
-            print("\nDataFrame of contour measurements:")
-            print(df)
-
-        # Test filter_contours_by_area
-        # Rectangle area approx 30*30 = 900. Circle area approx pi*15^2 = 706
-        filtered_large = filter_contours_by_area(contours, min_area=800)
-        assert len(filtered_large) == 1, f"Area filter (large) failed. Expected 1, got {len(filtered_large)}"
-        logger.info("Area filter (large) test passed.")
-
-        filtered_small = filter_contours_by_area(contours, min_area=100)
-        assert len(filtered_small) == 2, f"Area filter (small) failed. Expected 2, got {len(filtered_small)}"
-        logger.info("Area filter (small) test passed.")
-
-        filtered_none = filter_contours_by_area(contours, min_area=1000)
-        assert len(filtered_none) == 0, f"Area filter (none) failed. Expected 0, got {len(filtered_none)}"
-        logger.info("Area filter (none) test passed.")

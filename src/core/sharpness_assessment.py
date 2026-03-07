@@ -2,7 +2,7 @@
 import cv2
 import numpy as np
 import pandas as pd
-from typing import Dict, List, Any
+from typing import Dict, List
 import logging
 
 logger = logging.getLogger(__name__)
@@ -151,92 +151,3 @@ def normalize_and_combine_sharpness(
         df_out['combined_sharpness'] = np.nan
             
     return df_out
-
-
-if __name__ == '__main__':
-    if not logging.getLogger().hasHandlers():
-        logging.basicConfig(level=logging.DEBUG)
-
-    # Create a dummy grayscale image
-    # A sharp edge
-    sharp_img = np.zeros((100, 100), dtype=np.uint8)
-    sharp_img[:, 50:] = 255
-    # A blurry image
-    blurry_img = cv2.GaussianBlur(sharp_img, (15, 15), 0)
-
-    logger.info("--- Testing calculate_sharpness_metrics ---")
-    sharp_scores = calculate_sharpness_metrics(sharp_img)
-    blurry_scores = calculate_sharpness_metrics(blurry_img)
-
-    print(f"Sharp Image Scores: {sharp_scores}")
-    print(f"Blurry Image Scores: {blurry_scores}")
-
-    assert sharp_scores['variance_laplacian'] > blurry_scores['variance_laplacian'], "Sharpness test (VL) failed"
-    assert sharp_scores['tenengrad_variance'] > blurry_scores['tenengrad_variance'], "Sharpness test (TV) failed"
-    logger.info("calculate_sharpness_metrics tests passed.")
-
-    # Test with problematic images
-    small_img = np.zeros((2,2), dtype=np.uint8)
-    small_scores = calculate_sharpness_metrics(small_img)
-    assert all(np.isnan(v) for v in small_scores.values()), "Small image sharpness should be all NaN"
-    logger.info("Small image sharpness test passed.")
-
-    none_scores = calculate_sharpness_metrics(None)
-    assert all(np.isnan(v) for v in none_scores.values()), "None image sharpness should be all NaN"
-    logger.info("None image sharpness test passed.")
-
-    logger.info("\n--- Testing normalize_and_combine_sharpness ---")
-    data = {
-        'id': [1, 2, 3, 4, 5],
-        'variance_laplacian': [100.0, 200.0, 150.0, np.nan, 300.0],
-        'tenengrad_variance': [5000.0, 8000.0, 6000.0, 7000.0, np.nan],
-        'other_metric': [1,2,3,4,5] # Should not be normalized
-    }
-    test_df = pd.DataFrame(data)
-    
-    metrics_to_norm = ['variance_laplacian', 'tenengrad_variance']
-    combined_df = normalize_and_combine_sharpness(test_df, metrics_to_norm)
-
-    print("\nOriginal DataFrame:")
-    print(test_df)
-    print("\nDataFrame with Combined Sharpness:")
-    print(combined_df)
-
-    expected_cols = ['variance_laplacian_norm', 'tenengrad_variance_norm', 'combined_sharpness']
-    for col in expected_cols:
-        assert col in combined_df.columns, f"Missing expected column: {col}"
-    
-    # Check some normalization values (variance_laplacian: min=100, max=300)
-    # (100-100)/(300-100) = 0
-    # (200-100)/(300-100) = 0.5
-    # (300-100)/(300-100) = 1.0
-    assert np.isclose(combined_df.loc[0, 'variance_laplacian_norm'], 0.0)
-    assert np.isclose(combined_df.loc[1, 'variance_laplacian_norm'], 0.5)
-    assert np.isclose(combined_df.loc[4, 'variance_laplacian_norm'], 1.0)
-    assert np.isnan(combined_df.loc[3, 'variance_laplacian_norm']) # Original was NaN
-
-    # Check combined sharpness for a row
-    # Row 0: VL_norm=0, TV_norm=0. Combined should be 0
-    # TV: min=5000, max=8000. (5000-5000)/(8000-5000)=0
-    assert np.isclose(combined_df.loc[0, 'tenengrad_variance_norm'], 0.0)
-    assert np.isclose(combined_df.loc[0, 'combined_sharpness'], 0.0)
-
-    # Row 4: VL_norm=1, TV_norm=NaN. Combined should be 1
-    assert np.isclose(combined_df.loc[4, 'combined_sharpness'], 1.0)
-
-    logger.info("normalize_and_combine_sharpness tests passed.")
-
-    # Test with all NaN column
-    all_nan_df = pd.DataFrame({'id': [1,2], 'variance_laplacian': [np.nan, np.nan]})
-    all_nan_combined = normalize_and_combine_sharpness(all_nan_df, ['variance_laplacian'])
-    assert all_nan_combined['variance_laplacian_norm'].isnull().all()
-    assert all_nan_combined['combined_sharpness'].isnull().all()
-    logger.info("All NaN column normalization test passed.")
-
-    # Test with single unique value column
-    single_value_df = pd.DataFrame({'id': [1,2], 'variance_laplacian': [100.0, 100.0]})
-    single_value_combined = normalize_and_combine_sharpness(single_value_df, ['variance_laplacian'])
-    # Expects 1.0 if not NaN, as per original logic (max_val <= min_val case)
-    assert (single_value_combined['variance_laplacian_norm'] == 1.0).all()
-    assert (single_value_combined['combined_sharpness'] == 1.0).all()
-    logger.info("Single unique value column normalization test passed.")

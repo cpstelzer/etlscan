@@ -2,9 +2,8 @@
 import cv2
 import numpy as np
 import logging
-from typing import Optional, Tuple, Dict, Any
+from typing import Optional
 
-from src.utils.common_exceptions import ImageProcessingError
 
 logger = logging.getLogger(__name__)
 
@@ -155,49 +154,3 @@ def apply_morphological_operation(image: np.ndarray, kernel_size: int, operation
     except Exception as e:
         logger.exception(f"Error applying morphological operation '{operation}': {e}")
         return None
-
-
-if __name__ == '__main__':
-    if not logging.getLogger().hasHandlers():
-        logging.basicConfig(level=logging.DEBUG)
-
-    # Create dummy images
-    img_a = np.zeros((50, 50), dtype=np.uint8)
-    img_a[10:30, 10:30] = 150 # A square
-    img_b = np.zeros((50, 50), dtype=np.uint8)
-    img_b[15:25, 15:25] = 50  # A smaller square inside
-
-    # Test subtraction
-    subtracted = subtract_images(img_a, img_b)
-    assert subtracted is not None, "Subtraction failed"
-    logger.info("Subtraction test passed.")
-    # cv2.imwrite("temp_subtracted.png", subtracted) # Optional: save to view
-
-    # Test thresholding
-    thresh_binary = apply_threshold(img_a, 100, "binary")
-    assert thresh_binary is not None, "Binary threshold failed"
-    logger.info("Binary threshold test passed.")
-    # cv2.imwrite("temp_thresh_binary.png", thresh_binary)
-
-    thresh_otsu = apply_threshold(img_a, 0, "otsu_binary") # threshold_value is ignored for Otsu
-    assert thresh_otsu is not None, "Otsu threshold failed"
-    logger.info("Otsu threshold test passed.")
-    # cv2.imwrite("temp_thresh_otsu.png", thresh_otsu)
-
-    # Test blur
-    blurred_median = apply_blur(img_a, 3, "median")
-    assert blurred_median is not None, "Median blur failed"
-    logger.info("Median blur test passed.")
-    # cv2.imwrite("temp_blurred_median.png", blurred_median)
-
-    # Test morphological operation (using the binary thresholded image)
-    if thresh_binary is not None:
-        eroded_img = apply_morphological_operation(thresh_binary, 3, "erode", "rect")
-        assert eroded_img is not None, "Erosion failed"
-        logger.info("Erosion test passed.")
-        # cv2.imwrite("temp_eroded.png", eroded_img)
-
-        dilated_img = apply_morphological_operation(thresh_binary, 3, "dilate", "rect")
-        assert dilated_img is not None, "Dilation failed"
-        logger.info("Dilation test passed.")
-        # cv2.imwrite("temp_dilated.png", dilated_img)

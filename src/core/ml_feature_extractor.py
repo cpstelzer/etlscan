@@ -11,7 +11,7 @@ import logging
 # cv2 import is no longer needed here if ndi is removed and segment_main_body does all cv2 work
 # import cv2 
 # from scipy import ndimage as ndi # Should be removed as fill_holes is now in segmentation.py
-from typing import Optional, Dict, Any, Tuple, List
+from typing import Optional, Dict, Any, Tuple
 from skimage.measure._regionprops import RegionProperties # For type hinting
 
 from src.utils.common_exceptions import ConfigError
@@ -254,75 +254,3 @@ def extract_ml_features(
     except Exception as e:
         logger.exception(f"Error extracting ML features for {os.path.basename(image_path)}: {e}")
         return None, None, None
-
-
-if __name__ == '__main__':
-    if not logging.getLogger().hasHandlers():
-        logging.basicConfig(level=logging.DEBUG)
-    
-    from src.utils.config_loader import get_unified_segmentation_params, get_config
-    
-    try:
-        # Get the full unified params for testing
-        main_cfg_test = get_config() # Ensure config is loaded
-        ml_params_for_test = get_unified_segmentation_params(main_cfg_test)
-        
-        # Add S3-specific egg params to ml_params_for_test if they are not already there
-        # (get_unified_segmentation_params already includes everything from feature_extraction_params)
-        s3_feat_cfg = main_cfg_test.get('stage_03_ml_classification', {}).get('feature_extraction_params',{})
-        for k, v in s3_feat_cfg.items(): # Ensure all S3 specific params are there
-            ml_params_for_test.setdefault(k, v)
-
-
-    except FileNotFoundError:
-        print("Config file not found for ml_feature_extractor test. Using hardcoded ML params.")
-        # Define a fallback ml_params_for_test if config loading fails
-        ml_params_for_test = { 
-            'source_image_illumination_type': 'darkfield', 'thresholding_mode': 'otsu', 
-            'otsu_threshold_multiplier': 0.5, 'fixed_threshold_value': 70,
-            'enable_unsharp_masking': False, 'unsharp_mask_sigma': 1.0, 'unsharp_mask_amount': 1.0,
-            'min_noise_size': 50, 'closing_selem_size': 3, 
-            'gaussian_sigma': 1.0, 'min_significant_area': 100, 
-            'egg_posterior_pixel_fraction': 0.45, 'egg_threshold_quantile': 0.90, 
-            'egg_min_area': 50, 'egg_max_area': 5000, 'egg_min_solidity': 0.60, 
-            'egg_max_solidity': 0.99, 'egg_min_eccentricity': 0.2, 
-            'orientation_diff_tolerance_deg': 60
-        }
-
-    test_image_v = np.zeros((200, 200), dtype=np.uint8) 
-    rr_body_v, cc_body_v = skimage.draw.ellipse(100, 100, 70, 25, rotation=np.deg2rad(10)) 
-    test_image_v[rr_body_v, cc_body_v] = 150 
-    rr_heavy, cc_heavy = skimage.draw.ellipse(100 + int(70*0.6*np.cos(np.deg2rad(10))), 
-                                              100 + int(70*0.6*np.sin(np.deg2rad(10))), 
-                                              15,10, rotation=np.deg2rad(10))
-    test_image_v[rr_heavy, cc_heavy] = 160 
-    rr_egg_v, cc_egg_v = skimage.draw.ellipse(100 + int(70*0.5*np.cos(np.deg2rad(10))) , 
-                                              100 + int(70*0.5*np.sin(np.deg2rad(10))), 
-                                              15, 20, rotation=np.deg2rad(10+90))
-    test_image_v[rr_egg_v, cc_egg_v] = 220 
-
-    test_image_v_float = skimage.util.img_as_float(test_image_v) 
-    temp_img_filename = "temp_ml_feature_test_posterior_util.png"
-    skimage.io.imsave(temp_img_filename, skimage.util.img_as_ubyte(test_image_v_float))
-    
-    logger.info(f"\n--- Testing ML feature extraction (with posterior util) ---")
-    logger.info(f"Runtime params for extract_ml_features: {ml_params_for_test}")
-    
-    features_test, main_props_out, _ = extract_ml_features(
-        temp_img_filename, ml_params_for_test, image_array_gray=test_image_v_float 
-    )
-    if features_test:
-        print(f"  Main Area: {features_test.get('main_area')}, Egg Area: {features_test.get('total_egg_area')}")
-        print(f"  Posterior Area Ratio: {features_test.get('posterior_area_ratio')}")
-        assert features_test.get('total_egg_area', 0) > 0, "Expected egg detection."
-        if main_props_out:
-            assert hasattr(main_props_out, '_axis_vector_pointing_posterior'), "main_props_out missing _axis_vector_pointing_posterior"
-            assert hasattr(main_props_out, '_posterior_coords_for_egg_search'), "main_props_out missing _posterior_coords_for_egg_search"
-            logger.info(f"  Posterior vector: {main_props_out._axis_vector_pointing_posterior}")
-            if main_props_out._posterior_coords_for_egg_search is not None:
-                logger.info(f"  Num posterior coords for search: {main_props_out._posterior_coords_for_egg_search.shape[0]}")
-    else:
-        print(f"  Feature extraction failed.")
-
-    if os.path.exists(temp_img_filename):
-        os.remove(temp_img_filename)

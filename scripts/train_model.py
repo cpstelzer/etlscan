@@ -46,7 +46,7 @@ from src.utils import (
     setup_logging, load_config_once, get_models_dir, get_training_data_dir
 )
 from src.utils.config_loader import get_unified_segmentation_params
-from src.utils.common_exceptions import ConfigError, MLModelError, DataValidationError
+from src.utils.common_exceptions import DataValidationError
 from src.core.image_io_operations import load_image
 import skimage.util
 

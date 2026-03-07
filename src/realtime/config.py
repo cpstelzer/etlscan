@@ -1,15 +1,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-import logging
 from typing import Any, Dict, Optional
 
 import yaml
 
 from src.utils.config_loader import load_config_once
 from src.utils.config_loader import get_unified_segmentation_params
-
-logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -90,32 +87,26 @@ def _resolve_stage1_config(pipeline_cfg: Dict[str, Any], rt: Dict[str, Any]) -> 
     stage1_cfg = dict((rt.get("stage1", {}) or {}))
     system_cfg = pipeline_cfg.get("system", {}) or {}
     stage1_root = pipeline_cfg.get("stage_01_initial_detection", {}) or {}
-    legacy_black_plate = stage1_root.get("black_plate_well_analysis", {}) or {}
+    black_plate_cfg = stage1_root.get("black_plate_well_analysis", {}) or _default_black_plate_well_analysis()
 
     stage1_cfg["source_image_illumination"] = str(
         system_cfg.get("source_image_illumination_type", stage1_cfg.get("source_image_illumination", "collimated"))
     )
 
-    if legacy_black_plate:
-        stage1_cfg["config_black_plate_well"] = legacy_black_plate
-        stage1_cfg["enable_brightness_adjustment"] = bool(
-            legacy_black_plate.get("enable_brightness_adjustment", True)
-        )
-    else:
-        defaults = _default_black_plate_well_analysis()
-        stage1_cfg["config_black_plate_well"] = defaults
-        stage1_cfg["enable_brightness_adjustment"] = bool(
-            defaults.get("enable_brightness_adjustment", True)
-        )
-
-    unsub_cfg = stage1_root.get("unsubtracted_particle_analysis", {}) or {}
+    stage1_cfg["config_black_plate_well"] = black_plate_cfg
+    stage1_cfg["enable_brightness_adjustment"] = bool(
+        black_plate_cfg.get("enable_brightness_adjustment", True)
+    )
 
     # Reuse offline Stage-1 parameter namespaces directly for realtime.
     stage1_cfg["system_cfg"] = system_cfg
     stage1_cfg["well_masking"] = stage1_root.get("well_masking", {}) or {}
     stage1_cfg["particle_analysis_subtracted_config"] = stage1_root.get("particle_analysis", {}) or {}
     stage1_cfg["particle_comparison_config"] = stage1_root.get("particle_comparison", {}) or {}
-    stage1_cfg["unsubtracted_analysis_config"] = stage1_root.get("unsubtracted_particle_analysis", {}) or {}
+    unsubtracted_cfg = stage1_root.get("unsubtracted_particle_analysis", {}) or {}
+    stage1_cfg["unsubtracted_analysis_config"] = unsubtracted_cfg
+    if "local_otsu_roi_size" in unsubtracted_cfg:
+        stage1_cfg["local_otsu_roi_size"] = unsubtracted_cfg["local_otsu_roi_size"]
     stage1_cfg["global_threshold_config"] = system_cfg.get("thresholding", {}) or {}
 
     return stage1_cfg
@@ -186,12 +177,6 @@ def load_realtime_config(config_path: str, pipeline_config_path: str = "config/p
     stage2_cropping = stage2_offline.get("cropping", {}) or {}
     stage2_focus_cfg = stage2_offline.get("focussed_particles", {}) or {}
     stage3_quality_cfg = stage3_offline.get("quality_flags_filter", {}) or {}
-
-    logger.info(
-        "Realtime config sources: runtime/acquisition from %s, shared analysis from %s",
-        config_path,
-        pipeline_config_path,
-    )
 
     parsed = RealtimeConfig(
         enabled=bool(rt.get("enabled", False)),
