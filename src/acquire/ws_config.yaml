@@ -98,6 +98,10 @@ realtime_mode:
     retrieve_timeout_margin_ms: 150
     etl_control_enabled: true
     start_dpt: -2.0
+    adaptive_enabled: false
+    adaptive_window_fraction: 0.1
+    adaptive_min_window_points: 3
+    adaptive_dispersion_coeff: 1
   stage1:
     foreground_diff_threshold: 10
     max_foreground_fraction: 0.08

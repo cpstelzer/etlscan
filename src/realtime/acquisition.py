@@ -23,6 +23,7 @@ class FramePacket:
     image_gray: np.ndarray
     diopter: Optional[float] = None
     focusing_distance_mm: Optional[float] = None
+    focus_round_id: Optional[int] = None
 
 
 
@@ -31,6 +32,7 @@ class AcquisitionControl:
     def __init__(self) -> None:
         self._lock = threading.Lock()
         self._repeat_same_diopter_requests = 0
+        self._pending_adaptive_center_diopter: Optional[float] = None
 
     def request_repeat_same_diopter_once(self) -> None:
         with self._lock:
@@ -42,6 +44,16 @@ class AcquisitionControl:
                 return False
             self._repeat_same_diopter_requests -= 1
             return True
+
+    def submit_adaptive_center_diopter(self, diopter: float) -> None:
+        with self._lock:
+            self._pending_adaptive_center_diopter = float(diopter)
+
+    def consume_adaptive_center_diopter(self) -> Optional[float]:
+        with self._lock:
+            dpt = self._pending_adaptive_center_diopter
+            self._pending_adaptive_center_diopter = None
+            return dpt
 
 class FrameSource:
     def __iter__(self) -> Iterator[FramePacket]:
@@ -65,6 +77,18 @@ def _parse_etl_from_filename(path: str) -> Tuple[Optional[float], Optional[float
         return None, None
 
 
+def build_focus_cycle_from_up_values(pattern: str, diopter_values_up: list[float]) -> list[float]:
+    normalized_pattern = pattern.strip().lower()
+    if normalized_pattern == "sawtooth":
+        return diopter_values_up
+    if normalized_pattern != "zigzag":
+        logger.warning("Unknown focus pattern '%s'. Defaulting to 'zigzag'.", pattern)
+    diopter_values_down: list[float] = []
+    if len(diopter_values_up) > 1:
+        diopter_values_down = diopter_values_up[-2:0:-1]
+    return diopter_values_up + diopter_values_down
+
+
 def build_focus_cycle_pattern(
     start_dpt: float,
     pattern: str,
@@ -81,14 +105,76 @@ def build_focus_cycle_pattern(
     if diopter_values_up.size == 0:
         diopter_values_up = np.array([start_dpt])
     diopter_values_up = diopter_values_up.round(3).tolist()
+    return build_focus_cycle_from_up_values(pattern, diopter_values_up)
 
-    if pattern.strip().lower() == "sawtooth":
-        return diopter_values_up
 
-    diopter_values_down: list[float] = []
-    if len(diopter_values_up) > 1:
-        diopter_values_down = diopter_values_up[-2:0:-1]
-    return diopter_values_up + diopter_values_down
+def build_unique_diopter_steps(focus_cycle: list[float]) -> list[float]:
+    unique: list[float] = []
+    seen: set[str] = set()
+    for dpt in focus_cycle:
+        key = f"{float(dpt):.3f}"
+        if key in seen:
+            continue
+        seen.add(key)
+        unique.append(round(float(dpt), 3))
+    return unique
+
+
+def _nearest_index_for_diopter(diopter_steps: list[float], center_dpt: float) -> int:
+    if not diopter_steps:
+        raise ValueError("Cannot pick nearest index from empty diopter_steps")
+    return min(range(len(diopter_steps)), key=lambda i: abs(diopter_steps[i] - center_dpt))
+
+
+def select_adaptive_window_steps(
+    diopter_steps: list[float],
+    center_dpt: float,
+    window_fraction: float,
+    min_window_points: int,
+    dispersion_coeff: int,
+) -> list[float]:
+    if not diopter_steps:
+        return []
+    n = len(diopter_steps)
+    target_points = int(np.ceil(n * window_fraction))
+    window_points = max(min_window_points, target_points)
+    window_points = min(window_points, n)
+    if window_points % 2 == 0:
+        if window_points < n:
+            window_points += 1
+        else:
+            window_points -= 1
+
+    center_idx = _nearest_index_for_diopter(diopter_steps, center_dpt)
+    selected = {center_idx}
+    radius = 1
+    while len(selected) < window_points:
+        left = center_idx - radius * dispersion_coeff
+        right = center_idx + radius * dispersion_coeff
+        if left >= 0:
+            selected.add(left)
+            if len(selected) >= window_points:
+                break
+        if right < n:
+            selected.add(right)
+            if len(selected) >= window_points:
+                break
+        if left < 0 and right >= n:
+            for offset in range(1, n):
+                i_left = center_idx - offset
+                i_right = center_idx + offset
+                if i_left >= 0:
+                    selected.add(i_left)
+                    if len(selected) >= window_points:
+                        break
+                if i_right < n:
+                    selected.add(i_right)
+                    if len(selected) >= window_points:
+                        break
+            break
+        radius += 1
+
+    return [diopter_steps[i] for i in sorted(selected)]
 
 
 class DirectoryFrameSource(FrameSource):
@@ -143,6 +229,10 @@ class CameraFrameSource(FrameSource):
         target_fps: float,
         max_frames: Optional[int] = None,
         retrieve_timeout_margin_ms: int = 150,
+        adaptive_enabled: bool = False,
+        adaptive_window_fraction: Optional[float] = None,
+        adaptive_min_window_points: Optional[int] = None,
+        adaptive_dispersion_coeff: Optional[int] = None,
         exposure_us: float = 750.0,
         roi_width: Optional[int] = None,
         roi_height: Optional[int] = None,
@@ -162,6 +252,10 @@ class CameraFrameSource(FrameSource):
         self._target_fps = target_fps
         self._max_frames = max_frames
         self._retrieve_timeout_margin_ms = retrieve_timeout_margin_ms
+        self._adaptive_enabled = adaptive_enabled
+        self._adaptive_window_fraction = adaptive_window_fraction
+        self._adaptive_min_window_points = adaptive_min_window_points
+        self._adaptive_dispersion_coeff = adaptive_dispersion_coeff
         self._exposure_us = exposure_us
         self._roi_width = roi_width
         self._roi_height = roi_height
@@ -186,6 +280,8 @@ class CameraFrameSource(FrameSource):
         lens = None
         ecc1c = None
         focus_cycle = [round(self._start_dpt, 3)]
+        base_focus_cycle = [round(self._start_dpt, 3)]
+        unique_diopter_steps = [round(self._start_dpt, 3)]
         if self._etl_control_enabled:
             try:
                 import optoICC
@@ -208,6 +304,8 @@ class CameraFrameSource(FrameSource):
             )
             if not focus_cycle:
                 focus_cycle = [round(self._start_dpt, 3)]
+            base_focus_cycle = list(focus_cycle)
+            unique_diopter_steps = build_unique_diopter_steps(base_focus_cycle)
 
             lens.StaticInput.SetAsInput()
             lens.StaticInput.SetFocalPower(self._start_dpt)
@@ -289,6 +387,8 @@ class CameraFrameSource(FrameSource):
 
             frame_idx = 0
             focus_step_idx = 0
+            focus_round_id = 0
+            active_focus_cycle = list(focus_cycle)
             previous_diopter = self._start_dpt
             while camera.IsGrabbing():
                 if self._max_frames is not None and frame_idx >= int(self._max_frames):
@@ -299,11 +399,34 @@ class CameraFrameSource(FrameSource):
                 )
                 if frame_idx > 0 and not repeat_same_diopter:
                     focus_step_idx += 1
+                    if focus_step_idx >= len(active_focus_cycle):
+                        focus_step_idx = 0
+                        focus_round_id += 1
+                        if self._adaptive_enabled and self._acquisition_control is not None:
+                            adaptive_center = self._acquisition_control.consume_adaptive_center_diopter()
+                            if adaptive_center is not None and unique_diopter_steps:
+                                adaptive_steps = select_adaptive_window_steps(
+                                    unique_diopter_steps,
+                                    adaptive_center,
+                                    float(self._adaptive_window_fraction),
+                                    int(self._adaptive_min_window_points),
+                                    int(self._adaptive_dispersion_coeff),
+                                )
+                                if adaptive_steps:
+                                    active_focus_cycle = build_focus_cycle_from_up_values(self._focus_pattern, adaptive_steps)
+                                    logger.info(
+                                        "Adaptive focusing round %d: center=%.3f, selected_steps=%s",
+                                        focus_round_id,
+                                        adaptive_center,
+                                        ",".join(f"{x:.3f}" for x in adaptive_steps),
+                                    )
+                                else:
+                                    active_focus_cycle = list(base_focus_cycle)
 
                 current_diopter = None
                 current_fd_mm = None
                 if lens is not None:
-                    current_diopter = float(focus_cycle[focus_step_idx % len(focus_cycle)])
+                    current_diopter = float(active_focus_cycle[focus_step_idx % len(active_focus_cycle)])
                     current_fd_mm = (current_diopter - self._start_dpt) * self._scan_ratio
 
                     if not repeat_same_diopter:
@@ -347,6 +470,7 @@ class CameraFrameSource(FrameSource):
                         image_gray=image_gray,
                         diopter=current_diopter,
                         focusing_distance_mm=current_fd_mm,
+                        focus_round_id=focus_round_id,
                     )
                     frame_idx += 1
                 finally:
@@ -374,6 +498,10 @@ def build_frame_source(
     target_fps: float,
     max_frames: Optional[int],
     retrieve_timeout_margin_ms: int = 150,
+    adaptive_enabled: bool = False,
+    adaptive_window_fraction: Optional[float] = None,
+    adaptive_min_window_points: Optional[int] = None,
+    adaptive_dispersion_coeff: Optional[int] = None,
     exposure_us: float = 750.0,
     roi_width: Optional[int] = None,
     roi_height: Optional[int] = None,
@@ -398,6 +526,10 @@ def build_frame_source(
         target_fps=target_fps,
         max_frames=max_frames,
         retrieve_timeout_margin_ms=retrieve_timeout_margin_ms,
+        adaptive_enabled=adaptive_enabled,
+        adaptive_window_fraction=adaptive_window_fraction,
+        adaptive_min_window_points=adaptive_min_window_points,
+        adaptive_dispersion_coeff=adaptive_dispersion_coeff,
         exposure_us=exposure_us,
         roi_width=roi_width,
         roi_height=roi_height,

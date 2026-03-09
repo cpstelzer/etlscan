@@ -37,6 +37,10 @@ def _start_acquisition_thread(
         target_fps=config.target_fps,
         max_frames=config.max_frames,
         retrieve_timeout_margin_ms=config.retrieve_timeout_margin_ms,
+        adaptive_enabled=config.adaptive_enabled,
+        adaptive_window_fraction=config.adaptive_window_fraction,
+        adaptive_min_window_points=config.adaptive_min_window_points,
+        adaptive_dispersion_coeff=config.adaptive_dispersion_coeff,
         exposure_us=config.exposure_us,
         roi_width=config.roi_width,
         roi_height=config.roi_height,
@@ -163,6 +167,9 @@ def run_realtime_session(config: RealtimeConfig, plate: int, well: int) -> str:
     last_focus_reject_warn_frame = -10**9
     last_boundary_reject_warn_frame = -10**9
     stage1_reacquire_threshold = config.stage1_reacquire_detection_threshold
+    adaptive_round_id: Optional[int] = None
+    adaptive_round_accept_counts: dict[float, int] = {}
+    adaptive_last_center_diopter: Optional[float] = None
 
     bg_library_paths: dict[str, str] = {}
     bg_library_ready = False
@@ -171,6 +178,25 @@ def run_realtime_session(config: RealtimeConfig, plate: int, well: int) -> str:
     acquisition_control = AcquisitionControl()
     acq_thread = _start_acquisition_thread(config, frame_queue, monitor, acquisition_control)
 
+    def _finalize_adaptive_round_if_possible(round_id: Optional[int]) -> None:
+        nonlocal adaptive_last_center_diopter, adaptive_round_accept_counts
+        if not config.adaptive_enabled or round_id is None or not adaptive_round_accept_counts:
+            return
+        max_count = max(adaptive_round_accept_counts.values())
+        candidates = [d for d, c in adaptive_round_accept_counts.items() if c == max_count]
+        if adaptive_last_center_diopter is not None and len(candidates) > 1:
+            candidates = sorted(candidates, key=lambda d: abs(d - adaptive_last_center_diopter))
+        selected_center = float(candidates[0])
+        acquisition_control.submit_adaptive_center_diopter(selected_center)
+        adaptive_last_center_diopter = selected_center
+        logger.info(
+            "Adaptive round %d finalized: selected center diopter=%.3f (max accepted=%d, stats=%s)",
+            round_id,
+            selected_center,
+            max_count,
+            ", ".join(f"{d:.3f}:{c}" for d, c in sorted(adaptive_round_accept_counts.items())),
+        )
+
     try:
         while True:
             packet = frame_queue.get()
@@ -178,6 +204,15 @@ def run_realtime_session(config: RealtimeConfig, plate: int, well: int) -> str:
                 break
 
             frame_start = time.monotonic()
+            if config.adaptive_enabled:
+                packet_round_id = packet.focus_round_id if packet.focus_round_id is not None else 0
+                if adaptive_round_id is None:
+                    adaptive_round_id = packet_round_id
+                elif packet_round_id != adaptive_round_id:
+                    _finalize_adaptive_round_if_possible(adaptive_round_id)
+                    adaptive_round_accept_counts = {}
+                    adaptive_round_id = packet_round_id
+
             if packet.diopter is not None or packet.focusing_distance_mm is not None:
                 if packet.frame_index % config.etl_status_interval_frames == 0:
                     logger.info(
@@ -239,7 +274,7 @@ def run_realtime_session(config: RealtimeConfig, plate: int, well: int) -> str:
             stage1_detection_count = len(s1.detections_df)
             logger.info("Frame %d: Stage-1 detections=%d", packet.frame_index, stage1_detection_count)
             monitor.counters.stage1_detections += stage1_detection_count
-            if stage1_detection_count > stage1_reacquire_threshold:
+            if (not config.adaptive_enabled) and stage1_detection_count > stage1_reacquire_threshold:
                 acquisition_control.request_repeat_same_diopter_once()
                 logger.warning(
                     "Frame %d skipped: Stage-1 detections=%d exceeds reacquire_detection_threshold=%d. Reacquiring next frame at same diopter.",
@@ -306,6 +341,9 @@ def run_realtime_session(config: RealtimeConfig, plate: int, well: int) -> str:
                 s3.rejected_boundary_count,
                 len(s3.accepted_df),
             )
+            if config.adaptive_enabled and packet.diopter is not None:
+                dpt_key = round(float(packet.diopter), 3)
+                adaptive_round_accept_counts[dpt_key] = adaptive_round_accept_counts.get(dpt_key, 0) + int(len(s3.accepted_df))
 
             if (
                 s2.pre_threshold_count > 0
@@ -388,6 +426,8 @@ def run_realtime_session(config: RealtimeConfig, plate: int, well: int) -> str:
     except KeyboardInterrupt:
         logger.info("Realtime session interrupted by user; finalizing outputs written so far.")
     finally:
+        if config.adaptive_enabled:
+            _finalize_adaptive_round_if_possible(adaptive_round_id)
         acq_thread.join(timeout=2.0)
         monitor.maybe_log(force=True)
 
