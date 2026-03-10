@@ -402,26 +402,29 @@ class CameraFrameSource(FrameSource):
                     if focus_step_idx >= len(active_focus_cycle):
                         focus_step_idx = 0
                         focus_round_id += 1
-                        if self._adaptive_enabled and self._acquisition_control is not None:
-                            adaptive_center = self._acquisition_control.consume_adaptive_center_diopter()
-                            if adaptive_center is not None and unique_diopter_steps:
-                                adaptive_steps = select_adaptive_window_steps(
-                                    unique_diopter_steps,
-                                    adaptive_center,
-                                    float(self._adaptive_window_fraction),
-                                    int(self._adaptive_min_window_points),
-                                    int(self._adaptive_dispersion_coeff),
-                                )
-                                if adaptive_steps:
-                                    active_focus_cycle = build_focus_cycle_from_up_values(self._focus_pattern, adaptive_steps)
-                                    logger.info(
-                                        "Adaptive focusing round %d: center=%.3f, selected_steps=%s",
-                                        focus_round_id,
-                                        adaptive_center,
-                                        ",".join(f"{x:.3f}" for x in adaptive_steps),
-                                    )
-                                else:
-                                    active_focus_cycle = list(base_focus_cycle)
+
+                if self._adaptive_enabled and self._acquisition_control is not None:
+                    adaptive_center = self._acquisition_control.consume_adaptive_center_diopter()
+                    if adaptive_center is not None and unique_diopter_steps:
+                        adaptive_steps = select_adaptive_window_steps(
+                            unique_diopter_steps,
+                            adaptive_center,
+                            float(self._adaptive_window_fraction),
+                            int(self._adaptive_min_window_points),
+                            int(self._adaptive_dispersion_coeff),
+                        )
+                        if adaptive_steps:
+                            active_focus_cycle = build_focus_cycle_from_up_values(self._focus_pattern, adaptive_steps)
+                            focus_step_idx = 0
+                            focus_round_id += 1
+                            logger.info(
+                                "Adaptive focusing engaged round %d: center=%.3f, selected_steps=%s",
+                                focus_round_id,
+                                adaptive_center,
+                                ",".join(f"{x:.3f}" for x in adaptive_steps),
+                            )
+                        else:
+                            active_focus_cycle = list(base_focus_cycle)
 
                 current_diopter = None
                 current_fd_mm = None
