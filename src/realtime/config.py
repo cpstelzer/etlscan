@@ -45,6 +45,10 @@ class RealtimeConfig:
     max_frames: Optional[int] = None
     flat_field_dir: Optional[str] = None
     retrieve_timeout_margin_ms: int = 150
+    adaptive_enabled: bool = False
+    adaptive_window_fraction: Optional[float] = None
+    adaptive_min_window_points: Optional[int] = None
+    adaptive_dispersion_coeff: Optional[int] = None
     exposure_us: float = 750.0
     roi_width: Optional[int] = None
     roi_height: Optional[int] = None
@@ -109,6 +113,8 @@ def _resolve_stage1_config(pipeline_cfg: Dict[str, Any], rt: Dict[str, Any]) -> 
         )
 
     unsub_cfg = stage1_root.get("unsubtracted_particle_analysis", {}) or {}
+    if "local_otsu_roi_size" in unsub_cfg:
+        stage1_cfg["local_otsu_roi_size"] = unsub_cfg["local_otsu_roi_size"]
 
     # Reuse offline Stage-1 parameter namespaces directly for realtime.
     stage1_cfg["system_cfg"] = system_cfg
@@ -225,6 +231,22 @@ def load_realtime_config(config_path: str, pipeline_config_path: str = "config/p
         max_frames=acquisition_cfg.get("max_frames"),
         flat_field_dir=acquisition_cfg.get("flat_field_dir"),
         retrieve_timeout_margin_ms=int(acquisition_cfg.get("retrieve_timeout_margin_ms", 150)),
+        adaptive_enabled=bool(acquisition_cfg.get("adaptive_enabled", False)),
+        adaptive_window_fraction=(
+            float(acquisition_cfg["adaptive_window_fraction"])
+            if acquisition_cfg.get("adaptive_window_fraction") is not None
+            else None
+        ),
+        adaptive_min_window_points=(
+            int(acquisition_cfg["adaptive_min_window_points"])
+            if acquisition_cfg.get("adaptive_min_window_points") is not None
+            else None
+        ),
+        adaptive_dispersion_coeff=(
+            int(acquisition_cfg["adaptive_dispersion_coeff"])
+            if acquisition_cfg.get("adaptive_dispersion_coeff") is not None
+            else None
+        ),
         exposure_us=float(camera_cfg.get("exposure_us", 750.0)),
         roi_width=int(roi_cfg["width"]) if roi_cfg.get("width") is not None else None,
         roi_height=int(roi_cfg["height"]) if roi_cfg.get("height") is not None else None,
@@ -273,6 +295,21 @@ def load_realtime_config(config_path: str, pipeline_config_path: str = "config/p
     if parsed.image_format not in {"png", "jpg", "jpeg", "bmp"}:
         raise ValueError("realtime_mode.persistence.image_format must be one of png/jpg/jpeg/bmp")
     _must_be_nonnegative("acquisition.retrieve_timeout_margin_ms", parsed.retrieve_timeout_margin_ms)
+    if parsed.adaptive_enabled:
+        if parsed.adaptive_window_fraction is None:
+            raise ValueError("realtime_mode.acquisition.adaptive_window_fraction must be set when adaptive_enabled=true")
+        if parsed.adaptive_min_window_points is None:
+            raise ValueError("realtime_mode.acquisition.adaptive_min_window_points must be set when adaptive_enabled=true")
+        if parsed.adaptive_dispersion_coeff is None:
+            raise ValueError("realtime_mode.acquisition.adaptive_dispersion_coeff must be set when adaptive_enabled=true")
+        if not (0 < parsed.adaptive_window_fraction <= 1.0):
+            raise ValueError("realtime_mode.acquisition.adaptive_window_fraction must be in (0, 1]")
+        if parsed.adaptive_min_window_points < 3:
+            raise ValueError("realtime_mode.acquisition.adaptive_min_window_points must be >= 3")
+        if parsed.adaptive_min_window_points % 2 == 0:
+            raise ValueError("realtime_mode.acquisition.adaptive_min_window_points must be odd")
+        if parsed.adaptive_dispersion_coeff < 1:
+            raise ValueError("realtime_mode.acquisition.adaptive_dispersion_coeff must be >= 1")
     _must_be_positive("camera.exposure_us", parsed.exposure_us)
     if parsed.roi_width is not None and parsed.roi_width < 1:
         raise ValueError("roi.width must be >= 1 when provided")

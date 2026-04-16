@@ -177,3 +177,51 @@ def test_realtime_loader_requires_black_mask_config(tmp_path: Path) -> None:
     mod = _load_rt_config_module()
     with pytest.raises(ValueError, match="black_mask_check"):
         mod.load_realtime_config(str(ws_path), pipeline_config_path=str(pipeline_path))
+
+
+def test_realtime_loader_requires_adaptive_params_when_enabled(tmp_path: Path) -> None:
+    ws_cfg = {
+        "focusing": {
+            "pattern": "zigzag",
+            "scan_height_mm": 11.2,
+            "scan_step_um": 350,
+            "scan_ratio": 2.25,
+            "lens_settle_time_sec": 0.025,
+            "large_jump_threshold_dpt": -3.0,
+            "large_jump_settle_sec": 0.040,
+            "lens_controller_port": "COM5",
+        },
+        "realtime_mode": {
+            "enabled": True,
+            "acquisition": {
+                "source": "camera",
+                "adaptive_enabled": True,
+            },
+        },
+    }
+    pipeline_cfg = {
+        "system": {
+            "source_image_illumination_type": "collimated",
+            "thresholding": {"mode": "otsu", "otsu_threshold_multiplier": 0.7, "fixed_threshold_value": 70},
+            "segmentation": {"min_noise_size": 99, "closing_selem_size": 3},
+        },
+        "stage_02_characterization": {
+            "focussed_particles": {"sharpness_min_threshold": 80},
+            "quality_features": {
+                "black_mask_check": {
+                    "min_area_ratio": 0.05,
+                    "max_black_pixel_value": 15,
+                    "min_edge_thickness_fraction": 0.2,
+                }
+            },
+        },
+    }
+
+    ws_path = tmp_path / "ws_config.yaml"
+    pipeline_path = tmp_path / "pipeline_config.yml"
+    ws_path.write_text(yaml.safe_dump(ws_cfg), encoding="utf-8")
+    pipeline_path.write_text(yaml.safe_dump(pipeline_cfg), encoding="utf-8")
+
+    mod = _load_rt_config_module()
+    with pytest.raises(ValueError, match="adaptive_window_fraction"):
+        mod.load_realtime_config(str(ws_path), pipeline_config_path=str(pipeline_path))
