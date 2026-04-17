@@ -28,7 +28,7 @@ fi
 # Derive paths
 REPO_ROOT="${SCRATCH}/wellscanner/well_plate_analyzer"
 PIPELINE_SCRIPT="${REPO_ROOT}/scripts/run_pipeline.py"
-CONFIG_FILE="${REPO_ROOT}/config/pipeline_config.yml"
+CONFIG_FILE="${REPO_ROOT}/config/config.yml"
 
 echo "Job started on: $(hostname)"
 echo "Input directory: $INPUT_DIR"

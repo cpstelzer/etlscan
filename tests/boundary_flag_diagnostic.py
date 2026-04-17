@@ -142,7 +142,7 @@ def _iter_input_images(input_dir: Path) -> List[Path]:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Diagnostic for detect_cropped_particle_on_boundary")
-    parser.add_argument("--config", default="config/pipeline_config.yml", help="Path to pipeline config YAML.")
+    parser.add_argument("--config", default="config/config.yml", help="Path to the unified config YAML.")
     parser.add_argument("--input-dir", default="data/boundary_flag/input", help="Directory with cropped particle images.")
     parser.add_argument("--output-dir", default="data/boundary_flag/output", help="Directory for diagnostic outputs.")
     parser.add_argument(

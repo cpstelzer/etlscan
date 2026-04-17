@@ -46,7 +46,7 @@ def crop_rotated(
 
 def normalized_crop_config(crop_config: Dict[str, Any]) -> Dict[str, Any]:
     """Validate and normalize crop configuration values for particle cropping."""
-    mode = crop_config.get('mode', 'rotational_rectangle')
+    mode = crop_config['mode']
     if mode not in [
         'rotational_rectangle',
         'centroid_square',
@@ -56,7 +56,7 @@ def normalized_crop_config(crop_config: Dict[str, Any]) -> Dict[str, Any]:
     ]:
         raise ConfigError(f"Invalid ParticleCropper mode: {mode}")
 
-    adaptive_padding_factor = float(crop_config.get('adaptive_padding_factor', 0.2))
+    adaptive_padding_factor = float(crop_config['adaptive_padding_factor'])
     if adaptive_padding_factor < 0:
         raise ConfigError(f"adaptive_padding_factor must be >= 0, got {adaptive_padding_factor}")
 
@@ -413,59 +413,3 @@ def detect_cropped_particle_on_boundary(
         return True
         
     return False
-
-if __name__ == '__main__':
-    if not logging.getLogger().hasHandlers():
-        logging.basicConfig(level=logging.DEBUG)
-
-    # ... (ParticleCropper tests can remain unchanged if you wish to keep them) ...
-    # Example from ParticleCropper test:
-    main_h, main_w = 400, 500
-    main_color_img = np.random.randint(0, 256, (main_h, main_w, 3), dtype=np.uint8)
-    cv2.ellipse(main_color_img, (250, 200), (100, 50), 25, 0, 360, (255, 0, 0), -1)
-    main_gray_img = cv2.cvtColor(main_color_img, cv2.COLOR_BGR2GRAY)
-    
-    # MODIFIED: Added test data for rotational crop
-    particles = pd.DataFrame([
-        {'X': 50, 'Y': 50, 'particle_id': 1, 'bounding_x': 40, 'bounding_y': 40, 'bounding_w': 20, 'bounding_h': 20, 'rot_rect_width': 20, 'rot_rect_height': 22, 'rot_rect_angle': 15.0},
-        {'X': 250, 'Y': 200, 'particle_id': 2, 'bounding_x': 150, 'bounding_y': 150, 'bounding_w': 200, 'bounding_h': 100, 'rot_rect_width': 200, 'rot_rect_height': 100, 'rot_rect_angle': 25.0} # Wide rectangle
-    ])
-    
-    temp_crop_output_dir = "temp_particle_ops_test_rotational" 
-    os.makedirs(temp_crop_output_dir, exist_ok=True)
-
-    logger.info("\n--- Testing Rotational Crop Mode ---")
-    cropper_config_rot = {'mode': 'rotational_rectangle', 'adaptive_padding_factor': 0.2}
-    rot_cropper = ParticleCropper(cropper_config_rot)
-    crop_rot, path_rot = rot_cropper.crop_single_particle_from_image(main_color_img, main_gray_img, particles.iloc[1])
-    assert crop_rot is not None and path_rot is not None
-    logger.info(f"Rotational crop successful. Saved to {path_rot}")
-    # Verify the orientation (height > width)
-    assert crop_rot.shape[0] > crop_rot.shape[1], "Rotational crop orientation logic failed."
-    logger.info("Rotational crop orientation test passed.")
-
-
-    logger.info("\n--- Testing Boundary Crop Detection (Consolidated Thresholding Logic) ---")
-    
-    crop_dark_particle_bright_bg_distinct = np.full((50, 50), 250, dtype=np.uint8) 
-    cv2.rectangle(crop_dark_particle_bright_bg_distinct, (0, 10), (30, 40), 10, -1) 
-    test_path1_distinct = os.path.join(temp_crop_output_dir, "dark_particle_touching_consolidated.png")
-    cv2.imwrite(test_path1_distinct, crop_dark_particle_bright_bg_distinct)
-    
-    # Define threshold params for the test
-    otsu_thresh_params_test = {
-        'thresholding_mode':"otsu",
-        'otsu_threshold_multiplier':0.45, 
-    }
-    is_touching_consolidated_otsu = detect_cropped_particle_on_boundary(
-        crop_dark_particle_bright_bg_distinct, test_path1_distinct, 
-        illumination_mode_of_crop="collimated", 
-        threshold_params=otsu_thresh_params_test
-    )
-    assert is_touching_consolidated_otsu is True, "Boundary crop (distinct dark particle, collimated, consolidated Otsu) detection failed"
-    logger.info("Boundary crop (distinct dark particle, collimated, consolidated Otsu) detection PASSED.")
-
-
-    if os.path.exists(temp_crop_output_dir):
-        shutil.rmtree(temp_crop_output_dir)
-        logger.info(f"Cleaned up {temp_crop_output_dir}")

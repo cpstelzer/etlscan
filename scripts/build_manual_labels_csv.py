@@ -7,7 +7,7 @@ rows tied to each crop.  The recovered rows are combined into a single CSV that
 
 Usage example::
 
-    python scripts/build_manual_labels_csv.py --config config/pipeline_config.yml \
+    python scripts/build_manual_labels_csv.py --config config/config.yml \
         --stage3-root C:/sandbox --good-dir C:/sandbox/data/training_data/good \
             --bad-dir C:/sandbox/data/training_data/bad \
                 --output-csv C:/sandbox/data/training_data/manual_labels.csv
@@ -206,9 +206,9 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         '--config',
-        default='config/pipeline_config.yml',
+        default='config/config.yml',
         help=(
-            'Path to the pipeline config (unused but kept for symmetry with other scripts).'
+            'Path to the unified config (unused but kept for symmetry with other scripts).'
         ),
     )
     parser.add_argument(

@@ -20,7 +20,7 @@ Supporting tooling:
 
   ```
   python scripts/detect_black_mask_demo.py data/sanity_checks/masks \
-      --config config/pipeline_config.yml
+      --config config/config.yml
   ```
 
 
@@ -55,7 +55,7 @@ This copies matching run folders into `data/input/<batch_name>/...` without chan
 ```
 well_plate_analyzer/
 ├── config/
-│   └── pipeline_config.yml       # Global runtime configuration
+│   └── config.yml       # Global runtime configuration
 ├── data/
 │   ├── input/<batch>/<sample>/   # Raw PNG sequences per sample
 │   ├── output/<batch>/<sample>/  # Pipeline outputs organized by stage
@@ -82,7 +82,7 @@ well_plate_analyzer/
 
 ## Configuration
 
-The YAML file at `config/pipeline_config.yml` controls the entire pipeline. Key entries:
+The YAML file at `config/config.yml` controls the entire pipeline. Key entries:
 
 - `project_base_dir`: absolute path to the repository root.
 - Stage-specific blocks (`stage_01_initial_detection`, `stage_02_characterization`, `stage_03_filtering_and_classification`, `stage_04_biological_analysis`) that tune detection, cropping, filtering, classifier thresholds, and visualization options.
@@ -102,13 +102,13 @@ The entry point is `scripts/run_pipeline.py`. It expects a batch directory conta
 python scripts/run_pipeline.py \
     --input_batch_dir data/input/batch_20240101 \
     --stages all \
-    --config config/pipeline_config.yml
+    --config config/config.yml
 ```
 
 Important CLI options:
 
 - `--input_batch_dir`: **Required.** Path to the parent directory that contains the sample folders.
-- `--config`: Optional path to a custom YAML config (defaults to `config/pipeline_config.yml`).
+- `--config`: Optional path to a custom YAML config (defaults to `config/config.yml`).
 - `--stages`: Comma-separated list from `{1,2,3,4}` or `all` to control which stage modules run. Dependencies are enforced, so Stage n requires outputs from Stage n−1. When a stage is rerun, its existing output directory is automatically deleted so the new outputs start cleanly.
 - `--resume`: Resume **full pipeline runs only** (`--stages all` or `--stages 1,2,3,4`). The pipeline writes an atomic per-sample completion marker after Stage 4 succeeds, then uses those markers to skip already-complete leading samples after an interruption (timeout, node preemption, power loss).
 
@@ -131,10 +131,10 @@ Stage 03 is split into three segments: (1) deterministic quality filters, (2) 
 
 For classifier retraining, the RandomForest trainer now consumes class-labeled image folders by default. A single command is enoug
 h if your crops live under `data/training_data/good` and `data/training_data/bad` (or the `project_base_dir`-relative paths you s
-et in `config/pipeline_config.yml`):
+et in `config/config.yml`):
 
 ```
-python scripts/train_model.py --config config/pipeline_config.yml
+python scripts/train_model.py --config config/config.yml
 ```
 
 See `docs/random_forest_training.md` for details and options (including CSV-based training). To train and use the EfficientNet-B0

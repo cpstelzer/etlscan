@@ -54,36 +54,51 @@ BAYER_TO_CV2_CODE = {
 }
 
 # --- Configuration Loading ---
-DEFAULT_CONFIG_PATH = "ws_config.yaml"
+DEFAULT_CONFIG_PATH = "config/config.yml"
+
 
 def load_config(config_path=DEFAULT_CONFIG_PATH):
+    """Load the unified config and return the acquisition subtree (hardware profile merged).
+
+    Restructures `plate_definitions` into `plate.definitions` so `get_plate_settings`
+    keeps working on the returned dict, and resolves the cv2/pylon string constants.
+    """
+    from src.utils.config_loader import load_config_once
+
     print(f"Loading configuration from: {config_path}")
     try:
-        with open(config_path, 'r') as f:
-            config_data = yaml.safe_load(f)
-        print("Configuration loaded successfully.")
-        if 'watermark' in config_data:
-            if 'font' in config_data['watermark']:
-                config_data['watermark']['font'] = getattr(cv2, config_data['watermark']['font'], cv2.FONT_HERSHEY_SIMPLEX)
-            if 'color_grayscale' in config_data['watermark'] and 'color_bgr' not in config_data['watermark']:
-                c = config_data['watermark']['color_grayscale']
-                config_data['watermark']['color_bgr'] = [c, c, c]
-                
-        if 'camera' in config_data and 'grab_strategy' in config_data['camera']:
-            config_data['camera']['grab_strategy'] = getattr(pylon, f"GrabStrategy_{config_data['camera']['grab_strategy']}", pylon.GrabStrategy_OneByOne)
-        return config_data
+        unified_config = load_config_once(config_path)
     except FileNotFoundError:
         print(f"ERROR: Configuration file not found at {config_path}")
         sys.exit(1)
     except yaml.YAMLError as e:
         print(f"ERROR: Failed to parse configuration file {config_path}: {e}")
         sys.exit(1)
-    except AttributeError as e:
-        print(f"ERROR: Invalid constant name found in configuration file: {e}")
-        sys.exit(1)
     except Exception as e:
         print(f"ERROR: An unexpected error occurred while loading configuration: {e}")
         sys.exit(1)
+
+    acq = unified_config["acquisition"]
+
+    plate_cfg = acq.get("plate", {})
+    plate_definitions = acq.get("plate_definitions", {})
+    plate_cfg = {**plate_cfg, "definitions": plate_definitions}
+    acq["plate"] = plate_cfg
+
+    watermark_cfg = acq.get("watermark")
+    if watermark_cfg and "font" in watermark_cfg:
+        watermark_cfg["font"] = getattr(cv2, watermark_cfg["font"], cv2.FONT_HERSHEY_SIMPLEX)
+    if watermark_cfg and "color_grayscale" in watermark_cfg and "color_bgr" not in watermark_cfg:
+        c = watermark_cfg["color_grayscale"]
+        watermark_cfg["color_bgr"] = [c, c, c]
+
+    camera_cfg = acq.get("camera")
+    if camera_cfg and "grab_strategy" in camera_cfg:
+        camera_cfg["grab_strategy"] = getattr(
+            pylon, f"GrabStrategy_{camera_cfg['grab_strategy']}", pylon.GrabStrategy_OneByOne
+        )
+
+    return acq
 
 # --- Acquisition Function ---
 def acquire_and_save_frames(camera, lens, full_focus_pattern,

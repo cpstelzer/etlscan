@@ -47,8 +47,8 @@ def run_stage1_realtime(
         fg_img_uint8 = _as_uint8(apply_flat_field_correction(fg_img_uint8, ffc_assets))
         bg_img_uint8 = _as_uint8(apply_flat_field_correction(bg_img_uint8, ffc_assets))
 
-    brightness_cfg = config.get("config_black_plate_well", {})
-    enable_brightness_adjustment = bool(config.get("enable_brightness_adjustment", True))
+    brightness_cfg = config["config_black_plate_well"]
+    enable_brightness_adjustment = bool(config["enable_brightness_adjustment"])
     if enable_brightness_adjustment and not _has_brightness_config_sections(brightness_cfg):
         if frame_index % 60 == 0:
             logger.warning(
@@ -57,14 +57,16 @@ def run_stage1_realtime(
             )
         enable_brightness_adjustment = False
 
+    source_illumination = str(config["source_image_illumination"]).strip().lower()
+
     prep = prepare_masked_foreground(
         fg_img_uint8,
         bg_img_uint8,
         enable_brightness_adjustment=enable_brightness_adjustment,
         brightness_config=brightness_cfg,
-        well_masking_cfg=config.get("well_masking", {}),
-        system_cfg=config.get("system_cfg", {}),
-        source_illumination=str(config.get("source_image_illumination", "darkfield")).strip().lower(),
+        well_masking_cfg=config["well_masking"],
+        system_cfg=config["system_cfg"],
+        source_illumination=source_illumination,
     )
 
     subtracted_img_uint8 = subtract_images(prep["fg_for_sub"], prep["bg_for_sub"])
@@ -72,8 +74,8 @@ def run_stage1_realtime(
     if subtracted_img_uint8 is None:
         return Stage1Result(detections_df=pd.DataFrame())
 
-    foreground_diff_threshold = int(config.get("foreground_diff_threshold", 10))
-    max_foreground_fraction = float(config.get("max_foreground_fraction", 0.08))
+    foreground_diff_threshold = int(config["foreground_diff_threshold"])
+    max_foreground_fraction = float(config["max_foreground_fraction"])
     _, motion_mask = cv2.threshold(subtracted_img_uint8, foreground_diff_threshold, 255, cv2.THRESH_BINARY)
     foreground_fraction = float(np.count_nonzero(motion_mask)) / float(motion_mask.size) if motion_mask.size else 0.0
 
@@ -87,9 +89,9 @@ def run_stage1_realtime(
             )
         return Stage1Result(detections_df=pd.DataFrame())
 
-    sub_cfg = config.get("particle_analysis_subtracted_config", {})
-    global_cfg = config.get("global_threshold_config", {})
-    local_cfg = config.get("unsubtracted_analysis_config", {})
+    sub_cfg = config["particle_analysis_subtracted_config"]
+    global_cfg = config["global_threshold_config"]
+    local_cfg = config["unsubtracted_analysis_config"]
 
     sub_analysis = analyze_subtracted_image(
         subtracted_img_uint8,
@@ -102,10 +104,10 @@ def run_stage1_realtime(
     refined = refine_with_local_otsu(
         unsub_prepared_uint8=prep["unsub_prepared"],
         candidate_particles=sub_analysis["particles_df"],
-        adaptive_padding_factor=float(local_cfg.get("adaptive_padding_factor", 0.2)),
+        adaptive_padding_factor=float(local_cfg["adaptive_padding_factor"]),
         analysis_config=local_cfg,
         global_threshold_config=global_cfg,
-        source_illumination=str(config.get("source_image_illumination", "darkfield")).strip().lower(),
+        source_illumination=source_illumination,
     )
 
     detections = refined["particles_df"].copy()

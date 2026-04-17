@@ -14,7 +14,7 @@ import trackpy as tp
 import matplotlib.pyplot as plt
 
 from src.utils import (
-    get_config, load_dataframe_from_csv, save_dataframe_to_csv,
+    load_dataframe_from_csv, save_dataframe_to_csv,
     parse_date_plate_well, extract_frame_from_filename
 )
 from src.utils.common_exceptions import ProcessingError, ConfigError, DataValidationError
@@ -223,14 +223,14 @@ def process_frame_pair(
         config.get('sample_id', 'UNKNOWN_SAMPLE'),
         fg_row.get('filename', 'UNKNOWN_FILE')
     )
-    unsubtracted_cfg = config.get('unsubtracted_analysis_config', {})
+    unsubtracted_cfg = config['unsubtracted_analysis_config']
     unsub_analysis = refine_with_local_otsu(
         prep_data["unsub_prepared"],
         sub_analysis["particles_df"],
-        float(unsubtracted_cfg.get('adaptive_padding_factor', 0.2)),
+        float(unsubtracted_cfg['adaptive_padding_factor']),
         unsubtracted_cfg,
-        config.get('global_threshold_config', {}),
-        config.get('source_image_illumination', 'darkfield')
+        config['global_threshold_config'],
+        config['source_image_illumination']
     )
     # Fuse subtracted and unsubtracted detections to keep confident matches.
     fused_df_frame = _compare_and_fuse_particle_dfs(
@@ -398,7 +398,7 @@ def _analyze_single_subtracted_image_global_thresh( # Unchanged
         if blurred_binary is not None: img_for_contours = blurred_binary; logger.debug(f"S1 Subtracted: Applied blur (kernel {blur_kernel_size_sub_binary}) to binary mask.")
     contours = find_contours(img_for_contours, mode="external", method="simple")
     if not contours: logger.debug("S1 Subtracted: No contours found after thresholding/blur."); return particles_data, binary_mask_display_uint8
-    min_area = config_stage1_particle_analysis.get('min_microorganism_area', 50)
+    min_area = config_stage1_particle_analysis['min_microorganism_area']
     valid_contours = filter_contours_by_area(contours, min_area)
     particles_data = [m for cnt in valid_contours if (m := calculate_contour_measurements(cnt))]
     logger.debug(f"S1 Subtracted: Found {len(particles_data)} particles after area filter.")
@@ -642,41 +642,28 @@ def run_stage_01_initial_detection(
     image_dir_path: str,
     output_dir_stage1: str,
     sample_id: str,
-    config: Optional[Dict[str, Any]] = None,
+    config: Dict[str, Any],
 ) -> Optional[str]:
     """Input: image dir, output dir, sample id, config. Output: Stage 1 CSV path or None."""
     logger.info(f"--- Stage 1: Initial Detection for Sample ID: {sample_id} ---")
-    config = config or get_config()
-    config_s1 = config.get('stage_01_initial_detection', {})
-    system_cfg = config.get('system', {})
-    source_image_illumination = system_cfg.get('source_image_illumination_type', 'darkfield')
-    global_threshold_config = system_cfg.get('thresholding', {})
-    if not global_threshold_config:
-        raise ConfigError("Stage 1: System-level thresholding configuration not found or empty.")
-    
-    config_black_plate_well = config_s1.get('black_plate_well_analysis', {})
-    enable_brightness_adjustment = config_black_plate_well.get('enable_brightness_adjustment', False)
-    
-    particle_analysis_subtracted_config = config_s1.get('particle_analysis', {})
-    unsubtracted_analysis_config = config_s1.get('unsubtracted_particle_analysis', {})
-    particle_comparison_config = config_s1.get('particle_comparison', {})
-    bg_offset_mode = config_s1.get('BG_frame_offset_mode', 'fixed')
-    bg_offset_default = config_s1.get('bg_offset_val', 110)
+    config_s1 = config['stage_01_initial_detection']
+    system_cfg = config['system']
+    source_image_illumination = system_cfg['source_image_illumination_type']
+    global_threshold_config = system_cfg['thresholding']
 
-    recording_fps_raw = system_cfg.get('recording_fps')
-    try:
-        recording_fps = float(recording_fps_raw)
-    except (TypeError, ValueError):
-        recording_fps = 0.0
+    config_black_plate_well = config_s1['black_plate_well_analysis']
+    enable_brightness_adjustment = config_black_plate_well['enable_brightness_adjustment']
 
-    recording_fps = max(recording_fps, 0.0)
-    min_offset_for_auto: Optional[int]
-    if recording_fps > 0:
-        min_offset_for_auto = max(int(round(recording_fps * 5)), 1)
-    else:
-        min_offset_for_auto = None
+    particle_analysis_subtracted_config = config_s1['particle_analysis']
+    unsubtracted_analysis_config = config_s1['unsubtracted_particle_analysis']
+    particle_comparison_config = config_s1['particle_comparison']
+    bg_offset_mode = config_s1['BG_frame_offset_mode']
+    bg_offset_default = config_s1['bg_offset_val']
 
-    general_well_masking_cfg = config_s1.get('well_masking', {})
+    recording_fps = float(config['acquisition']['camera']['fps'])
+    min_offset_for_auto = max(int(round(recording_fps * 5)), 1) if recording_fps > 0 else None
+
+    general_well_masking_cfg = config_s1['well_masking']
 
     images_df = _parse_image_filenames(image_dir_path)
     if images_df is None or images_df.empty: return None
@@ -707,7 +694,7 @@ def run_stage_01_initial_detection(
     if bg_offset_mode == 'automatic':
         if min_offset_for_auto is None:
             logger.warning(
-                "Stage 1: Automatic background offset requested but system.recording_fps is missing or invalid; "
+                "Stage 1: Automatic background offset requested but acquisition.camera.fps is non-positive; "
                 "falling back to configured offset %d.",
                 bg_offset_default,
             )
@@ -764,8 +751,8 @@ def run_stage_01_initial_detection(
     final_output_filename = f"{sample_id}_stage1_tracked_particles.csv"
     final_output_path = os.path.join(output_dir_stage1, final_output_filename)
     
-    tracking_config = config_s1.get('tracking', {})
-    if tracking_config.get('enabled', False):
+    tracking_config = config_s1['tracking']
+    if tracking_config['enabled']:
         # Track fused particles and defer file I/O to the stage wrapper.
         try:
             tracked_df, tracking_fig = run_particle_tracking(final_sample_df, sample_id, tracking_config)

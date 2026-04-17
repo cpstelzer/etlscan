@@ -320,8 +320,8 @@ def main():
     parser.add_argument(
         "--config",
         type=str,
-        default=os.path.join(project_root, "config", "pipeline_config.yml"),
-        help="Path to the pipeline configuration YAML file."
+        default=os.path.join(project_root, "config", "config.yml"),
+        help="Path to the unified configuration YAML file."
     )
     parser.add_argument(
         "--input_batch_dir",

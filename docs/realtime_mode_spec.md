@@ -9,15 +9,15 @@ Define a new realtime acquisition + processing mode that:
 - does **not** break offline batch analysis (`scripts/run_pipeline.py`) or existing batch acquisition (`src/acquire`).
 
 Execution entrypoint:
-- `scripts/run_realtime.py --config <path_to_ws_config.yaml> [--plate N --well N]`
+- `scripts/run_realtime.py --config <path_to_config.yml> [--plate N --well N]`
 
 ## 2) Hard Constraints
 
 1. Realtime acquisition uses only the simple acquisition path (same concept as `ws_acquire_single`).
 2. No GUI-based well selector and no stage controller in realtime mode.
 3. Plate and well values are manual user inputs and must be embedded in output filenames.
-4. Realtime settings live in `ws_config.yaml` only.
-5. `pipeline_config.yml` remains untouched and continues serving offline mode only.
+4. Realtime settings live in `config.yml` only.
+5. `config.yml` remains untouched and continues serving offline mode only.
 6. Realtime defaults to grayscale acquisition.
 7. Realtime runs simplified stages 1–3 only.
 8. Stage 4 is completely omitted in realtime mode.
@@ -28,7 +28,7 @@ Execution entrypoint:
 ### In scope
 - New module tree under `src/realtime`.
 - New script `scripts/run_realtime.py`.
-- New realtime config section in `ws_config.yaml`.
+- New realtime config section in `config.yml`.
 - Controlled reuse of existing Stage 1/2/3 internals as callable utilities.
 
 ### Out of scope
@@ -43,7 +43,7 @@ Create dedicated orchestration and adapters rather than modifying offline stage 
 
 - `src/realtime/__init__.py`
 - `src/realtime/config.py`
-  - parse/validate realtime config from `ws_config.yaml`
+  - parse/validate realtime config from `config.yml`
 - `src/realtime/session.py`
   - run/session metadata, plate/well tagging, output directory setup
 - `src/realtime/acquisition.py`
@@ -180,7 +180,7 @@ Filename components must include:
 Example naming pattern (spec-level, not code):
 - `<session>_plate<plate>_well<well>_frame<idx>_particle<id>_X<x>_Y<y>.png`
 
-## 9) `ws_config.yaml` Additions
+## 9) `config.yml` Additions
 
 Add a dedicated section, e.g. `realtime_mode:`
 

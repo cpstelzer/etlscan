@@ -1,22 +1,22 @@
 # src/utils/logging_setup.py
 import logging
-import os 
-import sys  # Import sys for StreamHandler
-from typing import Dict, Optional
-from .config_loader import get_config 
-from .path_helpers import get_project_base_dir 
+import os
+import sys
+from typing import Dict
 
-def setup_logging(config: Optional[Dict[str, object]] = None) -> logging.Logger:
+from .path_helpers import get_project_base_dir
+
+
+def setup_logging(config: Dict[str, object]) -> logging.Logger:
     """
-    Input: optional config dict. Output: configured root logger with file/console handlers.
+    Input: config dict. Output: configured root logger with file/console handlers.
     Sets up global logging configuration.
     Logs can be directed to a file specified in the config.
     Ensures INFO level (and above) messages also appear on console if file logging is enabled.
     """
-    config = config or get_config()
-    log_config = config.get('logging', {})
-    
-    level_str = log_config.get('level', 'INFO').upper()
+    log_config = config["logging"]
+
+    level_str = log_config["level"].upper()
     # Ensure the basicConfig level is the most verbose one needed for any handler
     # If console needs INFO and file needs DEBUG, basicConfig should be DEBUG.
     # Then, individual handlers can filter further.
@@ -24,14 +24,14 @@ def setup_logging(config: Optional[Dict[str, object]] = None) -> logging.Logger:
     # The root logger level will be set by basicConfig.
     log_level = getattr(logging, level_str, logging.INFO)
     
-    log_format_str = log_config.get('format', '%(asctime)s - %(levelname)s - %(name)s - %(message)s')
-    console_format_str = log_config.get('console_format', '%(asctime)s - %(levelname)s - %(message)s')
-    date_format_str = log_config.get('date_format', '%Y-%m-%d %H:%M:%S')
+    log_format_str = log_config["format"]
+    console_format_str = log_config.get("console_format", log_format_str)
+    date_format_str = log_config["date_format"]
 
     formatter = logging.Formatter(log_format_str, date_format_str)
     console_formatter = logging.Formatter(console_format_str, date_format_str)
 
-    log_file_config_path = log_config.get('log_file') 
+    log_file_config_path = log_config["log_file"]
     
     # Get the root logger
     # If basicConfig has already been called elsewhere (e.g. by an imported library), 
@@ -81,7 +81,7 @@ def setup_logging(config: Optional[Dict[str, object]] = None) -> logging.Logger:
     if file_handler_active:
         # If logging to file, console can be INFO to show progress, 
         # while file captures everything from log_level (e.g. DEBUG).
-        console_log_level_str = log_config.get('console_level', 'INFO').upper() # New config option
+        console_log_level_str = log_config["console_level"].upper()
         console_log_level = getattr(logging, console_log_level_str, logging.INFO)
         console_handler.setLevel(console_log_level)
     else: # No file logging, console is the primary output
@@ -108,39 +108,3 @@ def setup_logging(config: Optional[Dict[str, object]] = None) -> logging.Logger:
         
     return root_logger
 
-if __name__ == '__main__':
-    # To test, you might need to ensure a dummy config is loadable or mock get_config()
-    # For a quick test, assuming config can be loaded:
-    try:
-        # To test file logging, ensure 'log_file' is set in your test config.
-        # e.g., in pipeline_config.yml:
-        # logging:
-        #   level: "DEBUG"
-        #   log_file: "test_run.log"
-        #   console_level: "INFO" # Test this new option
-        
-        logger = setup_logging() 
-        
-        logger.debug("This is a debug message. (Should go to file if DEBUG, not console if console is INFO)")
-        logger.info("This is an info message. (Should go to both if console is INFO or more verbose)")
-        logger.warning("This is a warning message.")
-        logger.error("This is an error message.")
-        logger.critical("This is a critical message.")
-
-        # Create a child logger to test naming
-        child_logger = logging.getLogger("my_module.child")
-        child_logger.info("Info message from child logger.")
-        child_logger.debug("Debug message from child logger.")
-
-
-        # Explicitly flush handlers to ensure file write for testing
-        for handler in logging.root.handlers:
-            handler.flush()
-        
-        print("\nTest messages logged. Check console and configured log file.")
-        print("If file logging is active with DEBUG level, 'debug message' should be in file.")
-        print("If console_level is INFO, 'debug message' should NOT be on console.")
-
-    except Exception as e:
-        print(f"Error during logging setup test: {e}")
-        print("Ensure 'config/pipeline_config.yml' is accessible or mock get_config().")

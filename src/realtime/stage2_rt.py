@@ -37,7 +37,7 @@ def run_stage2_realtime(
     working = s1_df.copy()
     working["s1_original_index"] = working.index
 
-    max_candidates = int(stage2_cfg.get("max_candidates_per_frame", 200))
+    max_candidates = int(stage2_cfg["max_candidates_per_frame"])
     if len(working) > max_candidates:
         priority_col = "main_area_filled" if "main_area_filled" in working.columns else ("area" if "area" in working.columns else None)
         if priority_col is not None:
@@ -50,12 +50,13 @@ def run_stage2_realtime(
             len(s1_df),
             max_candidates,
         )
-    crop_cfg = normalized_crop_config(stage2_cfg.get("crop_config", {"mode": "rotational_rectangle", "adaptive_padding_factor": 0.2}))
-    illumination_mode = str(stage2_cfg.get("source_image_illumination", "darkfield")).strip().lower()
+    crop_cfg = normalized_crop_config(stage2_cfg["crop_config"])
+    illumination_mode = str(stage2_cfg["source_image_illumination"]).strip().lower()
+    seg_params_raw = stage2_cfg["segmentation_params"]
     boundary_threshold_params = {
-        "thresholding_mode": str(stage2_cfg.get("segmentation_params", {}).get("thresholding_mode", "otsu")),
-        "otsu_threshold_multiplier": float(stage2_cfg.get("segmentation_params", {}).get("otsu_threshold_multiplier", 0.45)),
-        "fixed_threshold_value": int(stage2_cfg.get("segmentation_params", {}).get("fixed_threshold_value", 70)),
+        "thresholding_mode": str(seg_params_raw["thresholding_mode"]),
+        "otsu_threshold_multiplier": float(seg_params_raw["otsu_threshold_multiplier"]),
+        "fixed_threshold_value": int(seg_params_raw["fixed_threshold_value"]),
     }
     crop_records = crop_particles(
         main_img_color=fg_gray,
@@ -72,15 +73,15 @@ def run_stage2_realtime(
     if crops_df.empty:
         return Stage2Result(particles_df=crops_df)
 
-    segmentation_params = dict(stage2_cfg.get("segmentation_params", {}) or {})
+    segmentation_params = dict(seg_params_raw)
     segmentation_params["source_image_illumination_type"] = illumination_mode
     segmented_df = segment_particles(crops_df, segmentation_params)
     if segmented_df.empty:
         return Stage2Result(particles_df=segmented_df)
 
     rows: List[Dict[str, Any]] = []
-    min_focus = float(stage2_cfg.get("min_focus_score", 0.0))
-    min_area = float(stage2_cfg.get("min_particle_area", 500.0))
+    min_focus = float(stage2_cfg["min_focus_score"])
+    min_area = float(stage2_cfg["min_particle_area"])
     rejected_focus = 0
     rejected_area = 0
     focus_values: List[float] = []
