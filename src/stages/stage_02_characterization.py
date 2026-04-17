@@ -16,7 +16,7 @@ from matplotlib.gridspec import GridSpecFromSubplotSpec
 from typing import Optional, List, Tuple, Dict, Any
 
 from src.utils import (
-    get_config, load_dataframe_from_csv, save_dataframe_to_csv
+    load_dataframe_from_csv, save_dataframe_to_csv
 )
 from src.utils.config_loader import get_unified_segmentation_params
 from src.utils.path_helpers import extract_frame_from_filename
@@ -46,40 +46,36 @@ def run_stage_02_characterization(
     image_dir_path: str,
     output_dir_stage2: str,
     sample_id: str,
-    config: Optional[Dict[str, Any]] = None
+    config: Dict[str, Any]
 ) -> Optional[str]:
     """
     Performs detailed characterization for every particle candidate from Stage 1
     using a modular feature calculator architecture.
     """
     logger.info(f"--- Stage 2: Universal Characterization for Sample ID: {sample_id} ---")
-    config = config or get_config()
-    s2_config = config.get('stage_02_characterization', {})
+    s2_config = config['stage_02_characterization']
     segmentation_params = get_unified_segmentation_params(config)
-    
+
     s1_particles_df = load_dataframe_from_csv(input_s1_csv_path)
     if s1_particles_df is None or s1_particles_df.empty:
         logger.warning(f"No particles loaded from Stage 1 CSV: {input_s1_csv_path}. Aborting Stage 2.")
         return None
 
-    cropping_config = s2_config.get('cropping', {})
-    if not cropping_config:
-        logger.warning("Cropping configuration not found in 'stage_02_characterization'. Using defaults.")
-        cropping_config = {'mode': 'rotational_rectangle', 'adaptive_padding_factor': 0.2}
+    cropping_config = s2_config['cropping']
 
     try:
         normalized_cropping = normalized_crop_config(cropping_config)
-        logger.info(f"Initialized ParticleCropper with mode: '{normalized_cropping.get('mode')}'")
+        logger.info(f"Initialized ParticleCropper with mode: '{normalized_cropping['mode']}'")
     except ConfigError as e:
         logger.error(f"Failed to initialize ParticleCropper: {e}")
         return None
 
     boundary_threshold_params = {
-        'thresholding_mode': segmentation_params.get('thresholding_mode', 'otsu'),
-        'otsu_threshold_multiplier': segmentation_params.get('otsu_threshold_multiplier', 0.45),
-        'fixed_threshold_value': segmentation_params.get('fixed_threshold_value', 70),
+        'thresholding_mode': segmentation_params['thresholding_mode'],
+        'otsu_threshold_multiplier': segmentation_params['otsu_threshold_multiplier'],
+        'fixed_threshold_value': segmentation_params['fixed_threshold_value'],
     }
-    illumination_mode = str(segmentation_params.get('source_image_illumination_type', 'darkfield')).strip().lower()
+    illumination_mode = str(segmentation_params['source_image_illumination_type']).strip().lower()
 
     s1_particles_df['s1_original_index'] = s1_particles_df.index
 
@@ -137,8 +133,8 @@ def run_stage_02_characterization(
     )
     comprehensive_df.drop(columns=['s1_original_index'], inplace=True, errors='ignore')
 
-    focus_cfg = s2_config.get('focussed_particles', {})
-    track_col = focus_cfg.get('track_column', 'track_id')
+    focus_cfg = s2_config['focussed_particles']
+    track_col = focus_cfg['track_column']
 
     # focus filter
     filtered_df, diagnostics_df = select_focused_tracks(comprehensive_df, focus_cfg)
@@ -163,7 +159,7 @@ def run_stage_02_characterization(
         normalized_cropping,
         image_dir_path,
         focus_cfg,
-        bool(cropping_config.get('save_all_particle_crops', True)),
+        bool(cropping_config['save_all_particle_crops']),
     )
 
     logger.info(f"--- Stage 2: Characterization for {sample_id} COMPLETED ---")

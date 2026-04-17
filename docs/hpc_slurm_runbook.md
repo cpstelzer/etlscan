@@ -16,7 +16,7 @@ Raw data, i.e., sample directories containing the image series (e.g., 20260212_p
 - per-sample outputs: `<project_base_dir>/data/output/<batch>/<sample>/...`
 - batch rollups: `<project_base_dir>/<batch>.csv`, `<batch>_stage3_filtered_good.csv`, etc.
 
-For cluster runs, set `project_base_dir` in `config/pipeline_config.yml` to a writable shared filesystem path (e.g., under `$SCRATCH`) so:
+For cluster runs, set `project_base_dir` in `config/config.yml` to a writable shared filesystem path (e.g., under `$SCRATCH`) so:
 
 - compute nodes can write stage outputs,
 - login nodes can read results later,

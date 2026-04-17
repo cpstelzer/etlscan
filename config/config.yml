@@ -1,0 +1,317 @@
+# config/config.yml
+# Single source of truth for the well_plate_analyzer pipeline.
+# Consolidates the former config/pipeline_config.yml, src/acquire/ws_config.yaml,
+# and src/acquire/ws_config_S5VPJ6415.yaml.
+
+# -----------------------------------------------------------------------------
+# Global
+# -----------------------------------------------------------------------------
+project_base_dir: "C:/sandbox"
+sample_subdir_name: "C:/wellscanner/test/"
+
+# Selects which entry under `hardware_profiles:` is deep-merged into `acquisition:` at load time.
+active_hardware_profile: "TS1_0638_70_EL"
+
+# -----------------------------------------------------------------------------
+# Logging
+# -----------------------------------------------------------------------------
+logging:
+  level: "INFO"
+  console_level: "INFO"
+  format: "%(asctime)s - %(levelname)s - %(name)s - %(module)s.%(funcName)s - %(message)s"
+  date_format: "%Y-%m-%d %H:%M:%S"
+  log_file: "pipeline_run.log"
+
+# -----------------------------------------------------------------------------
+# Imaging system
+# -----------------------------------------------------------------------------
+system:
+  image_width_px: 4504
+  image_height_px: 4504
+  source_image_illumination_type: "collimated"
+  thresholding:
+    mode: "otsu"
+    otsu_threshold_multiplier: 0.7
+    fixed_threshold_value: 70
+  segmentation:
+    enable_unsharp_masking: false
+    unsharp_mask_sigma: 1.0
+    unsharp_mask_amount: 1.0
+    min_noise_size: 50
+    closing_selem_size: 3
+    min_significant_area: 300
+
+# -----------------------------------------------------------------------------
+# Acquisition runtime (rig-agnostic defaults)
+# Hardware-specific values live in hardware_profiles and are deep-merged in.
+# -----------------------------------------------------------------------------
+acquisition:
+  paths:
+    output_folder_base: "C:/wellscanner/test/"
+    log_filename: "metadata_log.csv"
+    experiment_summary_log_filename: "experiment_summary_log.csv"
+  focusing:
+    pattern: "zigzag"
+    scan_step_um: 350
+    lens_settle_time_sec: 0.025
+    large_jump_threshold_dpt: -3.0
+    large_jump_settle_sec: 0.040
+    # scan_height_mm, scan_ratio, lens_controller_port: set by hardware_profiles
+  camera:
+    fps: 25.0
+    video_duration_sec: 15
+    color_mode: "Ask"
+    pixel_format_preference: ["BayerRG8", "BayerBG8", "BayerGB8", "BayerGR8", "Mono8", "Mono12"]
+    max_num_buffer_min: 50
+    grab_strategy: "OneByOne"
+    retrieve_timeout_margin_ms: 150
+    # exposure_us: set by hardware_profiles
+  # roi.width/height: set by hardware_profiles
+  output:
+    image_format: "bmp"
+  watermark:
+    font: "FONT_HERSHEY_SIMPLEX"
+    font_scale: 2.0
+    color_bgr: [255, 255, 255]
+    thickness: 2
+    offset_horizontal: 600
+    offset_vertical: 200
+  plate_definitions:
+    "24":
+      start_x: 15.74
+      start_y: 18.88
+      spacing: 18.0
+      # origin_x, origin_y: set by hardware_profiles
+    "96":
+      start_x: 20.3
+      start_y: 14.5
+      spacing: 9.0
+      origin_x: 17.096
+      origin_y: 14.981
+
+# -----------------------------------------------------------------------------
+# Hardware profiles (deep-merged into `acquisition:` at load time)
+# -----------------------------------------------------------------------------
+hardware_profiles:
+  TS1_0638_70_EL:
+    focusing:
+      scan_height_mm: 11.2
+      scan_ratio: 2.25
+      lens_controller_port: "COM5"
+    camera:
+      exposure_us: 750
+    roi:
+      width: 3600
+      height: 3600
+    plate:
+      type: 24
+    plate_definitions:
+      "24":
+        origin_x: 6.387
+        origin_y: 17.963
+  S5VPJ6415:
+    focusing:
+      scan_height_mm: 12.5
+      scan_ratio: 3.56
+      lens_controller_port: "COM6"
+    camera:
+      exposure_us: 2700
+    roi:
+      width: 4512
+      height: 4512
+    plate:
+      type: 96
+    plate_definitions:
+      "24":
+        origin_x: 17.096
+        origin_y: 14.981
+
+# -----------------------------------------------------------------------------
+# Realtime mode
+# Analysis-parameter duplicates (stage1/stage2/stage3) are intentionally NOT here;
+# realtime reads them from the canonical stage_0N_* sections below.
+# -----------------------------------------------------------------------------
+realtime_mode:
+  enabled: true
+  default_grayscale: true
+  output_root_dir: "data/output/realtime"
+  runtime:
+    target_fps: 5
+    max_processing_latency_ms: 250
+    drop_frame_if_backlogged: false
+    queue_size: 2
+  background:
+    bgi_min_age_s: 2.0
+    bgi_max_age_s: 4.0
+  acquisition:
+    source: "camera"
+    camera_index: 0
+    input_dir: null
+    max_frames: null
+    flat_field_dir: null
+    retrieve_timeout_margin_ms: 150
+    etl_control_enabled: true
+    start_dpt: -2.0
+    adaptive_enabled: false
+    adaptive_window_fraction: 0.1
+    adaptive_min_window_points: 3
+    adaptive_dispersion_coeff: 1
+  stage1:
+    foreground_diff_threshold: 10
+    max_foreground_fraction: 0.08
+    reacquire_detection_threshold: 20
+  stage2:
+    # Kept distinct from stage_01.unsubtracted_particle_analysis.min_particle_area (1000).
+    # This governs realtime stage2 filtering and has historically been 500.
+    min_particle_area: 500
+    max_candidates_per_frame: 200
+  persistence:
+    save_accepted_crops: true
+    image_format: "png"
+    png_compression: 3
+  logging:
+    metric_print_interval_s: 5
+    etl_status_interval_frames: 30
+    focus_rejection_log_interval_frames: 30
+
+# -----------------------------------------------------------------------------
+# Stage 1: Detection & Pre-Filtering
+# -----------------------------------------------------------------------------
+stage_01_initial_detection:
+  BG_frame_offset_mode: "automatic"
+  bg_offset_val: 180
+  well_masking:
+    create_mask: true
+    auto_center_mask: true
+    radius_px: 2000
+    radius_fraction: 0.75
+  black_plate_well_analysis:
+    enable_brightness_adjustment: true
+    well_identification:
+      low_threshold_value: 10
+      min_expected_diameter_px: 1500
+      max_expected_diameter_px: 4000
+      min_fill_ratio_to_enclosing_circle: 0.8
+      center_offset_fraction_threshold: 0.1
+    brightness_peak_calculation:
+      min_intensity_for_peak_search: 75
+      percentile_for_peak_proxy: 75
+    brightness_matching:
+      max_peak_difference_allowed: 15
+      adjustment_method: "global_shift"
+      target_peak_offset_after_shift: 3
+  particle_analysis:
+    apply_convolution: false
+    convolution_kernel:
+      - [0,  0,  0,  0,  0]
+      - [0, -1, -1, -1,  0]
+      - [0, -1, 10, -1,  0]
+      - [0, -1, -1, -1,  0]
+      - [0,  0,  0,  0,  0]
+    min_microorganism_area: 500
+    microorganism_blur_kernel: 5
+  unsubtracted_particle_analysis:
+    min_particle_area: 1000
+    adaptive_padding_factor: 0.2
+  particle_comparison:
+    search_radius_factor: 2.0
+    default_particle_area: 2000
+  tracking:
+    enabled: true
+    pixel_size_um: 2.74
+    magnification: 0.638
+    search_range_mm: 0.55
+    memory_frames: 5
+    min_track_length: 10
+
+# -----------------------------------------------------------------------------
+# Stage 2: Universal Characterization
+# -----------------------------------------------------------------------------
+stage_02_characterization:
+  cropping:
+    save_all_particle_crops: false
+    mode: "rotational_rectangle"
+    adaptive_padding_factor: 0.2
+  quality_features:
+    black_mask_check:
+      min_area_ratio: 0.03
+      max_black_pixel_value: 15
+      min_edge_thickness_fraction: 0.1
+  shape_descriptors:
+    lbp_radii: [1, 3]
+    lbp_points: 8
+  focussed_particles:
+    enabled: true
+    frame_column: "frame"
+    track_column: "track_id"
+    sharpness_column: "variance_laplacian"
+    min_sharpness_fraction: 0.3
+    min_prominence_fraction: 0.05
+    smooth_window: 3
+    sharpness_min_threshold: 100
+    max_tracks_to_plot: 15
+    save_plots: true
+    crop_filename_prefix: null
+
+# -----------------------------------------------------------------------------
+# Stage 3: Filtering & Classification
+# (Indentation bug from pipeline_config.yml is fixed here: training_params,
+# test_split_size, random_state, rf_param_grid, efficient_net_training,
+# exclude_feature_prefixes are now correctly direct children of this stage.)
+# -----------------------------------------------------------------------------
+stage_03_filtering_and_classification:
+  model_type: "random_forest_model"
+  debug_output:
+    save_rejected_images: true
+  random_forest_model:
+    model_filename: "rf_fem_classifier.joblib"
+    scaler_filename: "rf_fem_scaler.joblib"
+  efficient_net_model:
+    checkpoint_filename: "efficientnet_b0_best.pt"
+    input_size: 224
+    positive_label: "good"
+  size_invariant_features: false
+  ml_filter:
+    min_probability_threshold: 0.35
+  quality_flags_filter:
+    filter_on_boundary: true
+    filter_black_mask: true
+  sharpness_filter:
+    enabled: true
+    metric: "variance_laplacian"
+    min_threshold: 100
+  training_params:
+    good_data_subdir: "good"
+    bad_data_subdir: "bad"
+  test_split_size: 0.2
+  random_state: 42
+  rf_param_grid:
+    n_estimators: [50, 100, 200]
+    max_depth: [null, 10, 20]
+    min_samples_split: [2, 5]
+    min_samples_leaf: [1, 3]
+    class_weight: ["balanced", null]
+  efficient_net_training:
+    dataset_subdir: ""
+    default_epochs: 15
+    default_batch_size: 32
+    learning_rate: 0.001
+    weight_decay: 0.0001
+    mixup_alpha: 0.4
+  exclude_feature_prefixes:
+    - "lbp_"
+
+# -----------------------------------------------------------------------------
+# Stage 4: Biological Analysis
+# -----------------------------------------------------------------------------
+stage_04_biological_analysis:
+  egg_detection:
+    gaussian_sigma: 1.0
+    egg_posterior_pixel_fraction: 0.35
+    egg_threshold_quantile: 0.8
+    egg_min_area: 50
+    egg_max_area: 5000
+    egg_min_solidity: 0.60
+    egg_max_solidity: 0.99
+    egg_min_eccentricity: 0.2
+    orientation_diff_tolerance_deg: 85

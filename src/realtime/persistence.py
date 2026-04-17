@@ -17,7 +17,7 @@ def _crop_filename(session: RealtimeSession, frame_idx: int, particle_idx: int, 
     )
 
 
-def save_accepted_crops(df: pd.DataFrame, session: RealtimeSession, image_format: str = "png", png_compression: int = 3) -> List[str]:
+def save_accepted_crops(df: pd.DataFrame, session: RealtimeSession, image_format: str, png_compression: int) -> List[str]:
     if df is None or df.empty:
         return []
 

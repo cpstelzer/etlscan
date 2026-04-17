@@ -42,8 +42,7 @@ from src.stages.stage_01_initial_detection import prepare_masked_foreground
 # ---------------------------------------------------------------------------
 FG_IMAGE_PATH = Path("data/realtime_diagnostic/fg.png")
 BG_IMAGE_PATH = Path("data/realtime_diagnostic/bg.png")
-WS_CONFIG_PATH = Path("src/acquire/ws_config.yaml")
-PIPELINE_CONFIG_PATH = Path("config/pipeline_config.yml")
+CONFIG_PATH = Path("config/config.yml")
 
 # Dedicated output root for this diagnostic script
 DIAGNOSTIC_OUTPUT_ROOT = Path("data/output/realtime_disk_diagnostic")
@@ -157,15 +156,14 @@ def run() -> int:
     logger.info("Starting realtime disk diagnostic run")
     logger.info("FG_IMAGE_PATH=%s", FG_IMAGE_PATH)
     logger.info("BG_IMAGE_PATH=%s", BG_IMAGE_PATH)
-    logger.info("WS_CONFIG_PATH=%s", WS_CONFIG_PATH)
-    logger.info("PIPELINE_CONFIG_PATH=%s", PIPELINE_CONFIG_PATH)
+    logger.info("CONFIG_PATH=%s", CONFIG_PATH)
     logger.info("OUTPUT_DIR=%s", output_dir)
 
     if not FG_IMAGE_PATH.exists() or not BG_IMAGE_PATH.exists():
         logger.error("FG/BG input images missing. Please create both hardwired files first.")
         return 2
 
-    cfg = load_realtime_config(str(WS_CONFIG_PATH), pipeline_config_path=str(PIPELINE_CONFIG_PATH))
+    cfg = load_realtime_config(str(CONFIG_PATH))
     logger.info("Loaded realtime config successfully")
 
     fg = cv2.imread(str(FG_IMAGE_PATH), cv2.IMREAD_GRAYSCALE)
@@ -196,11 +194,11 @@ def run() -> int:
     prep = prepare_masked_foreground(
         fg_ffc,
         bg_ffc,
-        enable_brightness_adjustment=bool(cfg.stage1_config.get("enable_brightness_adjustment", True)),
-        brightness_config=cfg.stage1_config.get("config_black_plate_well", {}),
-        well_masking_cfg=cfg.stage1_config.get("well_masking", {}),
-        system_cfg=cfg.stage1_config.get("system_cfg", {}),
-        source_illumination=str(cfg.stage1_config.get("source_image_illumination", "darkfield")).strip().lower(),
+        enable_brightness_adjustment=bool(cfg.stage1_config["enable_brightness_adjustment"]),
+        brightness_config=cfg.stage1_config["config_black_plate_well"],
+        well_masking_cfg=cfg.stage1_config["well_masking"],
+        system_cfg=cfg.stage1_config["system_cfg"],
+        source_illumination=str(cfg.stage1_config["source_image_illumination"]).strip().lower(),
     )
     logger.info("Computed masked FG/BG preparation")
 
@@ -217,7 +215,7 @@ def run() -> int:
         return 4
     _save_image(output_dir / "09_subtracted.png", sub_img, logger)
 
-    threshold = int(cfg.stage1_config.get("foreground_diff_threshold", 10))
+    threshold = int(cfg.stage1_config["foreground_diff_threshold"])
     _, motion_mask = cv2.threshold(sub_img, threshold, 255, cv2.THRESH_BINARY)
     _save_image(output_dir / "10_motion_mask.png", motion_mask, logger)
 
@@ -249,7 +247,7 @@ def run() -> int:
             "min_focus_score": cfg.min_focus_score,
             "min_particle_area": cfg.min_particle_area,
             "max_candidates_per_frame": cfg.max_stage2_candidates_per_frame,
-            "source_image_illumination": cfg.stage1_config.get("source_image_illumination", "darkfield"),
+            "source_image_illumination": cfg.stage1_config["source_image_illumination"],
         },
     )
     logger.info(
@@ -329,7 +327,7 @@ def run() -> int:
 
     # Optional focused well diagnostic using same config sections
     try:
-        bp_cfg = cfg.stage1_config.get("config_black_plate_well", {})
+        bp_cfg = cfg.stage1_config["config_black_plate_well"]
         if bp_cfg:
             well_mask, edges = create_well_mask_black_plate(fg, bp_cfg)
             if well_mask is not None:

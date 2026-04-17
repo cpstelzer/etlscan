@@ -5,8 +5,8 @@ python src/acquire/ws_acquire_single.py
 python scripts/run_realtime.py
 
 # Offline analysis
-python scripts/run_pipeline.py --input_batch_dir C:/wellscanner/test --stages 1,2 --config config/pipeline_config.yml
+python scripts/run_pipeline.py --input_batch_dir C:/wellscanner/test --stages 1,2 --config config/config.yml
 
-python scripts/train_efficientnet_model.py --config config/pipeline_config.yml --epochs 20 --batch-size 32
+python scripts/train_efficientnet_model.py --config config/config.yml --epochs 20 --batch-size 32
 
 python scripts/train_model.py 

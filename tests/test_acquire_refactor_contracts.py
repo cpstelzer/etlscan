@@ -71,8 +71,8 @@ def test_single_workflow_smoke(monkeypatch):
 
     monkeypatch.setattr("src.acquire.workflows._get_acquisition_api", lambda: (fake_load_config, fake_run_acquisition))
 
-    run_single_well_workflow(acquisition_config_path="ws_config.yaml", plate_no=0, well_no=0, start_dpt=-2.0)
-    assert called['config_path'] == "ws_config.yaml"
+    run_single_well_workflow(acquisition_config_path="config.yml", plate_no=0, well_no=0, start_dpt=-2.0)
+    assert called['config_path'] == "config.yml"
     assert called['args'][0:3] == (0, 0, -2.0)
 
 
@@ -87,9 +87,9 @@ def test_load_acquisition_config_uses_lazy_api(monkeypatch):
 
     monkeypatch.setattr("src.acquire.workflows._get_acquisition_api", lambda: (fake_load_config, lambda *args, **kwargs: None))
 
-    conf = load_acquisition_config("ws_config.yaml")
-    assert called['path'] == "ws_config.yaml"
-    assert conf['loaded_from_path'].endswith("ws_config.yaml")
+    conf = load_acquisition_config("config.yml")
+    assert called['path'] == "config.yml"
+    assert conf['loaded_from_path'].endswith("config.yml")
 
 
 def test_shim_config_paths_are_repo_relative():

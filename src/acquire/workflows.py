@@ -575,7 +575,7 @@ def run_experiment_sweep_workflow(*, acquisition_config_path, csv_filename, defa
         finalize_stage_cleanup(initialization_successful, zab_port, zab_device_x, zab_device_y, stage_controller)
 
 
-def run_single_well_workflow(*, acquisition_config_path, plate_no=0, well_no=0, start_dpt=-2.0):
+def run_single_well_workflow(*, acquisition_config_path, plate_no, well_no, start_dpt):
     load_config, run_acquisition = _get_acquisition_api()
     acq_conf = load_config(acquisition_config_path)
     run_acquisition(plate_no, well_no, start_dpt, acq_conf)

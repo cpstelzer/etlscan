@@ -12,11 +12,11 @@ import logging
 logger = logging.getLogger(__name__)
 
 def visualize_ml_features(
-    image_path_or_array: Any, 
-    main_props: Optional[Any], 
-    egg_area_props: Optional[Any], 
+    image_path_or_array: Any,
+    main_props: Optional[Any],
+    egg_area_props: Optional[Any],
     output_visualization_path: str,
-    ml_feature_params: Optional[Dict[str, Any]] = None # Used for egg_posterior_pixel_fraction
+    ml_feature_params: Dict[str, Any],
 ):
     """
     Visualizes an image with overlays for the main detected body and potential egg area.
@@ -84,15 +84,14 @@ def visualize_ml_features(
             ax.plot((p1_major_axis_c, p2_major_axis_c), (p1_major_axis_r, p2_major_axis_r), 
                     '--y', linewidth=1.2, label="Major Axis")
 
-            posterior_area_ratio_for_viz = 0.5 
-            if ml_feature_params and main_props.area > 0: 
-                coords = main_props.coords 
-                centroid_arr = np.array(main_props.centroid) 
-                relative_coords = coords - centroid_arr 
-                projections = np.dot(relative_coords, axis_vector_rc_unit) 
-                posterior_pixels_count = np.sum(projections > 0) 
-                if main_props.area > 0:
-                    posterior_area_ratio_for_viz = posterior_pixels_count / main_props.area
+            posterior_area_ratio_for_viz = 0.5
+            if main_props.area > 0:
+                coords = main_props.coords
+                centroid_arr = np.array(main_props.centroid)
+                relative_coords = coords - centroid_arr
+                projections = np.dot(relative_coords, axis_vector_rc_unit)
+                posterior_pixels_count = np.sum(projections > 0)
+                posterior_area_ratio_for_viz = posterior_pixels_count / main_props.area
             
             positive_projection_side_is_posterior = (posterior_area_ratio_for_viz >= 0.5)
             
@@ -104,12 +103,7 @@ def visualize_ml_features(
                 _axis_vector_pointing_posterior_viz = -_axis_vector_pointing_posterior_viz
 
             if main_props.area > 0:
-                # Get posterior fraction from ml_feature_params (config)
-                # Default to 0.45 if not specified in params for visualization
-                egg_posterior_fraction_viz = 0.45 
-                if ml_feature_params and 'egg_posterior_pixel_fraction' in ml_feature_params:
-                    egg_posterior_fraction_viz = ml_feature_params.get('egg_posterior_pixel_fraction', 0.45)
-                
+                egg_posterior_fraction_viz = float(ml_feature_params['egg_posterior_pixel_fraction'])
                 percentile_to_cut_viz = (1.0 - egg_posterior_fraction_viz) * 100.0
 
                 # Check if _posterior_coords_for_egg_search was attached (using the config fraction)
@@ -167,104 +161,3 @@ def visualize_ml_features(
     finally:
         if 'fig' in locals() and plt.fignum_exists(fig.number):
             plt.close(fig)
-
-
-if __name__ == '__main__':
-    if not logging.getLogger().hasHandlers():
-        logging.basicConfig(level=logging.DEBUG)
-
-    from src.core.ml_feature_extractor import extract_ml_features 
-    from src.utils.config_loader import get_config 
-
-    try:
-        cfg = get_config() 
-        # ml_feature_params will now be read by visualize_ml_features for egg_posterior_pixel_fraction
-        ml_params_for_extraction_and_viz = cfg.get('stage_03_ml_classification', {}).get('feature_extraction_params', {})
-        if not ml_params_for_extraction_and_viz or 'egg_posterior_pixel_fraction' not in ml_params_for_extraction_and_viz: 
-            logger.warning("ML feature extraction parameters (or egg_posterior_pixel_fraction) "
-                           "not found in config for test. Using hardcoded test params.")
-            ml_params_for_extraction_and_viz = {
-                'gaussian_sigma': 1.0, 'otsu_threshold_multiplier': 0.5, 'closing_selem_size': 3,
-                'min_noise_size': 50, 'min_significant_area': 100, 
-                'egg_posterior_pixel_fraction': 0.45, # Example for testing
-                'egg_threshold_quantile': 0.90, 
-                'egg_min_area': 50, 'egg_max_area': 5000,
-                'egg_min_solidity': 0.60, 'egg_max_solidity': 0.99,
-                'egg_min_eccentricity': 0.2, 
-                'orientation_diff_tolerance_deg': 60
-            }
-    except Exception as e:
-        print(f"Could not load config for test: {e}. Using hardcoded params.")
-        ml_params_for_extraction_and_viz = { 
-            'gaussian_sigma': 1.0, 'otsu_threshold_multiplier': 0.5, 'closing_selem_size': 3,
-            'min_noise_size': 50, 'min_significant_area': 100, 
-            'egg_posterior_pixel_fraction': 0.45, # Example for testing
-            'egg_threshold_quantile': 0.90,
-            'egg_min_area': 50, 'egg_max_area': 5000,
-            'egg_min_solidity': 0.60, 'egg_max_solidity': 0.99,
-            'egg_min_eccentricity': 0.2,
-            'orientation_diff_tolerance_deg': 60
-        }
-
-    test_image_v = np.zeros((200, 200), dtype=np.uint8)
-    rr_body_v, cc_body_v = skimage.draw.ellipse(100, 100, 70, 25, rotation=np.deg2rad(10)) 
-    test_image_v[rr_body_v, cc_body_v] = 150
-    rr_heavy, cc_heavy = skimage.draw.ellipse(100 + int(70*0.6*np.cos(np.deg2rad(10))), 
-                                              100 + int(70*0.6*np.sin(np.deg2rad(10))), 
-                                              15,10, rotation=np.deg2rad(10))
-    test_image_v[rr_heavy, cc_heavy] = 160
-    
-    rr_egg_v, cc_egg_v = skimage.draw.ellipse(100 + int(70*0.5*np.cos(np.deg2rad(10))) , 
-                                              100 + int(70*0.5*np.sin(np.deg2rad(10))), 
-                                              15, 20, rotation=np.deg2rad(10+90))
-    test_image_v[rr_egg_v, cc_egg_v] = 220 
-
-    temp_image_file_v = "temp_vis_test_image_pixel_slice_contour_config.png"
-    skimage.io.imsave(temp_image_file_v, skimage.util.img_as_ubyte(test_image_v))
-    
-    # Pass the same ml_params to extraction and visualization
-    features_v, main_p_v, egg_area_p_v = extract_ml_features(
-        temp_image_file_v, ml_params_for_extraction_and_viz, 
-        image_array_gray=skimage.util.img_as_float(test_image_v)
-    )
-    if main_p_v: logger.info(f"Test body orientation: {np.rad2deg(main_p_v.orientation):.2f} degrees")
-    output_vis_file_v = "temp_output_visualization_pixel_slice_contour_config.png"
-    visualize_ml_features(temp_image_file_v, main_p_v, egg_area_p_v, output_vis_file_v, 
-                          ml_feature_params=ml_params_for_extraction_and_viz) # Pass params here
-    if os.path.exists(output_vis_file_v): 
-        logger.info(f"Test visualization with pixel slice (config fraction) contour saved to {output_vis_file_v}")
-
-    problem_image_filename = "problem_image_for_viz_test.png" 
-    logger.info(f"If '{problem_image_filename}' (your example image) exists in the current dir, it will be processed.")
-    if os.path.exists(problem_image_filename):
-        problem_img_array = skimage.io.imread(problem_image_filename, as_gray=True)
-        problem_img_array_float = skimage.util.img_as_float(problem_img_array)
-
-        logger.info(f"Processing your provided image: {problem_image_filename}")
-        features_prob, main_p_prob, egg_area_p_prob = extract_ml_features(
-            problem_image_filename, ml_params_for_extraction_and_viz, 
-            image_array_gray=problem_img_array_float
-        )
-        if features_prob and main_p_prob:
-            logger.info(f"Problem image - Main Orientation (deg): {np.rad2deg(main_p_prob.orientation)}")
-            logger.info(f"Problem image - Posterior Area Ratio: {features_prob['posterior_area_ratio']}")
-            logger.info(f"Problem image - Total Egg Area: {features_prob['total_egg_area']}")
-            if hasattr(main_p_prob, '_posterior_coords_for_egg_search'): 
-                 num_posterior_pixels = main_p_prob._posterior_coords_for_egg_search.shape[0]
-                 expected_frac_prob = ml_params_for_extraction_and_viz.get('egg_posterior_pixel_fraction',0.45)
-                 logger.info(f"Problem image - Num posterior {expected_frac_prob*100:.0f}% pixels: {num_posterior_pixels}")
-
-            output_vis_file_prob = "output_visualization_problem_image_pixel_slice_config.png"
-            visualize_ml_features(
-                problem_image_filename, 
-                main_p_prob, 
-                egg_area_p_prob, 
-                output_vis_file_prob, 
-                ml_feature_params=ml_params_for_extraction_and_viz # Pass params here
-            )
-            if os.path.exists(output_vis_file_prob): 
-                logger.info(f"Visualization for problem image (pixel slice config frac) saved to {output_vis_file_prob}")
-        else:
-            logger.error(f"Could not extract features from {problem_image_filename} for visualization test.")
-
-    if os.path.exists(temp_image_file_v): os.remove(temp_image_file_v)

@@ -30,7 +30,7 @@ def _reset_config():
 
 def _write_config(tmp_path: Path) -> Path:
     """Write a minimal pipeline config for Stage 3 tests and return its path."""
-    config_path = tmp_path / "pipeline_config.yml"
+    config_path = tmp_path / "config.yml"
     config_data = {
         'project_base_dir': str(tmp_path),
         'sample_subdir_name': 'sample_A',

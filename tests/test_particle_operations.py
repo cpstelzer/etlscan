@@ -46,7 +46,7 @@ def test_compute_square_for_rotated_rectangle_builds_square_and_clips_to_image()
 
 def test_centroid_square_rr_mode_returns_square_crop():
     """centroid_square_rr mode yields a square crop and metadata entry."""
-    crop_config = {'mode': 'centroid_square_rr', 'rotational_padding': 5}
+    crop_config = {'mode': 'centroid_square_rr', 'adaptive_padding_factor': 0.2}
     full_image = np.zeros((120, 120), dtype=np.uint8)
     particle_data = pd.Series({
         'X': 60.0,
