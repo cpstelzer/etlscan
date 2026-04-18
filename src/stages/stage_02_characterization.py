@@ -16,7 +16,7 @@ from matplotlib.gridspec import GridSpecFromSubplotSpec
 from typing import Optional, List, Tuple, Dict, Any
 
 from src.utils import (
-    load_dataframe_from_csv, save_dataframe_to_csv
+    load_dataframe_from_csv, save_dataframe_to_csv, build_crop_filename
 )
 from src.utils.config_loader import get_unified_segmentation_params
 from src.utils.path_helpers import extract_frame_from_filename
@@ -166,27 +166,6 @@ def run_stage_02_characterization(
     return saved_csv_path
 
 
-def build_crop_filename(
-    sample_id: str,
-    track_label: str,
-    frame_num: int,
-    x_value: Any,
-    y_value: Any
-) -> str:
-    """Assemble a descriptive filename for a particle crop using track and frame info."""
-    try:
-        x_int = int(x_value) if pd.notna(x_value) else 0
-    except (TypeError, ValueError):
-        x_int = 0
-
-    try:
-        y_int = int(y_value) if pd.notna(y_value) else 0
-    except (TypeError, ValueError):
-        y_int = 0
-
-    return f"{sample_id}_{track_label}_frame{frame_num}_X{x_int}_Y{y_int}.png"
-
-
 def crop_particles(
     main_image_color: np.ndarray,
     main_image_gray: np.ndarray,
@@ -212,13 +191,10 @@ def crop_particles(
         original_index = s1_particle_row['s1_original_index']
         track_label = _format_track_label(s1_particle_row, fallback_suffix=original_index)
 
-        crop_filename = build_crop_filename(
-            sample_id,
-            track_label,
-            frame_num,
-            s1_particle_row.get('X'),
-            s1_particle_row.get('Y')
-        )
+        x_raw, y_raw = s1_particle_row.get('X'), s1_particle_row.get('Y')
+        x_int = int(x_raw) if pd.notna(x_raw) else 0
+        y_int = int(y_raw) if pd.notna(y_raw) else 0
+        crop_filename = build_crop_filename(sample_id, track_label, frame_num, x_int, y_int)
 
         crop_gray, crop_metadata = crop_particle_from_arrays(
             crop_config,
@@ -942,13 +918,10 @@ def crop_and_save_final_particle_images(
 
         for idx, row in group.iterrows():
             track_label = _format_track_label(row, fallback_suffix=idx)
-            crop_filename = build_crop_filename(
-                sample_id,
-                track_label,
-                frame_num,
-                row.get('X'),
-                row.get('Y')
-            )
+            x_raw, y_raw = row.get('X'), row.get('Y')
+            x_int = int(x_raw) if pd.notna(x_raw) else 0
+            y_int = int(y_raw) if pd.notna(y_raw) else 0
+            crop_filename = build_crop_filename(sample_id, track_label, frame_num, x_int, y_int)
 
             crop_gray, _ = crop_particle_from_arrays(
                 crop_config,

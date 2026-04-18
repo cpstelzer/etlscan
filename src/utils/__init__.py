@@ -13,6 +13,7 @@ from .path_helpers import (
     parse_sharp_crop_filename
 )
 from .data_io import save_dataframe_to_csv, load_dataframe_from_csv
+from .filename_helpers import build_crop_filename
 from .common_exceptions import (
     ConfigError,
     ProcessingError,
