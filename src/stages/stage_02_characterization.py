@@ -1,19 +1,20 @@
 # src/stages/stage_02_characterization.py
-import os
-import cv2
-import pandas as pd
-import numpy as np
-import logging
-import skimage.util
-import math
 import glob
-import matplotlib
+import logging
+import math
 import numbers
+import os
+from typing import Optional, List, Tuple, Dict, Any
+
+import cv2
+import matplotlib
+import numpy as np
+import pandas as pd
+import skimage.util
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 import matplotlib.image as mpimg
 from matplotlib.gridspec import GridSpecFromSubplotSpec
-from typing import Optional, List, Tuple, Dict, Any
 
 from src.utils import (
     load_dataframe_from_csv, save_dataframe_to_csv, build_crop_filename

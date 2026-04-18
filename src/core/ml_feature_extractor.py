@@ -1,18 +1,14 @@
 # src/core/ml_feature_extractor.py
-import skimage.io
-import skimage.filters
-import skimage.measure
-import skimage.morphology
-import skimage.util
-import skimage.draw 
-import numpy as np
-import os
 import logging
-# cv2 import is no longer needed here if ndi is removed and segment_main_body does all cv2 work
-# import cv2 
-# from scipy import ndimage as ndi # Should be removed as fill_holes is now in segmentation.py
+import os
 from typing import Optional, Dict, Any, Tuple, List
-from skimage.measure._regionprops import RegionProperties # For type hinting
+
+import numpy as np
+import skimage.filters
+import skimage.io
+import skimage.measure
+import skimage.util
+from skimage.measure._regionprops import RegionProperties
 
 from src.utils.common_exceptions import ConfigError
 from src.core.segmentation import segment_main_body_from_image_float 

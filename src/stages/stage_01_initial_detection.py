@@ -1,17 +1,17 @@
 # src/stages/stage_01_initial_detection.py
+import logging
 import os
 import re
-import cv2
-import pandas as pd
-import numpy as np
-import logging
 from typing import Union, Optional, List, Dict, Any, Tuple
-from sklearn.neighbors import BallTree
-import shutil
-import skimage.util
-import skimage.filters
-import trackpy as tp
+
+import cv2
 import matplotlib.pyplot as plt
+import numpy as np
+import pandas as pd
+import skimage.filters
+import skimage.util
+import trackpy as tp
+from sklearn.neighbors import BallTree
 
 from src.utils import (
     load_dataframe_from_csv, save_dataframe_to_csv,
