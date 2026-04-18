@@ -93,7 +93,7 @@ def get_unified_segmentation_params(config: Dict[str, Any]) -> Dict[str, Any]:
 
     unified_params: Dict[str, Any] = dict(system_segmentation)
     unified_params["source_image_illumination_type"] = system_cfg["source_image_illumination_type"]
-    unified_params["thresholding_mode"] = global_thresh_cfg["mode"]
+    unified_params["thresholding_mode"] = global_thresh_cfg["thresholding_mode"]
     unified_params["otsu_threshold_multiplier"] = global_thresh_cfg["otsu_threshold_multiplier"]
     unified_params["fixed_threshold_value"] = global_thresh_cfg["fixed_threshold_value"]
 

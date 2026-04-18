@@ -30,7 +30,7 @@ system:
   image_height_px: 4504
   source_image_illumination_type: "collimated"
   thresholding:
-    mode: "otsu"
+    thresholding_mode: "otsu"
     otsu_threshold_multiplier: 0.7
     fixed_threshold_value: 70
   segmentation:

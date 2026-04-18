@@ -107,7 +107,7 @@ def run_demo(image_dir: Path, config_path: Path) -> Path:
             str(image_path),
             str(system_cfg.get("source_image_illumination_type", "darkfield")).strip().lower(),
             {
-                "thresholding_mode": threshold_cfg.get("mode", "otsu"),
+                "thresholding_mode": threshold_cfg["thresholding_mode"],
                 "otsu_threshold_multiplier": threshold_cfg.get("otsu_threshold_multiplier", 0.45),
                 "fixed_threshold_value": threshold_cfg.get("fixed_threshold_value", 70),
             },
