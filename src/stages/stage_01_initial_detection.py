@@ -437,17 +437,17 @@ def _analyze_unsubtracted_locally( # Unchanged
         local_threshold_value_for_data = np.nan
         if i == 0:
             first_roi_img_2d_for_display, first_roi_hist_data_ravel = roi_float_for_segment_2d.copy(), current_roi_hist_data_ravel
-            if global_threshold_config.get('mode') == 'otsu':
+            if global_threshold_config.get('thresholding_mode') == 'otsu':
                 if roi_float_for_segment_2d.min() != roi_float_for_segment_2d.max():
                     try: otsu_val_disp, otsu_mult_disp = skimage.filters.threshold_otsu(roi_float_for_segment_2d), global_threshold_config.get('otsu_threshold_multiplier', 0.45); first_roi_effective_thresh_val_float, local_threshold_value_for_data = otsu_val_disp * otsu_mult_disp, otsu_val_disp * otsu_mult_disp
                     except ValueError: pass
-            elif global_threshold_config.get('mode') == 'fixed': first_roi_effective_thresh_val_float, local_threshold_value_for_data = global_threshold_config.get('fixed_threshold_value', 70) / 255.0, global_threshold_config.get('fixed_threshold_value', 70) / 255.0
+            elif global_threshold_config.get('thresholding_mode') == 'fixed': first_roi_effective_thresh_val_float, local_threshold_value_for_data = global_threshold_config.get('fixed_threshold_value', 70) / 255.0, global_threshold_config.get('fixed_threshold_value', 70) / 255.0
         else:
-            if global_threshold_config.get('mode') == 'otsu':
+            if global_threshold_config.get('thresholding_mode') == 'otsu':
                  if roi_float_for_segment_2d.min() != roi_float_for_segment_2d.max():
                     try: otsu_val_data, otsu_mult_data = skimage.filters.threshold_otsu(roi_float_for_segment_2d), global_threshold_config.get('otsu_threshold_multiplier', 0.45); local_threshold_value_for_data = otsu_val_data * otsu_mult_data
                     except ValueError: pass
-            elif global_threshold_config.get('mode') == 'fixed': local_threshold_value_for_data = global_threshold_config.get('fixed_threshold_value', 70) / 255.0
+            elif global_threshold_config.get('thresholding_mode') == 'fixed': local_threshold_value_for_data = global_threshold_config.get('fixed_threshold_value', 70) / 255.0
         local_binary_mask_roi_uint8 = local_binary_mask_roi_bool.astype(np.uint8) * 255
         composite_binary_mask_full_image[y1:y2, x1:x2] = np.maximum(composite_binary_mask_full_image[y1:y2, x1:x2], local_binary_mask_roi_uint8)
         contours_in_roi = find_contours(local_binary_mask_roi_uint8, mode="external", method="simple")
