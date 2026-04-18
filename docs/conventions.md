@@ -129,3 +129,43 @@ logger.debug("Loaded image %s in %s mode.", image_path, mode)
 Self-contained tests inside `if __name__ == "__main__":` blocks are
 **not** permitted in `src/`.  All tests must live in `tests/` as
 properly named pytest functions (`test_*`).
+
+---
+
+## 9. Type annotations
+
+All public functions (those not prefixed with `_`) **must** have complete
+type annotations on every parameter and on the return type.
+
+| Rule | Example |
+|------|---------|
+| Annotate every public function parameter | `def load_image(path: str, mode: str = "gray") -> Optional[np.ndarray]:` |
+| Annotate the return type | `-> Tuple[Optional[np.ndarray], Optional[Dict[str, Any]]]` |
+| Use `Optional[X]` instead of `X | None` for compatibility | `Optional[np.ndarray]` |
+| Private helpers (`_` prefix) should also be annotated where practical | |
+
+```python
+# Good
+def calculate_sharpness_metrics(image_gray: np.ndarray) -> Dict[str, float]:
+    ...
+
+# Bad
+def calculate_sharpness_metrics(image_gray):
+    ...
+```
+
+### Exception hierarchy
+
+All project-defined exceptions inherit from one of the following roots:
+
+| Exception | Parent | Use when |
+|-----------|--------|----------|
+| `ConfigError` | `Exception` | Bad YAML config or missing required key |
+| `ProcessingError` | `RuntimeError` | Failure during a pipeline stage |
+| `ImageProcessingError` | `ProcessingError` | Image-specific processing failure |
+| `MLModelError` | `ProcessingError` | Model load, train, or predict failure |
+| `DataValidationError` | `ValueError` | Missing columns, wrong dtypes in DataFrames |
+
+Callers that need to catch *any* pipeline processing failure should catch
+`ProcessingError`; callers that need only ML-related failures catch
+`MLModelError`.

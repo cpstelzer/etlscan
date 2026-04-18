@@ -4,7 +4,7 @@ from __future__ import annotations
 import os
 import numpy as np
 import logging
-from typing import Optional, Tuple, Dict, Any
+from typing import Optional, Tuple, Dict, Any, Union
 
 from skimage.measure import label as skimage_label, regionprops
 
@@ -28,7 +28,9 @@ def _require_cv2(function_name: str) -> None:
         )
 
 
-def _connected_components_with_stats(binary_mask: np.ndarray):
+def _connected_components_with_stats(
+    binary_mask: np.ndarray,
+) -> Tuple[int, np.ndarray, np.ndarray, Union[np.ndarray, None]]:
     """Return connected components stats using OpenCV or a numpy fallback."""
 
     binary_uint8 = binary_mask.astype(np.uint8)
