@@ -19,18 +19,14 @@ from zaber.serial import BinarySerial, BinaryDevice, BinaryCommand
 from zaber.serial.unexpectedreplyerror import UnexpectedReplyError
 from math import isclose
 
-# Serial port settings
-SERIAL_PORT = "COM7"
-# After renumbering, assume device_x becomes 1 and device_y becomes 2.
-DEVICE_X_NUMBER = 1
-DEVICE_Y_NUMBER = 2
-
-# Conversion factors (in micrometers)
-DEVICE_X_MICROSTEP_SIZE_MICROMETERS = 0.15625
-DEVICE_Y_MICROSTEP_SIZE_MICROMETERS = 0.15625
-
-# Tolerance (in microsteps) for considering an axis "at target"
-POSITION_TOLERANCE = 10
+from src.utils.constants import (
+    ZABER_SERIAL_PORT as SERIAL_PORT,
+    ZABER_DEVICE_X_NUMBER as DEVICE_X_NUMBER,
+    ZABER_DEVICE_Y_NUMBER as DEVICE_Y_NUMBER,
+    ZABER_MICROSTEP_SIZE_UM as DEVICE_X_MICROSTEP_SIZE_MICROMETERS,
+    ZABER_MICROSTEP_SIZE_UM as DEVICE_Y_MICROSTEP_SIZE_MICROMETERS,
+    ZABER_POSITION_TOLERANCE_MICROSTEPS as POSITION_TOLERANCE,
+)
 
 # Open the serial port with an extended timeout.
 port = BinarySerial(SERIAL_PORT, baud=115200, timeout=60)

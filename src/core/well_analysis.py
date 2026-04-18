@@ -2,15 +2,18 @@
 import cv2
 import numpy as np
 import skimage.measure
-import skimage.io
 import logging
-import os 
-import shutil
 from typing import Optional, Tuple, Dict, Any
-from skimage.exposure import rescale_intensity # For a potential adjustment method
+from skimage.exposure import rescale_intensity
 
 from src.utils.common_exceptions import ImageProcessingError, ConfigError, DataValidationError
-from src.core.region_props_calculator import find_contours 
+from src.utils.constants import (
+    BRIGHTNESS_MIN_WELL_PIXELS,
+    BRIGHTNESS_MIN_INTENSITY_DEFAULT,
+    BRIGHTNESS_PERCENTILE_DEFAULT,
+    MORPH_KERNEL_SIZE_LARGE,
+)
+from src.core.region_props_calculator import find_contours
 
 logger = logging.getLogger(__name__)
 
@@ -40,8 +43,9 @@ def create_well_mask_black_plate(
     # 1. Opening: Removes small noise and protrusions from the well's border.
     # 2. Closing: Fills small holes and gaps in the well's border.
     # This combination produces a much smoother contour for accurate circularity calculation.
-    kernel_size = 9 # Using a slightly larger kernel for a stronger effect
-    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (kernel_size, kernel_size))
+    kernel = cv2.getStructuringElement(
+        cv2.MORPH_ELLIPSE, (MORPH_KERNEL_SIZE_LARGE, MORPH_KERNEL_SIZE_LARGE)
+    )
     opened_img = cv2.morphologyEx(threshold_img, cv2.MORPH_OPEN, kernel, iterations=1)
     cleaned_threshold_img = cv2.morphologyEx(opened_img, cv2.MORPH_CLOSE, kernel, iterations=1)
     # Find contours on the cleaned binary image
@@ -119,9 +123,9 @@ def create_well_mask_black_plate(
 
 def calculate_well_brightness_peak(
     image_gray_uint8: np.ndarray,
-    well_mask_uint8: np.ndarray, 
-    min_intensity_for_peak_search: int = 75, 
-    percentile_for_proxy: int = 75 
+    well_mask_uint8: np.ndarray,
+    min_intensity_for_peak_search: int = BRIGHTNESS_MIN_INTENSITY_DEFAULT,
+    percentile_for_proxy: int = BRIGHTNESS_PERCENTILE_DEFAULT,
 ) -> Optional[float]:
     """
     Calculates a proxy for the well background's brightness peak from its histogram.
@@ -131,12 +135,13 @@ def calculate_well_brightness_peak(
         return None
     
     well_pixels = image_gray_uint8[well_mask_uint8 == 255]
-    if well_pixels.size < 100: 
+    if well_pixels.size < BRIGHTNESS_MIN_WELL_PIXELS:
         logger.warning(f"calculate_well_brightness_peak: Very few pixels ({well_pixels.size}) in well mask. Peak may be unreliable.")
-        if well_pixels.size == 0: return None
-    
+        if well_pixels.size == 0:
+            return None
+
     if percentile_for_proxy < 0 or percentile_for_proxy >= 100:
-        percentile_for_proxy = 75 
+        percentile_for_proxy = BRIGHTNESS_PERCENTILE_DEFAULT
     
     # Ensure well_pixels is not empty before calling percentile
     if well_pixels.size == 0:
@@ -195,12 +200,16 @@ def match_well_brightness(
         logger.warning("match_well_brightness: Could not create well masks for FG or BG. Returning original images.")
         return fg_img_uint8, bg_img_uint8
 
-    fg_peak = calculate_well_brightness_peak(fg_img_uint8, fg_mask, 
-                                             cfg_peak_calc.get('min_intensity_for_peak_search', 75),
-                                             cfg_peak_calc.get('percentile_for_peak_proxy', 75))
-    bg_peak = calculate_well_brightness_peak(bg_img_uint8, bg_mask,
-                                             cfg_peak_calc.get('min_intensity_for_peak_search', 75),
-                                             cfg_peak_calc.get('percentile_for_peak_proxy', 75))
+    fg_peak = calculate_well_brightness_peak(
+        fg_img_uint8, fg_mask,
+        cfg_peak_calc.get('min_intensity_for_peak_search', BRIGHTNESS_MIN_INTENSITY_DEFAULT),
+        cfg_peak_calc.get('percentile_for_peak_proxy', BRIGHTNESS_PERCENTILE_DEFAULT),
+    )
+    bg_peak = calculate_well_brightness_peak(
+        bg_img_uint8, bg_mask,
+        cfg_peak_calc.get('min_intensity_for_peak_search', BRIGHTNESS_MIN_INTENSITY_DEFAULT),
+        cfg_peak_calc.get('percentile_for_peak_proxy', BRIGHTNESS_PERCENTILE_DEFAULT),
+    )
 
     if fg_peak is None or bg_peak is None:
         logger.warning("match_well_brightness: Could not determine brightness peaks for FG or BG. Returning original images.")
@@ -287,62 +296,3 @@ def match_well_brightness(
     return adjusted_fg, adjusted_bg
 
 
-if __name__ == '__main__':
-    logging.basicConfig(level=logging.DEBUG)
-    logger.info("--- Testing well_analysis.py (including match_well_brightness) ---")
-
-    dummy_dir = "temp_well_analysis_test_images_match"
-    os.makedirs(dummy_dir, exist_ok=True)
-    
-    # Create FG image
-    fg_img = np.zeros((200, 200), dtype=np.uint8)
-    cv2.circle(fg_img, (100,100), 80, 180, -1) # Well BG = 180
-    cv2.circle(fg_img, (80,80), 10, 30, -1)   # Particle
-    skimage.io.imsave(os.path.join(dummy_dir, "fg_img.png"), fg_img)
-
-    # Create BG image (brighter)
-    bg_img_brighter = np.zeros((200, 200), dtype=np.uint8)
-    cv2.circle(bg_img_brighter, (100,100), 80, 210, -1) # Well BG = 210
-    skimage.io.imsave(os.path.join(dummy_dir, "bg_img_brighter.png"), bg_img_brighter)
-    
-    # Create BG image (similar)
-    bg_img_similar = np.zeros((200, 200), dtype=np.uint8)
-    cv2.circle(bg_img_similar, (100,100), 80, 183, -1) # Well BG = 183
-    skimage.io.imsave(os.path.join(dummy_dir, "bg_img_similar.png"), bg_img_similar)
-
-    test_config_match = {
-        'well_identification': {
-            'low_threshold_value': 10, 'min_expected_diameter_px': 100,
-            'max_expected_diameter_px': 190, 'min_fill_ratio_to_enclosing_circle': 0.80,
-            'center_offset_fraction_threshold': 0.1
-        },
-        'brightness_peak_calculation': {
-            'min_intensity_for_peak_search': 75, 'percentile_for_peak_proxy': 75
-        },
-        'brightness_matching': {
-            'max_peak_difference_allowed': 10, # BG can be 10 brighter
-            'adjustment_method': "global_shift",
-            'target_peak_offset_after_shift': 3 # Make BG 3 units dimmer than FG
-        }
-    }
-
-    logger.info("\n--- Testing match_well_brightness (BG Brighter) ---")
-    adj_fg1, adj_bg1 = match_well_brightness(fg_img, bg_img_brighter, test_config_match)
-    # For verification, calculate peak of adjusted_bg1
-    bg_mask1, _ = create_well_mask_black_plate(adj_bg1, test_config_match['well_identification'])
-    if bg_mask1 is not None:
-        new_bg_peak1 = calculate_well_brightness_peak(adj_bg1, bg_mask1, 
-                                                     test_config_match['brightness_peak_calculation']['min_intensity_for_peak_search'],
-                                                     test_config_match['brightness_peak_calculation']['percentile_for_peak_proxy'])
-        logger.info(f"Original BG peak ~210, Adjusted BG1 peak: {new_bg_peak1:.2f} (Expected ~177)")
-        if new_bg_peak1: assert 170 < new_bg_peak1 < 185
-
-    logger.info("\n--- Testing match_well_brightness (BG Similar) ---")
-    adj_fg2, adj_bg2 = match_well_brightness(fg_img, bg_img_similar, test_config_match)
-    # Expect no significant change in adj_bg2 from bg_img_similar
-    if np.all(adj_bg2 == bg_img_similar):
-        logger.info("BG similar, no adjustment made, as expected.")
-    else:
-        logger.error("BG similar, but adjustment was made unexpectedly.")
-
-    shutil.rmtree(dummy_dir)

@@ -85,18 +85,18 @@ def run_stage_02_characterization(
         logger.info(f"Characterizing {len(group)} particles from image: {image_filename}")
         full_image_path = os.path.join(image_dir_path, image_filename)
         
-        main_img_color = load_image(full_image_path, mode='color')
-        main_img_gray = convert_to_grayscale(main_img_color)
+        main_image_color = load_image(full_image_path, mode='color')
+        main_image_gray = convert_to_grayscale(main_image_color)
 
-        if main_img_color is None or main_img_gray is None:
+        if main_image_color is None or main_image_gray is None:
             logger.warning(f"Failed to load image {full_image_path}. Skipping {len(group)} particles.")
             continue
 
         frame_num = extract_frame_from_filename(image_filename)
         crop_records.extend(
             crop_particles(
-                main_img_color,
-                main_img_gray,
+                main_image_color,
+                main_image_gray,
                 group,
                 normalized_cropping,
                 sample_id,
@@ -188,8 +188,8 @@ def build_crop_filename(
 
 
 def crop_particles(
-    main_img_color: np.ndarray,
-    main_img_gray: np.ndarray,
+    main_image_color: np.ndarray,
+    main_image_gray: np.ndarray,
     particles_df: pd.DataFrame,
     crop_config: Dict[str, Any],
     sample_id: str,
@@ -222,8 +222,8 @@ def crop_particles(
 
         crop_gray, crop_metadata = crop_particle_from_arrays(
             crop_config,
-            main_img_color,
-            main_img_gray,
+            main_image_color,
+            main_image_gray,
             s1_particle_row
         )
 
@@ -928,10 +928,10 @@ def crop_and_save_final_particle_images(
             continue
 
         full_image_path = os.path.join(image_dir_path, image_filename)
-        main_img_color = load_image(full_image_path, mode='color')
-        main_img_gray = convert_to_grayscale(main_img_color)
+        main_image_color = load_image(full_image_path, mode='color')
+        main_image_gray = convert_to_grayscale(main_image_color)
 
-        if main_img_color is None or main_img_gray is None:
+        if main_image_color is None or main_image_gray is None:
             logger.warning('Failed to load image %s for final particle crops.', full_image_path)
             continue
 
@@ -952,8 +952,8 @@ def crop_and_save_final_particle_images(
 
             crop_gray, _ = crop_particle_from_arrays(
                 crop_config,
-                main_img_color,
-                main_img_gray,
+                main_image_color,
+                main_image_gray,
                 row
             )
 

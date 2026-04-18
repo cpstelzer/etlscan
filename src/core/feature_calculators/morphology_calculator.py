@@ -47,10 +47,10 @@ def calculate_detailed_body_morphology(
         logger.warning("Raw or filled body mask is None. Cannot calculate detailed morphology.")
         return features
 
-    raw_body_mask_bool = raw_body_mask > 0
+    raw_mask = raw_body_mask > 0
 
     props_raw_list = skimage.measure.regionprops(
-        skimage.measure.label(raw_body_mask_bool),
+        skimage.measure.label(raw_mask),
         intensity_image=intensity_image_for_props,
         cache=False
     )

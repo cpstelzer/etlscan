@@ -59,8 +59,8 @@ def run_stage2_realtime(
         "fixed_threshold_value": int(seg_params_raw["fixed_threshold_value"]),
     }
     crop_records = crop_particles(
-        main_img_color=fg_gray,
-        main_img_gray=fg_gray,
+        main_image_color=fg_gray,
+        main_image_gray=fg_gray,
         particles_df=working,
         crop_config=crop_cfg,
         sample_id="REALTIME",

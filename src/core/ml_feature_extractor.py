@@ -188,25 +188,23 @@ def extract_ml_features(
         actual_egg_quantile = params['egg_threshold_quantile']
         non_zero_pixels_in_egg_blurred = egg_blurred_image[egg_blurred_image > 1e-6]
         if non_zero_pixels_in_egg_blurred.size == 0:
-            egg_binary_mask_initial_bool = np.zeros_like(egg_blurred_image, dtype=bool)
+            egg_initial_mask = np.zeros_like(egg_blurred_image, dtype=bool)
         else:
             egg_thresh_val = np.quantile(non_zero_pixels_in_egg_blurred, actual_egg_quantile)
-            egg_binary_mask_initial_bool = egg_blurred_image > egg_thresh_val 
+            egg_initial_mask = egg_blurred_image > egg_thresh_val
             logger.debug(f"Egg detection: quantile={actual_egg_quantile}, thresh_val={egg_thresh_val:.4f} (applied to blurred, potentially inverted, pre-unsharped image)")
 
-        # Use the posterior_coords_for_search obtained from the utility
-        posterior_pixel_mask_bool = np.zeros(img_gray_input_shape, dtype=bool)
+        posterior_pixel_mask = np.zeros(img_gray_input_shape, dtype=bool)
         if posterior_coords_for_search is not None and posterior_coords_for_search.shape[0] > 0:
             valid_rows = np.clip(posterior_coords_for_search[:, 0].astype(int), 0, img_gray_input_shape[0] - 1)
             valid_cols = np.clip(posterior_coords_for_search[:, 1].astype(int), 0, img_gray_input_shape[1] - 1)
-            posterior_pixel_mask_bool[valid_rows, valid_cols] = True
+            posterior_pixel_mask[valid_rows, valid_cols] = True
         else:
             logger.debug(f"No posterior coordinates available for egg search constraints for {os.path.basename(image_path)}.")
 
+        egg_constrained_mask = egg_initial_mask & posterior_pixel_mask
 
-        egg_binary_mask_constrained_bool = egg_binary_mask_initial_bool & posterior_pixel_mask_bool
-        
-        egg_labeled_mask, egg_num_labels_cand = skimage.measure.label(egg_binary_mask_constrained_bool, return_num=True, connectivity=2)
+        egg_labeled_mask, egg_num_labels_cand = skimage.measure.label(egg_constrained_mask, return_num=True, connectivity=2)
 
         if egg_num_labels_cand > 0 and main_props_obj is not None:
             egg_props_candidates = skimage.measure.regionprops(egg_labeled_mask, intensity_image=image_for_egg_detection_float, cache=False)
