@@ -35,8 +35,12 @@ def _write_config(tmp_path: Path) -> Path:
         'project_base_dir': str(tmp_path),
         'sample_subdir_name': 'sample_A',
         'stage_03_filtering_and_classification': {
-            'model_filename': 'dummy_model.joblib',
-            'scaler_filename': 'dummy_scaler.joblib',
+            'model_type': 'random_forest_model',
+            'size_invariant_features': False,
+            'random_forest_model': {
+                'model_filename': 'dummy_model.joblib',
+                'scaler_filename': 'dummy_scaler.joblib',
+            },
             'ml_filter': {'min_probability_threshold': 0.5},
             'quality_flags_filter': {
                 'filter_on_boundary': False,
@@ -83,7 +87,7 @@ def test_stage3_writes_ml_columns(tmp_path: Path):
     """Stage 3 should add ML columns and produce both filtered and legacy outputs."""
     config_path = _write_config(tmp_path)
     _write_dummy_model_artifacts(tmp_path)
-    config_loader.load_config(str(config_path))
+    config = config_loader.load_config_once(str(config_path))
 
     stage2_df = pd.read_csv(FIXTURE_STAGE2).copy()
     stage2_df = pd.concat([stage2_df] * 4, ignore_index=True)
@@ -107,6 +111,7 @@ def test_stage3_writes_ml_columns(tmp_path: Path):
         str(stage3_output_dir),
         str(crops_dir),
         sample_id='sample_A',
+        config=config,
     )
 
     assert saved_csv is not None

@@ -1,3 +1,27 @@
+"""High-level acquisition workflow orchestration.
+
+This module exposes three top-level workflow functions that are invoked by the
+thin CLI entry points in ``src/acquire/ws_acquire*.py``:
+
+``select_wells``
+    Launches the interactive :func:`well_selector_gui` so the operator can
+    choose which wells to scan, then writes the selection to a CSV file.
+
+``run_multi_well_acquisition``
+    Full XY-stage sweep: iterates over the wells listed in a coordinate CSV,
+    drives the Zaber stage to each position, and triggers frame capture via
+    the wellscanner acquisition module.
+
+``run_experiment_acquisition``
+    Parameter-sweep variant of the multi-well workflow.  Runs the same set of
+    wells multiple times under different experimental conditions (e.g. varying
+    focus offset or illumination settings) and logs each condition to an
+    experiment summary CSV.
+
+All three functions delegate hardware interaction to :class:`StageController`,
+imaging to ``wellscanner_acquisition_module``, and coordinate arithmetic to
+:mod:`src.acquire.plate_layout`.
+"""
 from __future__ import annotations
 
 import copy

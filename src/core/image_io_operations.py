@@ -16,6 +16,11 @@ except Exception:  # noqa: BLE001 - keep optional dependency for headless envs
     cv2 = None  # type: ignore
 
 from src.utils.common_exceptions import ImageProcessingError
+from src.utils.constants import (
+    FLAT_FIELD_SUBDIR,
+    FLAT_FIELD_FLAT_FILENAME,
+    FLAT_FIELD_DARK_FILENAME,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -32,8 +37,8 @@ def _get_flat_field_candidate_dirs(sample_dir_path: str) -> list[str]:
     sample_dir = os.path.normpath(sample_dir_path)
     parent_dir = os.path.dirname(sample_dir)
     return [
-        os.path.join(sample_dir, '1_flat_field'),
-        os.path.join(parent_dir, '1_flat_field'),
+        os.path.join(sample_dir, FLAT_FIELD_SUBDIR),
+        os.path.join(parent_dir, FLAT_FIELD_SUBDIR),
     ]
 
 
@@ -50,8 +55,8 @@ def load_flat_field_assets(sample_dir_path: str, mode: str = 'gray') -> FlatFiel
 
     for calibration_dir in candidate_dirs:
         attempted_dirs.append(calibration_dir)
-        flat_path = os.path.join(calibration_dir, 'flat.png')
-        dark_path = os.path.join(calibration_dir, 'dark.png')
+        flat_path = os.path.join(calibration_dir, FLAT_FIELD_FLAT_FILENAME)
+        dark_path = os.path.join(calibration_dir, FLAT_FIELD_DARK_FILENAME)
 
         if not os.path.exists(flat_path) or not os.path.exists(dark_path):
             logger.debug(
@@ -195,7 +200,7 @@ def load_image(image_path: str, mode: str = 'color') -> Optional[np.ndarray]:
     except Exception as e:
         logger.exception(f"Exception during image loading for {image_path}: {e}")
         if cv2 is not None:
-            logger.warning("Attempting PIL fallback after OpenCV load exception: %s", image_path)
+            logger.warning(f"Attempting PIL fallback after OpenCV load exception: {image_path}")
             return _load_image_with_pil(image_path, mode)
         return None
 
@@ -251,13 +256,13 @@ def convert_to_grayscale(image_color: np.ndarray) -> Optional[np.ndarray]:
     if image_color.ndim == 3 and image_color.shape[2] == 3:
         try:
             if cv2 is not None:
-                gray_img = cv2.cvtColor(image_color, cv2.COLOR_BGR2GRAY)
+                image_gray = cv2.cvtColor(image_color, cv2.COLOR_BGR2GRAY)
             else:
                 coeffs = np.array([0.114, 0.587, 0.299], dtype=np.float32)
-                gray_img = np.tensordot(image_color, coeffs, axes=([2], [0]))
-                gray_img = gray_img.astype(np.uint8)
+                image_gray = np.tensordot(image_color, coeffs, axes=([2], [0]))
+                image_gray = image_gray.astype(np.uint8)
             logger.debug("Image converted to grayscale.")
-            return gray_img
+            return image_gray
         except Exception as e:
             logger.exception(f"Error converting image to grayscale: {e}")
             return None
@@ -266,49 +271,3 @@ def convert_to_grayscale(image_color: np.ndarray) -> Optional[np.ndarray]:
         return None
 
 
-if __name__ == '__main__':
-    # Setup basic logging for testing this module directly
-    if not logging.getLogger().hasHandlers():
-        logging.basicConfig(level=logging.DEBUG)
-
-    # Create a dummy color image for testing
-    dummy_color_image = np.zeros((100, 100, 3), dtype=np.uint8)
-    dummy_color_image[:, :50] = [255, 0, 0]  # Blue half
-    dummy_color_image[:, 50:] = [0, 0, 255]  # Red half
-    temp_dir = "temp_image_io_test"
-
-    # Test saving
-    saved_file = save_image(dummy_color_image, temp_dir, "dummy_color.png")
-    if saved_file:
-        # Test loading color
-        loaded_color = load_image(saved_file, mode='color')
-        assert loaded_color is not None and loaded_color.shape == dummy_color_image.shape, "Color load failed"
-        logger.info("Color load test passed.")
-
-        # Test loading gray
-        loaded_gray_direct = load_image(saved_file, mode='gray')
-        assert loaded_gray_direct is not None and loaded_gray_direct.ndim == 2, "Gray load failed"
-        logger.info("Gray load test passed.")
-
-        # Test conversion to gray
-        converted_gray = convert_to_grayscale(loaded_color)
-        assert converted_gray is not None and converted_gray.ndim == 2, "Grayscale conversion failed"
-        logger.info("Grayscale conversion test passed.")
-        save_image(converted_gray, temp_dir, "dummy_gray_converted.png")
-
-
-        # Clean up
-        try:
-            os.remove(os.path.join(temp_dir, "dummy_color.png"))
-            os.remove(os.path.join(temp_dir, "dummy_gray_converted.png"))
-            os.rmdir(temp_dir)
-            logger.info("Cleaned up test image files and directory.")
-        except OSError as e:
-            logger.error(f"Error during cleanup: {e}")
-    else:
-        logger.error("Initial save failed, cannot run further tests.")
-
-    # Test loading non-existent file
-    non_existent_img = load_image("non_existent.png")
-    assert non_existent_img is None, "Non-existent image load test failed"
-    logger.info("Non-existent image load test passed.")

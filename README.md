@@ -55,21 +55,31 @@ This copies matching run folders into `data/input/<batch_name>/...` without chan
 ```
 well_plate_analyzer/
 ├── config/
-│   └── config.yml       # Global runtime configuration
+│   └── config.yml                # Global runtime configuration
 ├── data/
 │   ├── input/<batch>/<sample>/   # Raw PNG sequences per sample
 │   ├── output/<batch>/<sample>/  # Pipeline outputs organized by stage
 │   └── training_data/            # Crops used by scripts/train_model.py
+├── docs/                         # Conventions, HPC runbook, ML training guides
 ├── models/                       # Trained RF model + scaler artifacts
 ├── scripts/
 │   ├── run_pipeline.py           # Batch-oriented stage runner
 │   ├── train_model.py            # Standalone RF trainer
 │   └── determine_bg_offset_demo.py
 ├── src/
-│   ├── core/                     # Feature calculators, segmentation, particle ops
-│   ├── stages/                   # Stage implementations (01–04)
-│   ├── utils/                    # Config loading, logging, path helpers, I/O
+│   ├── acquire/                  # Hardware acquisition (Pylon camera + Zaber stage)
+│   ├── core/
+│   │   ├── feature_calculators/  # morphology, quality, shape, bio-feature modules
+│   │   └── *.py                  # segmentation, masking, particle ops, I/O
+│   ├── realtime/                 # Frame-by-frame mirror of stages 1–3
+│   ├── stages/                   # Batch stage implementations (01–04)
+│   ├── utils/
+│   │   ├── constants.py          # All magic numbers and string literals
+│   │   ├── filename_helpers.py   # build_crop_filename() shared utility
+│   │   └── *.py                  # config loading, logging, path helpers, I/O
 │   └── visualization/            # Plotting/overlay helpers used by Stage 04
+├── tests/                        # pytest suite
+├── CLAUDE.md                     # Developer quick-start (AI-friendly)
 ├── requirements.txt
 └── README.md
 ```

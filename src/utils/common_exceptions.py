@@ -12,7 +12,7 @@ class ImageProcessingError(ProcessingError):
     """Custom exception for errors specific to image processing operations."""
     pass
 
-class MLModelError(RuntimeError):
+class MLModelError(ProcessingError):
     """Custom exception for errors related to ML model loading, training, or prediction."""
     pass
 

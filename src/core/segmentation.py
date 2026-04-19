@@ -112,52 +112,52 @@ def segment_main_body_from_image_float(
 
     # MODIFIED: Call the helper for thresholding
     # The segmentation_params already contain thresholding_mode, otsu_threshold_multiplier, fixed_threshold_value
-    main_binary_mask_initial_bool = generate_binary_mask_from_float_image(
-        image_for_segmentation_float, # This is post-inversion, post-unsharp
-        segmentation_params # Pass all params, helper will pick what it needs
+    initial_mask = generate_binary_mask_from_float_image(
+        image_for_segmentation_float,
+        segmentation_params,
     )
 
-    if main_binary_mask_initial_bool is None:
+    if initial_mask is None:
         logger.error("SegmentMainBody: Failed to generate binary mask from helper.")
         return None, None, None
 
-    main_cleaned_mask_bool = skimage.morphology.remove_small_objects(
-        main_binary_mask_initial_bool, min_size=segmentation_params["min_noise_size"]
+    cleaned_mask = skimage.morphology.remove_small_objects(
+        initial_mask, min_size=segmentation_params["min_noise_size"]
     )
 
     selem_closing_size = segmentation_params["closing_selem_size"]
     if selem_closing_size > 0:
         selem_closing = skimage.morphology.disk(selem_closing_size)
-        raw_body_mask_bool = skimage.morphology.binary_closing(main_cleaned_mask_bool, selem_closing)
+        raw_body_mask = skimage.morphology.binary_closing(cleaned_mask, selem_closing)
     else:
-        raw_body_mask_bool = main_cleaned_mask_bool
+        raw_body_mask = cleaned_mask
 
-    filled_body_mask_bool = ndi.binary_fill_holes(raw_body_mask_bool)
-    
-    labeled_filled_mask, num_labels = skimage.measure.label(filled_body_mask_bool, return_num=True, connectivity=2)
-    
+    filled_body_mask = ndi.binary_fill_holes(raw_body_mask)
+
+    labeled_filled_mask, num_labels = skimage.measure.label(filled_body_mask, return_num=True, connectivity=2)
+
     main_props_object = None
-    raw_body_mask_bool_main_only = raw_body_mask_bool
-    filled_body_mask_bool_main_only = filled_body_mask_bool
+    raw_body_mask_main_only = raw_body_mask
+    filled_body_mask_main_only = filled_body_mask
 
     if num_labels > 0:
         props_filled_all = skimage.measure.regionprops(
             labeled_filled_mask,
-            intensity_image=image_intensity_for_props, 
-            cache=False
+            intensity_image=image_intensity_for_props,
+            cache=False,
         )
         if props_filled_all:
             main_props_object = sorted(props_filled_all, key=lambda x: x.area, reverse=True)[0]
-            
+
             temp_main_mask = np.zeros_like(labeled_filled_mask, dtype=bool)
             temp_main_mask[labeled_filled_mask == main_props_object.label] = True
-            
-            raw_body_mask_bool_main_only = raw_body_mask_bool & temp_main_mask
-            filled_body_mask_bool_main_only = filled_body_mask_bool & temp_main_mask
+
+            raw_body_mask_main_only = raw_body_mask & temp_main_mask
+            filled_body_mask_main_only = filled_body_mask & temp_main_mask
     else:
         logger.debug("SegmentMainBody: No regions found after filling holes.")
 
-    raw_mask_uint8 = raw_body_mask_bool_main_only.astype(np.uint8) * 255
-    filled_mask_uint8 = filled_body_mask_bool_main_only.astype(np.uint8) * 255
+    raw_mask_uint8 = raw_body_mask_main_only.astype(np.uint8) * 255
+    filled_mask_uint8 = filled_body_mask_main_only.astype(np.uint8) * 255
     
     return raw_mask_uint8, filled_mask_uint8, main_props_object

@@ -1,22 +1,23 @@
 # src/stages/stage_02_characterization.py
-import os
-import cv2
-import pandas as pd
-import numpy as np
-import logging
-import skimage.util
-import math
 import glob
-import matplotlib
+import logging
+import math
 import numbers
+import os
+from typing import Optional, List, Tuple, Dict, Any
+
+import cv2
+import matplotlib
+import numpy as np
+import pandas as pd
+import skimage.util
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 import matplotlib.image as mpimg
 from matplotlib.gridspec import GridSpecFromSubplotSpec
-from typing import Optional, List, Tuple, Dict, Any
 
 from src.utils import (
-    load_dataframe_from_csv, save_dataframe_to_csv
+    load_dataframe_from_csv, save_dataframe_to_csv, build_crop_filename
 )
 from src.utils.config_loader import get_unified_segmentation_params
 from src.utils.path_helpers import extract_frame_from_filename
@@ -85,18 +86,18 @@ def run_stage_02_characterization(
         logger.info(f"Characterizing {len(group)} particles from image: {image_filename}")
         full_image_path = os.path.join(image_dir_path, image_filename)
         
-        main_img_color = load_image(full_image_path, mode='color')
-        main_img_gray = convert_to_grayscale(main_img_color)
+        main_image_color = load_image(full_image_path, mode='color')
+        main_image_gray = convert_to_grayscale(main_image_color)
 
-        if main_img_color is None or main_img_gray is None:
+        if main_image_color is None or main_image_gray is None:
             logger.warning(f"Failed to load image {full_image_path}. Skipping {len(group)} particles.")
             continue
 
         frame_num = extract_frame_from_filename(image_filename)
         crop_records.extend(
             crop_particles(
-                main_img_color,
-                main_img_gray,
+                main_image_color,
+                main_image_gray,
                 group,
                 normalized_cropping,
                 sample_id,
@@ -166,30 +167,9 @@ def run_stage_02_characterization(
     return saved_csv_path
 
 
-def build_crop_filename(
-    sample_id: str,
-    track_label: str,
-    frame_num: int,
-    x_value: Any,
-    y_value: Any
-) -> str:
-    """Assemble a descriptive filename for a particle crop using track and frame info."""
-    try:
-        x_int = int(x_value) if pd.notna(x_value) else 0
-    except (TypeError, ValueError):
-        x_int = 0
-
-    try:
-        y_int = int(y_value) if pd.notna(y_value) else 0
-    except (TypeError, ValueError):
-        y_int = 0
-
-    return f"{sample_id}_{track_label}_frame{frame_num}_X{x_int}_Y{y_int}.png"
-
-
 def crop_particles(
-    main_img_color: np.ndarray,
-    main_img_gray: np.ndarray,
+    main_image_color: np.ndarray,
+    main_image_gray: np.ndarray,
     particles_df: pd.DataFrame,
     crop_config: Dict[str, Any],
     sample_id: str,
@@ -212,23 +192,20 @@ def crop_particles(
         original_index = s1_particle_row['s1_original_index']
         track_label = _format_track_label(s1_particle_row, fallback_suffix=original_index)
 
-        crop_filename = build_crop_filename(
-            sample_id,
-            track_label,
-            frame_num,
-            s1_particle_row.get('X'),
-            s1_particle_row.get('Y')
-        )
+        x_raw, y_raw = s1_particle_row.get('X'), s1_particle_row.get('Y')
+        x_int = int(x_raw) if pd.notna(x_raw) else 0
+        y_int = int(y_raw) if pd.notna(y_raw) else 0
+        crop_filename = build_crop_filename(sample_id, track_label, frame_num, x_int, y_int)
 
         crop_gray, crop_metadata = crop_particle_from_arrays(
             crop_config,
-            main_img_color,
-            main_img_gray,
+            main_image_color,
+            main_image_gray,
             s1_particle_row
         )
 
         if crop_gray is None:
-            logger.warning("Failed to crop particle at index %s. Skipping.", original_index)
+            logger.warning(f"Failed to crop particle at index {original_index}. Skipping.")
             continue
 
         crop_identifier_for_logs = crop_filename or "unsaved_crop"
@@ -382,7 +359,7 @@ def save_all_particle_crops(
         try:
             cv2.imwrite(crop_path, crop_gray)
         except Exception as exc:  # noqa: BLE001
-            logger.error("Failed to save crop to %s: %s", crop_path, exc)
+            logger.error(f"Failed to save crop to {crop_path}: {exc}")
 
 
 def emit_focus_artifacts(
@@ -872,7 +849,7 @@ def select_final_particles_by_area(
     valid_df = working_df.dropna(subset=[track_col, '_area_numeric'])
 
     if valid_df.empty:
-        logger.info('No valid rows with both track id and %s for final particle selection.', area_col)
+        logger.info(f"No valid rows with both track id and {area_col!r} for final particle selection.")
         return pd.DataFrame(columns=filtered_df.columns)
 
     idx = valid_df.groupby(track_col)['_area_numeric'].idxmax()
@@ -928,32 +905,29 @@ def crop_and_save_final_particle_images(
             continue
 
         full_image_path = os.path.join(image_dir_path, image_filename)
-        main_img_color = load_image(full_image_path, mode='color')
-        main_img_gray = convert_to_grayscale(main_img_color)
+        main_image_color = load_image(full_image_path, mode='color')
+        main_image_gray = convert_to_grayscale(main_image_color)
 
-        if main_img_color is None or main_img_gray is None:
-            logger.warning('Failed to load image %s for final particle crops.', full_image_path)
+        if main_image_color is None or main_image_gray is None:
+            logger.warning(f"Failed to load image {full_image_path} for final particle crops.")
             continue
 
         frame_num = extract_frame_from_filename(image_filename)
         if frame_num is None:
-            logger.warning('Could not parse frame from filename %s for final particle crops.', image_filename)
+            logger.warning(f"Could not parse frame from filename {image_filename} for final particle crops.")
             continue
 
         for idx, row in group.iterrows():
             track_label = _format_track_label(row, fallback_suffix=idx)
-            crop_filename = build_crop_filename(
-                sample_id,
-                track_label,
-                frame_num,
-                row.get('X'),
-                row.get('Y')
-            )
+            x_raw, y_raw = row.get('X'), row.get('Y')
+            x_int = int(x_raw) if pd.notna(x_raw) else 0
+            y_int = int(y_raw) if pd.notna(y_raw) else 0
+            crop_filename = build_crop_filename(sample_id, track_label, frame_num, x_int, y_int)
 
             crop_gray, _ = crop_particle_from_arrays(
                 crop_config,
-                main_img_color,
-                main_img_gray,
+                main_image_color,
+                main_image_gray,
                 row
             )
 

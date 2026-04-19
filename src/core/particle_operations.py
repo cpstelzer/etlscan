@@ -1,12 +1,12 @@
 # src/core/particle_operations.py
+import logging
+import os
+from typing import Dict, Any, Optional, Tuple
+
 import cv2
 import numpy as np
-import logging
-from typing import Dict, Any, Optional, Tuple
 import pandas as pd
 import skimage.util
-import shutil
-import os
 
 from src.utils.common_exceptions import ConfigError
 from src.core.segmentation import generate_binary_mask_from_float_image

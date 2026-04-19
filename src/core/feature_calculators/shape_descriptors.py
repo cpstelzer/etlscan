@@ -5,6 +5,8 @@ from typing import Dict, Any, List
 import logging
 from skimage.feature import local_binary_pattern
 
+from src.utils.constants import LBP_DEFAULT_RADII, LBP_DEFAULT_POINTS
+
 logger = logging.getLogger(__name__)
 
 def compute_texture_descriptors(
@@ -17,8 +19,8 @@ def compute_texture_descriptors(
     Compute LBP texture features for a masked region.
     """
     features = {}
-    mask_bool = mask > 0
-    if not np.any(mask_bool):
+    mask_region = mask > 0
+    if not np.any(mask_region):
         logger.warning("Mask is empty, cannot compute texture descriptors.")
         return features
 
@@ -28,7 +30,7 @@ def compute_texture_descriptors(
         try:
             lbp = local_binary_pattern(gray_image, P=lbp_points, R=r, method='uniform')
             hist, _ = np.histogram(
-                lbp[mask_bool],
+                lbp[mask_region],
                 bins=np.arange(lbp_points + 3),
                 range=(0, lbp_points + 2),
                 density=True
@@ -57,8 +59,8 @@ def calculate_shape_descriptors(
 
     # --- Get parameters from config with safe defaults ---
     shape_config = config.get('shape_descriptors', {})
-    lbp_radii_to_use = shape_config.get('lbp_radii', [1, 3])
-    lbp_points_to_use = shape_config.get('lbp_points', 8)
+    lbp_radii_to_use = shape_config.get('lbp_radii', LBP_DEFAULT_RADII)
+    lbp_points_to_use = shape_config.get('lbp_points', LBP_DEFAULT_POINTS)
 
     texture_features = compute_texture_descriptors(
         image_crop_gray,

@@ -6,15 +6,9 @@ from typing import List
 import pandas as pd
 
 from src.core.image_io_operations import save_image
+from src.utils.filename_helpers import build_crop_filename
 
 from .session import RealtimeSession
-
-
-def _crop_filename(session: RealtimeSession, frame_idx: int, particle_idx: int, x: int, y: int, ext: str) -> str:
-    return (
-        f"{session.session_id}_plate{session.plate}_well{session.well}"
-        f"_frame{frame_idx:06d}_particle{particle_idx}_X{x}_Y{y}.{ext}"
-    )
 
 
 def save_accepted_crops(df: pd.DataFrame, session: RealtimeSession, image_format: str, png_compression: int) -> List[str]:
@@ -32,7 +26,8 @@ def save_accepted_crops(df: pd.DataFrame, session: RealtimeSession, image_format
         frame = int(row.get("frame", 0))
         x = int(row.get("X", 0))
         y = int(row.get("Y", 0))
-        filename = _crop_filename(session, frame, i, x, y, ext)
+        prefix = f"{session.session_id}_plate{session.plate}_well{session.well}"
+        filename = build_crop_filename(prefix, f"particle{i}", frame, x, y, ext=ext, frame_padding=6)
 
         # Keep ext controlled by realtime config; writer uses OpenCV if available,
         # otherwise PIL fallback from src.core.image_io_operations.

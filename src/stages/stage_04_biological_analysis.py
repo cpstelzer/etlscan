@@ -17,7 +17,7 @@ from src.visualization.feature_visualization import visualize_ml_features
 from src.utils.common_exceptions import ProcessingError
 from src.core.image_io_operations import load_image
 from src.core.segmentation import segment_main_body_from_image_float
-from src.core.ml_feature_extractor import _calculate_and_attach_posterior_attributes
+from src.core.feature_calculators.bio_features_calculator import calculate_posterior_attributes
 
 logger = logging.getLogger(__name__)
 
@@ -52,7 +52,7 @@ def perform_egg_analysis(
 
     egg_posterior_fraction = egg_config['egg_posterior_pixel_fraction']
     # Get main_props with posterior attributes attached for visualization
-    main_props_with_posterior, _, posterior_coords = _calculate_and_attach_posterior_attributes(
+    main_props_with_posterior, _, posterior_coords = calculate_posterior_attributes(
         main_props, crop_float.shape, egg_posterior_fraction
     )
 

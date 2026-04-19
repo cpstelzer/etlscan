@@ -82,10 +82,12 @@ SIZE_DEPENDENT_RAW_FEATURE_RULES = {
 def _get_lbp_feature_count_from_config(config: dict) -> int:
     """Return how many LBP columns Stage 2 should have produced."""
 
-    stage2_config = config['stage_02_characterization']
-    shape_config = stage2_config['shape_descriptors']
-    lbp_radii = shape_config['lbp_radii'] or []
-    lbp_points = shape_config['lbp_points']
+    if config is None:
+        return 0
+    stage2_config = config.get('stage_02_characterization', {})
+    shape_config = stage2_config.get('shape_descriptors', {})
+    lbp_radii = shape_config.get('lbp_radii') or []
+    lbp_points = shape_config.get('lbp_points')
 
     if not lbp_radii or lbp_points is None:
         return 0
@@ -176,7 +178,7 @@ def apply_size_invariant_feature_strategy(
 
 def _validate_required_feature_columns(
     df: pd.DataFrame,
-    config: dict,
+    config: dict = None,
 ) -> None:
     """Ensure Stage 3 receives the expected numeric feature set."""
 
