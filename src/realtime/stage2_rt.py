@@ -4,6 +4,7 @@ from dataclasses import dataclass
 import logging
 from typing import Any, Dict, List, Optional
 
+import numpy as np
 import pandas as pd
 import skimage.util
 
@@ -26,7 +27,7 @@ class Stage2Result:
 
 
 def run_stage2_realtime(
-    fg_gray,
+    fg_gray: np.ndarray,
     s1_df: pd.DataFrame,
     frame_index: int,
     stage2_cfg: Dict[str, Any],
@@ -45,10 +46,8 @@ def run_stage2_realtime(
         else:
             working = working.head(max_candidates).copy()
         logger.warning(
-            "Frame %d: Stage-1 yielded %d detections; limiting Stage-2 cropping to top %d candidates to prevent memory pressure.",
-            frame_index,
-            len(s1_df),
-            max_candidates,
+            f"Frame {frame_index}: Stage-1 yielded {len(s1_df)} detections; "
+            f"limiting Stage-2 cropping to top {max_candidates} candidates to prevent memory pressure."
         )
     crop_cfg = normalized_crop_config(stage2_cfg["crop_config"])
     illumination_mode = str(stage2_cfg["source_image_illumination"]).strip().lower()

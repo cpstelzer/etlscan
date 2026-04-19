@@ -724,7 +724,7 @@ def run_stage_01_initial_detection(
         fg_row = pairing_data.get("fg_row")
         bg_row = pairing_data.get("bg_row")
         if fg_row is None or bg_row is None:
-            logger.warning("Failed to select FG/BG pairing; skipping frame index %s.", idx_frame_list)
+            logger.warning(f"Failed to select FG/BG pairing; skipping frame index {idx_frame_list}.")
             continue
 
         logger.debug(f"Processing S1 Frame: {fg_row['filename']} (BG: {bg_row['filename']})")

@@ -155,3 +155,8 @@ def apply_morphological_operation(image: np.ndarray, kernel_size: int, operation
     except Exception as e:
         logger.exception(f"Error applying morphological operation '{operation}': {e}")
         return None
+
+
+def float01_to_uint8(image_float: np.ndarray) -> np.ndarray:
+    """Convert a float image in [0, 1] to uint8 [0, 255] with clamping."""
+    return np.round(np.clip(image_float, 0.0, 1.0) * 255.0).astype(np.uint8)

@@ -14,7 +14,7 @@ from src.stages.stage_01_initial_detection import (
     prepare_masked_foreground,
     refine_with_local_otsu,
 )
-from src.core.image_enhancement import subtract_images
+from src.core.image_enhancement import subtract_images, float01_to_uint8
 
 logger = logging.getLogger(__name__)
 
@@ -22,10 +22,6 @@ logger = logging.getLogger(__name__)
 @dataclass
 class Stage1Result:
     detections_df: pd.DataFrame
-
-
-def _as_uint8(image_float01: np.ndarray) -> np.ndarray:
-    return np.round(np.clip(image_float01, 0.0, 1.0) * 255.0).astype(np.uint8)
 
 
 def _has_brightness_config_sections(cfg: Dict[str, Any]) -> bool:
@@ -44,8 +40,8 @@ def run_stage1_realtime(
     ffc_assets: Optional[FlatFieldCorrectionAssets] = None,
 ) -> Stage1Result:
     if ffc_assets is not None:
-        fg_img_uint8 = _as_uint8(apply_flat_field_correction(fg_img_uint8, ffc_assets))
-        bg_img_uint8 = _as_uint8(apply_flat_field_correction(bg_img_uint8, ffc_assets))
+        fg_img_uint8 = float01_to_uint8(apply_flat_field_correction(fg_img_uint8, ffc_assets))
+        bg_img_uint8 = float01_to_uint8(apply_flat_field_correction(bg_img_uint8, ffc_assets))
 
     brightness_cfg = config["config_black_plate_well"]
     enable_brightness_adjustment = bool(config["enable_brightness_adjustment"])
@@ -82,10 +78,9 @@ def run_stage1_realtime(
     if foreground_fraction > max_foreground_fraction:
         if frame_index % 30 == 0:
             logger.warning(
-                "Frame %d skipped: foreground fraction %.3f exceeds max_foreground_fraction %.3f (possible bg mismatch/illumination drift).",
-                frame_index,
-                foreground_fraction,
-                max_foreground_fraction,
+                f"Frame {frame_index} skipped: foreground fraction {foreground_fraction:.3f} "
+                f"exceeds max_foreground_fraction {max_foreground_fraction:.3f} "
+                "(possible bg mismatch/illumination drift)."
             )
         return Stage1Result(detections_df=pd.DataFrame())
 

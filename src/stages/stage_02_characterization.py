@@ -205,7 +205,7 @@ def crop_particles(
         )
 
         if crop_gray is None:
-            logger.warning("Failed to crop particle at index %s. Skipping.", original_index)
+            logger.warning(f"Failed to crop particle at index {original_index}. Skipping.")
             continue
 
         crop_identifier_for_logs = crop_filename or "unsaved_crop"
@@ -359,7 +359,7 @@ def save_all_particle_crops(
         try:
             cv2.imwrite(crop_path, crop_gray)
         except Exception as exc:  # noqa: BLE001
-            logger.error("Failed to save crop to %s: %s", crop_path, exc)
+            logger.error(f"Failed to save crop to {crop_path}: {exc}")
 
 
 def emit_focus_artifacts(
@@ -849,7 +849,7 @@ def select_final_particles_by_area(
     valid_df = working_df.dropna(subset=[track_col, '_area_numeric'])
 
     if valid_df.empty:
-        logger.info('No valid rows with both track id and %s for final particle selection.', area_col)
+        logger.info(f"No valid rows with both track id and {area_col!r} for final particle selection.")
         return pd.DataFrame(columns=filtered_df.columns)
 
     idx = valid_df.groupby(track_col)['_area_numeric'].idxmax()
@@ -909,12 +909,12 @@ def crop_and_save_final_particle_images(
         main_image_gray = convert_to_grayscale(main_image_color)
 
         if main_image_color is None or main_image_gray is None:
-            logger.warning('Failed to load image %s for final particle crops.', full_image_path)
+            logger.warning(f"Failed to load image {full_image_path} for final particle crops.")
             continue
 
         frame_num = extract_frame_from_filename(image_filename)
         if frame_num is None:
-            logger.warning('Could not parse frame from filename %s for final particle crops.', image_filename)
+            logger.warning(f"Could not parse frame from filename {image_filename} for final particle crops.")
             continue
 
         for idx, row in group.iterrows():

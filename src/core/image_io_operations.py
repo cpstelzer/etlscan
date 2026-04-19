@@ -200,7 +200,7 @@ def load_image(image_path: str, mode: str = 'color') -> Optional[np.ndarray]:
     except Exception as e:
         logger.exception(f"Exception during image loading for {image_path}: {e}")
         if cv2 is not None:
-            logger.warning("Attempting PIL fallback after OpenCV load exception: %s", image_path)
+            logger.warning(f"Attempting PIL fallback after OpenCV load exception: {image_path}")
             return _load_image_with_pil(image_path, mode)
         return None
 
