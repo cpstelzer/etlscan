@@ -4,24 +4,6 @@ import numpy as np
 import skimage.measure
 import logging
 from typing import Dict, Any, Optional
-
-# IMPORTANT: The function 'calculate_detailed_body_morphology' should be
-# moved from 'src/core/detailed_morphology_calculator.py' into this new file.
-# The contents of that function remain unchanged.
-
-# For brevity, I will not repeat the entire function here. Please perform the move.
-# After moving, 'src/core/detailed_morphology_calculator.py' can be deleted.
-
-# --- PASTE the entire 'calculate_detailed_body_morphology' function here ---
-# Example start of the function:
-# def calculate_detailed_body_morphology(
-#     raw_body_mask: Optional[np.ndarray],
-#     ...
-# ) -> Dict[str, Any]:
-#     features: Dict[str, Any] = {}
-#     ... (rest of the function)
-
-# For the script to be complete, I will paste it here.
 logger = logging.getLogger(__name__)
 
 def calculate_detailed_body_morphology(

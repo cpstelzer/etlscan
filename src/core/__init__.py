@@ -26,3 +26,9 @@
 #                         segment_main_body_from_image_float
 # particle_operations   : crop_particle_from_arrays, compute_adaptive_padding,
 #                         normalized_crop_config, detect_cropped_particle_on_boundary
+#
+# feature_calculators/  (subpackage — see feature_calculators/__init__.py)
+#   morphology_calculator   : calculate_detailed_body_morphology
+#   quality_calculator      : calculate_quality_features
+#   shape_descriptors       : calculate_shape_descriptors
+#   bio_features_calculator : extract_ml_features, calculate_posterior_attributes
