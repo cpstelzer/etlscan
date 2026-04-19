@@ -39,7 +39,7 @@ def _base_unified_config(**overrides):
         },
         "system": {
             "source_image_illumination_type": "collimated",
-            "thresholding": {"mode": "otsu", "otsu_threshold_multiplier": 0.7, "fixed_threshold_value": 70},
+            "thresholding": {"thresholding_mode": "otsu", "otsu_threshold_multiplier": 0.7, "fixed_threshold_value": 70},
             "segmentation": {"min_noise_size": 99, "closing_selem_size": 3},
         },
         "stage_01_initial_detection": {
@@ -70,6 +70,19 @@ def _base_unified_config(**overrides):
         },
         "stage_03_filtering_and_classification": {
             "quality_flags_filter": {"filter_black_mask": True, "filter_on_boundary": True}
+        },
+        "stage_04_biological_analysis": {
+            "egg_detection": {
+                "gaussian_sigma": 1.0,
+                "egg_posterior_pixel_fraction": 0.35,
+                "egg_threshold_quantile": 0.8,
+                "egg_min_area": 50,
+                "egg_max_area": 5000,
+                "egg_min_solidity": 0.60,
+                "egg_max_solidity": 0.99,
+                "egg_min_eccentricity": 0.2,
+                "orientation_diff_tolerance_deg": 85,
+            }
         },
         "realtime_mode": {
             "enabled": True,

@@ -39,8 +39,10 @@ def _deep_merge(base: Dict[str, Any], overlay: Dict[str, Any]) -> Dict[str, Any]
 
 def _apply_hardware_profile(config: Dict[str, Any]) -> None:
     """Deep-merge the active hardware profile into config['acquisition'] in place."""
-    profile_name = config["active_hardware_profile"]
-    profiles = config["hardware_profiles"]
+    profile_name = config.get("active_hardware_profile")
+    if profile_name is None:
+        return
+    profiles = config.get("hardware_profiles", {})
     if profile_name not in profiles:
         raise KeyError(
             f"active_hardware_profile '{profile_name}' not found in hardware_profiles; "
