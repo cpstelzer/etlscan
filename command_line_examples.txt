@@ -1,5 +1,5 @@
 # Aquisition (no analysis)
-python src/acquire/ws_acquire_single.py
+python scripts/run_acquire_single.py --plate 1 --well 1 --start-dpt -2.0
 
 # Realtime (acquisition and realtime analysis)
 python scripts/run_realtime.py

@@ -92,10 +92,21 @@ def test_load_acquisition_config_uses_lazy_api(monkeypatch):
     assert conf['loaded_from_path'].endswith("config.yml")
 
 
-def test_shim_config_paths_are_repo_relative():
+def test_script_config_paths_are_repo_relative():
+    import importlib.util
     import os
-    from src.acquire import ws_acquire, ws_acquire_experiment, ws_acquire_single
 
-    assert os.path.isfile(ws_acquire.ACQUISITION_CONFIG_PATH)
-    assert os.path.isfile(ws_acquire_experiment.ACQUISITION_CONFIG_PATH)
-    assert os.path.isfile(ws_acquire_single.ACQUISITION_CONFIG_PATH)
+    scripts_dir = os.path.join(os.path.dirname(__file__), "..", "scripts")
+
+    def load_script(filename):
+        path = os.path.join(scripts_dir, filename)
+        spec = importlib.util.spec_from_file_location(filename[:-3], path)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        return mod
+
+    run_acquire = load_script("run_acquire.py")
+    run_acquire_experiment = load_script("run_acquire_experiment.py")
+
+    assert os.path.isfile(run_acquire.ACQUISITION_CONFIG_PATH)
+    assert os.path.isfile(run_acquire_experiment.ACQUISITION_CONFIG_PATH)

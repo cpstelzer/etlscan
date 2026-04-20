@@ -1,7 +1,7 @@
 """High-level acquisition workflow orchestration.
 
 This module exposes three top-level workflow functions that are invoked by the
-thin CLI entry points in ``src/acquire/ws_acquire*.py``:
+thin CLI entry points in ``scripts/run_acquire*.py``:
 
 ``select_wells``
     Launches the interactive :func:`well_selector_gui` so the operator can

@@ -8,7 +8,8 @@ def normalize_plate_type(plate_type) -> str:
     variants (e.g. ``"24-well"``, ``"96_WELL"``).  Returns ``"24"`` or
     ``"96"``.  Raises ``ValueError`` for any unrecognised value.  When
     *plate_type* is ``None``, defaults to ``"24"``.
-    """if plate_type is None:
+    """
+    if plate_type is None:
         return "24"
     if isinstance(plate_type, int):
         plate_type = str(plate_type)

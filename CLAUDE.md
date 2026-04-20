@@ -29,6 +29,9 @@ well_plate_analyzer/
 ├── models/                     # Trained RF + EfficientNet artefacts
 ├── scripts/
 │   ├── run_pipeline.py         # Main entry point (batch mode)
+│   ├── run_acquire.py          # Multi-well acquisition entry point
+│   ├── run_acquire_single.py   # Single-well acquisition entry point
+│   ├── run_acquire_experiment.py # Experiment-sweep acquisition entry point
 │   ├── train_model.py          # Random-Forest retraining
 │   └── train_efficientnet_model.py
 ├── src/
@@ -37,8 +40,7 @@ well_plate_analyzer/
 │   │   ├── config.py           # Plate-type normalisation and settings merge
 │   │   ├── plate_layout.py     # 24/96-well coordinate generation
 │   │   ├── stage_controller.py # Zaber XY-stage abstraction
-│   │   ├── experiment_logging.py
-│   │   └── ws_acquire*.py      # Thin CLI entry points
+│   │   └── experiment_logging.py
 │   ├── core/
 │   │   ├── feature_calculators/
 │   │   │   ├── morphology_calculator.py

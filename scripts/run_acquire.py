@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Compatibility shim for multi-well acquisition workflow."""
+"""Entry point for multi-well acquisition workflow."""
 
 import os
 import sys
 
 
 def _ensure_repo_root_on_path():
-    repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+    repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
     if repo_root not in sys.path:
         sys.path.insert(0, repo_root)
 
@@ -40,7 +40,7 @@ DEVICE_X_MICROSTEP_SIZE_MICROMETERS = 0.15625
 DEVICE_Y_MICROSTEP_SIZE_MICROMETERS = 0.15625
 POSITION_TOLERANCE = 10
 ACQUISITION_CONFIG_PATH = os.path.join(
-    os.path.dirname(__file__), "..", "..", "config", "config.yml"
+    os.path.dirname(__file__), "..", "config", "config.yml"
 )
 
 

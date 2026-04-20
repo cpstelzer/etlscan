@@ -718,7 +718,7 @@ if __name__ == "__main__":
     try:
         loaded_config = load_config()
         loaded_config['loaded_from_path'] = os.path.abspath(DEFAULT_CONFIG_PATH)
-        # For direct execution test, we assume monochrome. The main script ws_acquire.py will handle the choice.
+        # For direct execution test, we assume monochrome. The main script run_acquire.py will handle the choice.
         results = run_acquisition(1, 1, -1.8, loaded_config, process_as_color=False)
         print(f"Example run acquisition results: {results}")
     except SystemExit:

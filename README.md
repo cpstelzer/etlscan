@@ -28,9 +28,9 @@ Supporting tooling:
 
 Acquisition entrypoints are preserved while now delegating to shared workflow modules:
 
-- `src/acquire/ws_acquire.py` → multi-well XY-stage workflow
-- `src/acquire/ws_acquire_experiment.py` → parameter sweep workflow
-- `src/acquire/ws_acquire_single.py` → single-sample no-stage workflow
+- `scripts/run_acquire.py` → multi-well XY-stage workflow
+- `scripts/run_acquire_experiment.py` → parameter sweep workflow
+- `scripts/run_acquire_single.py` → single-sample no-stage workflow
 
 The common orchestration and helpers live in:
 
