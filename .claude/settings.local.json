@@ -1,0 +1,16 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python -m pytest tests/ --ignore=tests/test_acquire_refactor_contracts.py -q)",
+      "Bash(py -m pytest tests/ --ignore=tests/test_acquire_refactor_contracts.py -q)",
+      "Bash(python3 -m pytest tests/ --ignore=tests/test_acquire_refactor_contracts.py -q)",
+      "Read(//c/ProgramData/miniconda3/**)",
+      "Read(//c/Users/cpstelzer/.venv/**)",
+      "Read(//c/Users/cpstelzer/**)",
+      "Bash(/c/Users/cpstelzer/anaconda3/Scripts/pytest.exe tests/ --ignore=tests/test_acquire_refactor_contracts.py -q)",
+      "Bash(/c/Users/cpstelzer/anaconda3/Scripts/pytest.exe tests/ --ignore=tests/test_acquire_refactor_contracts.py --ignore=tests/test_float01_to_uint8.py -q)",
+      "Bash(git stash *)",
+      "Bash(/c/Users/cpstelzer/anaconda3/Scripts/pytest.exe tests/test_project_base_dir_expansion.py -q)"
+    ]
+  }
+}

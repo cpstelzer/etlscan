@@ -13,6 +13,14 @@ sample_subdir_name: "C:/wellscanner/test/"
 active_hardware_profile: "TS1_0638_70_EL"
 
 # -----------------------------------------------------------------------------
+# Flat-field calibration file layout
+# -----------------------------------------------------------------------------
+flat_field_calibration:
+  subdir: "1_flat_field"
+  flat_filename: "flat.png"
+  dark_filename: "dark.png"
+
+# -----------------------------------------------------------------------------
 # Logging
 # -----------------------------------------------------------------------------
 logging:
@@ -69,6 +77,12 @@ acquisition:
   # roi.width/height: set by hardware_profiles
   output:
     image_format: "bmp"
+  stage_controller:
+    serial_port: "COM7"
+    device_x_number: 1
+    device_y_number: 2
+    microstep_size_um: 0.15625
+    position_tolerance_microsteps: 10
   watermark:
     font: "FONT_HERSHEY_SIMPLEX"
     font_scale: 2.0
@@ -188,12 +202,14 @@ stage_01_initial_detection:
   black_plate_well_analysis:
     enable_brightness_adjustment: true
     well_identification:
+      morph_kernel_size: 9
       low_threshold_value: 10
       min_expected_diameter_px: 1500
       max_expected_diameter_px: 4000
       min_fill_ratio_to_enclosing_circle: 0.8
       center_offset_fraction_threshold: 0.1
     brightness_peak_calculation:
+      min_well_pixels: 100
       min_intensity_for_peak_search: 75
       percentile_for_peak_proxy: 75
     brightness_matching:
@@ -229,8 +245,8 @@ stage_01_initial_detection:
 # -----------------------------------------------------------------------------
 stage_02_characterization:
   cropping:
-    save_all_particle_crops: false
-    mode: "rotational_rectangle"
+    save_all_particle_crops: true
+    mode: "bounding_box" # "bounding_box" or "rotational_rectangle"
     adaptive_padding_factor: 0.2
   quality_features:
     black_mask_check:
@@ -244,7 +260,7 @@ stage_02_characterization:
     enabled: true
     frame_column: "frame"
     track_column: "track_id"
-    sharpness_column: "variance_laplacian"
+    sharpness_column: "variance_laplacian" 
     min_sharpness_fraction: 0.3
     min_prominence_fraction: 0.05
     smooth_window: 3

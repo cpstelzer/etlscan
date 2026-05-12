@@ -1,5 +1,4 @@
 # src/utils/__init__.py
-from . import constants
 from .config_loader import load_config_once
 from .logging_setup import setup_logging
 from .path_helpers import (

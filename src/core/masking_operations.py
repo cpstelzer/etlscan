@@ -14,7 +14,6 @@ except Exception:  # noqa: BLE001 - propagate as optional dependency
     cv2 = None  # type: ignore
 
 from src.utils.common_exceptions import ImageProcessingError
-from src.utils.constants import WELL_MASK_DEFAULT_RADIUS_FRACTION
 
 logger = logging.getLogger(__name__)
 
@@ -146,8 +145,8 @@ def mask_well_area(
         radius_fraction = mask_config.get('radius_fraction')
         if radius_fraction is None:
             logger.error(
-                f"'radius_fraction' not found in mask_config for well masking. "
-                f"Ensure it's set (e.g., to {WELL_MASK_DEFAULT_RADIUS_FRACTION} to match original behavior)."
+                "'radius_fraction' not found in mask_config for well masking. "
+                "Ensure it is set under stage_01_initial_detection.well_masking in config.yml."
             )
             return None, None
             

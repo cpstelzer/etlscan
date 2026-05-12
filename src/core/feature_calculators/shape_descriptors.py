@@ -5,7 +5,6 @@ from typing import Dict, Any, List
 import logging
 from skimage.feature import local_binary_pattern
 
-from src.utils.constants import LBP_DEFAULT_RADII, LBP_DEFAULT_POINTS
 
 logger = logging.getLogger(__name__)
 
@@ -59,8 +58,8 @@ def calculate_shape_descriptors(
 
     # --- Get parameters from config with safe defaults ---
     shape_config = config.get('shape_descriptors', {})
-    lbp_radii_to_use = shape_config.get('lbp_radii', LBP_DEFAULT_RADII)
-    lbp_points_to_use = shape_config.get('lbp_points', LBP_DEFAULT_POINTS)
+    lbp_radii_to_use = shape_config.get('lbp_radii', [1, 3])
+    lbp_points_to_use = shape_config.get('lbp_points', 8)
 
     texture_features = compute_texture_descriptors(
         image_crop_gray,

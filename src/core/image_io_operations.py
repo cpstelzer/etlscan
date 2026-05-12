@@ -16,11 +16,7 @@ except Exception:  # noqa: BLE001 - keep optional dependency for headless envs
     cv2 = None  # type: ignore
 
 from src.utils.common_exceptions import ImageProcessingError
-from src.utils.constants import (
-    FLAT_FIELD_SUBDIR,
-    FLAT_FIELD_FLAT_FILENAME,
-    FLAT_FIELD_DARK_FILENAME,
-)
+from src.utils.config_loader import load_config_once
 
 logger = logging.getLogger(__name__)
 
@@ -32,13 +28,13 @@ class FlatFieldCorrectionAssets:
     dark_float: np.ndarray
 
 
-def _get_flat_field_candidate_dirs(sample_dir_path: str) -> list[str]:
+def _get_flat_field_candidate_dirs(sample_dir_path: str, subdir: str) -> list[str]:
     """Return candidate calibration directories ordered from most to least specific."""
     sample_dir = os.path.normpath(sample_dir_path)
     parent_dir = os.path.dirname(sample_dir)
     return [
-        os.path.join(sample_dir, FLAT_FIELD_SUBDIR),
-        os.path.join(parent_dir, FLAT_FIELD_SUBDIR),
+        os.path.join(sample_dir, subdir),
+        os.path.join(parent_dir, subdir),
     ]
 
 
@@ -50,13 +46,18 @@ def load_flat_field_assets(sample_dir_path: str, mode: str = 'gray') -> FlatFiel
     while the dark image captures baseline sensor signal. We reuse both for every
     frame from the same sample to keep correction consistent and efficient.
     """
-    candidate_dirs = _get_flat_field_candidate_dirs(sample_dir_path)
+    ffc_cfg = load_config_once().get('flat_field_calibration', {})
+    subdir = ffc_cfg.get('subdir', '1_flat_field')
+    flat_filename = ffc_cfg.get('flat_filename', 'flat.png')
+    dark_filename = ffc_cfg.get('dark_filename', 'dark.png')
+
+    candidate_dirs = _get_flat_field_candidate_dirs(sample_dir_path, subdir)
     attempted_dirs: list[str] = []
 
     for calibration_dir in candidate_dirs:
         attempted_dirs.append(calibration_dir)
-        flat_path = os.path.join(calibration_dir, FLAT_FIELD_FLAT_FILENAME)
-        dark_path = os.path.join(calibration_dir, FLAT_FIELD_DARK_FILENAME)
+        flat_path = os.path.join(calibration_dir, flat_filename)
+        dark_path = os.path.join(calibration_dir, dark_filename)
 
         if not os.path.exists(flat_path) or not os.path.exists(dark_path):
             logger.debug(
@@ -88,7 +89,7 @@ def load_flat_field_assets(sample_dir_path: str, mode: str = 'gray') -> FlatFiel
     raise ImageProcessingError(
         "Failed to load flat-field calibration images. "
         f"Checked directories: {', '.join(attempted_dirs)}. "
-        "Expected files: flat.png and dark.png."
+        f"Expected files: {flat_filename} and {dark_filename}."
     )
 
 

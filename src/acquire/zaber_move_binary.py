@@ -13,25 +13,20 @@ import csv
 import sys
 
 from src.acquire.stage_controller import StageController
-from src.utils.constants import (
-    ZABER_SERIAL_PORT,
-    ZABER_DEVICE_X_NUMBER,
-    ZABER_DEVICE_Y_NUMBER,
-    ZABER_MICROSTEP_SIZE_UM,
-    ZABER_POSITION_TOLERANCE_MICROSTEPS,
-)
+from src.utils.config_loader import load_config_once
 
 CSV_FILENAME = "wellscanner_coords.csv"
 
 
 def main():
+    sc_cfg = load_config_once().get('acquisition', {}).get('stage_controller', {})
     controller = StageController(
-        serial_port=ZABER_SERIAL_PORT,
-        device_x_number=ZABER_DEVICE_X_NUMBER,
-        device_y_number=ZABER_DEVICE_Y_NUMBER,
-        device_x_microstep_size=ZABER_MICROSTEP_SIZE_UM,
-        device_y_microstep_size=ZABER_MICROSTEP_SIZE_UM,
-        position_tolerance=ZABER_POSITION_TOLERANCE_MICROSTEPS,
+        serial_port=sc_cfg.get('serial_port', 'COM7'),
+        device_x_number=sc_cfg.get('device_x_number', 1),
+        device_y_number=sc_cfg.get('device_y_number', 2),
+        device_x_microstep_size=sc_cfg.get('microstep_size_um', 0.15625),
+        device_y_microstep_size=sc_cfg.get('microstep_size_um', 0.15625),
+        position_tolerance=sc_cfg.get('position_tolerance_microsteps', 10),
     )
 
     port, device_x, device_y = controller.initialize()

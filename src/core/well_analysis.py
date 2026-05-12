@@ -7,12 +7,6 @@ from typing import Optional, Tuple, Dict, Any
 from skimage.exposure import rescale_intensity
 
 from src.utils.common_exceptions import ImageProcessingError, ConfigError, DataValidationError
-from src.utils.constants import (
-    BRIGHTNESS_MIN_WELL_PIXELS,
-    BRIGHTNESS_MIN_INTENSITY_DEFAULT,
-    BRIGHTNESS_PERCENTILE_DEFAULT,
-    MORPH_KERNEL_SIZE_LARGE,
-)
 from src.core.region_props_calculator import find_contours
 
 logger = logging.getLogger(__name__)
@@ -43,8 +37,9 @@ def create_well_mask_black_plate(
     # 1. Opening: Removes small noise and protrusions from the well's border.
     # 2. Closing: Fills small holes and gaps in the well's border.
     # This combination produces a much smoother contour for accurate circularity calculation.
+    morph_kernel_size = config_well_mask.get('morph_kernel_size', 9)
     kernel = cv2.getStructuringElement(
-        cv2.MORPH_ELLIPSE, (MORPH_KERNEL_SIZE_LARGE, MORPH_KERNEL_SIZE_LARGE)
+        cv2.MORPH_ELLIPSE, (morph_kernel_size, morph_kernel_size)
     )
     opened_img = cv2.morphologyEx(threshold_img, cv2.MORPH_OPEN, kernel, iterations=1)
     cleaned_threshold_img = cv2.morphologyEx(opened_img, cv2.MORPH_CLOSE, kernel, iterations=1)
@@ -124,8 +119,9 @@ def create_well_mask_black_plate(
 def calculate_well_brightness_peak(
     image_gray_uint8: np.ndarray,
     well_mask_uint8: np.ndarray,
-    min_intensity_for_peak_search: int = BRIGHTNESS_MIN_INTENSITY_DEFAULT,
-    percentile_for_proxy: int = BRIGHTNESS_PERCENTILE_DEFAULT,
+    min_intensity_for_peak_search: int = 75,
+    percentile_for_proxy: int = 75,
+    min_well_pixels: int = 100,
 ) -> Optional[float]:
     """
     Calculates a proxy for the well background's brightness peak from its histogram.
@@ -135,13 +131,13 @@ def calculate_well_brightness_peak(
         return None
     
     well_pixels = image_gray_uint8[well_mask_uint8 == 255]
-    if well_pixels.size < BRIGHTNESS_MIN_WELL_PIXELS:
+    if well_pixels.size < min_well_pixels:
         logger.warning(f"calculate_well_brightness_peak: Very few pixels ({well_pixels.size}) in well mask. Peak may be unreliable.")
         if well_pixels.size == 0:
             return None
 
     if percentile_for_proxy < 0 or percentile_for_proxy >= 100:
-        percentile_for_proxy = BRIGHTNESS_PERCENTILE_DEFAULT
+        percentile_for_proxy = 75
     
     # Ensure well_pixels is not empty before calling percentile
     if well_pixels.size == 0:
@@ -202,13 +198,15 @@ def match_well_brightness(
 
     fg_peak = calculate_well_brightness_peak(
         fg_img_uint8, fg_mask,
-        cfg_peak_calc.get('min_intensity_for_peak_search', BRIGHTNESS_MIN_INTENSITY_DEFAULT),
-        cfg_peak_calc.get('percentile_for_peak_proxy', BRIGHTNESS_PERCENTILE_DEFAULT),
+        cfg_peak_calc.get('min_intensity_for_peak_search', 75),
+        cfg_peak_calc.get('percentile_for_peak_proxy', 75),
+        cfg_peak_calc.get('min_well_pixels', 100),
     )
     bg_peak = calculate_well_brightness_peak(
         bg_img_uint8, bg_mask,
-        cfg_peak_calc.get('min_intensity_for_peak_search', BRIGHTNESS_MIN_INTENSITY_DEFAULT),
-        cfg_peak_calc.get('percentile_for_peak_proxy', BRIGHTNESS_PERCENTILE_DEFAULT),
+        cfg_peak_calc.get('min_intensity_for_peak_search', 75),
+        cfg_peak_calc.get('percentile_for_peak_proxy', 75),
+        cfg_peak_calc.get('min_well_pixels', 100),
     )
 
     if fg_peak is None or bg_peak is None:

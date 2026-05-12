@@ -67,7 +67,6 @@ well_plate_analyzer/
 │   │   ├── stage_03_filtering_and_classification.py
 │   │   └── stage_04_biological_analysis.py
 │   ├── utils/
-│   │   ├── constants.py        # All magic numbers live here
 │   │   ├── filename_helpers.py # build_crop_filename()
 │   │   ├── common_exceptions.py
 │   │   ├── config_loader.py
@@ -138,7 +137,7 @@ active refactoring work).
 | Config dicts: `{scope}_config` | `mask_config`, `crop_config` |
 | Boolean masks: `{name}_mask` (no `_bool`) | `initial_mask`, `filled_mask` |
 | Private helpers: `_` prefix | `_require_cv2`, `_load_image_with_pil` |
-| Magic numbers: always in `constants.py` | `from src.utils.constants import MORPH_KERNEL_SIZE_LARGE` |
+| Magic numbers: always in `config.yml` | `config['stage_01_initial_detection']['black_plate_well_analysis']['morph_kernel_size']` |
 | Strings: f-strings only | `f"loaded {path!r}"` not `"loaded %s" % path` |
 | Tests: `tests/` only — no `__main__` blocks in `src/` | |
 | Type annotations: all public functions must be fully annotated | |
@@ -162,23 +161,6 @@ ValueError
 
 Catch `ProcessingError` to handle any pipeline processing failure (includes
 both image and ML errors).
-
----
-
-## Named constants
-
-All magic numbers live in `src/utils/constants.py`.  Import by category:
-
-```python
-from src.utils.constants import (
-    FLAT_FIELD_SUBDIR,          # calibration directories
-    WELL_MASK_DEFAULT_RADIUS_FRACTION,
-    BRIGHTNESS_MIN_WELL_PIXELS,
-    LBP_DEFAULT_RADII,
-    MORPH_KERNEL_SIZE_LARGE,
-    ZABER_SERIAL_PORT,          # hardware defaults
-)
-```
 
 ---
 
