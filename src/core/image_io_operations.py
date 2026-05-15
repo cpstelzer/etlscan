@@ -20,6 +20,10 @@ from src.utils.config_loader import load_config_once
 
 logger = logging.getLogger(__name__)
 
+# Cached answer to the one-time "proceed without FFC?" prompt.
+# None = not yet asked; True = user confirmed skip; False = user aborted.
+_ffc_missing_confirmed: Optional[bool] = None
+
 
 @dataclass(frozen=True)
 class FlatFieldCorrectionAssets:
@@ -38,15 +42,23 @@ def _get_flat_field_candidate_dirs(sample_dir_path: str, subdir: str) -> list[st
     ]
 
 
-def load_flat_field_assets(sample_dir_path: str, mode: str = 'gray') -> FlatFieldCorrectionAssets:
+def load_flat_field_assets(sample_dir_path: str, mode: str = 'gray') -> Optional[FlatFieldCorrectionAssets]:
     """
     Load flat-field calibration images once for a sample directory.
+
+    Returns None when flat_field_calibration.enabled is false in config, or when
+    calibration files are not found (with a warning). The caller must handle None
+    by skipping correction and normalising raw images directly.
 
     The flat image captures the uneven illumination pattern in the microscope view,
     while the dark image captures baseline sensor signal. We reuse both for every
     frame from the same sample to keep correction consistent and efficient.
     """
     ffc_cfg = load_config_once().get('flat_field_calibration', {})
+    if not ffc_cfg.get('enabled', True):
+        logger.info("Flat-field correction is disabled in config. Skipping calibration load.")
+        return None
+
     subdir = ffc_cfg.get('subdir', '1_flat_field')
     flat_filename = ffc_cfg.get('flat_filename', 'flat.png')
     dark_filename = ffc_cfg.get('dark_filename', 'dark.png')
@@ -86,10 +98,49 @@ def load_flat_field_assets(sample_dir_path: str, mode: str = 'gray') -> FlatFiel
             dark_float=dark_img.astype(np.float32),
         )
 
+    return _prompt_ffc_missing(attempted_dirs, flat_filename, dark_filename)
+
+
+def _prompt_ffc_missing(
+    attempted_dirs: list[str],
+    flat_filename: str,
+    dark_filename: str,
+) -> None:
+    """Ask once whether to proceed without flat-field correction; cache and honour the answer."""
+    global _ffc_missing_confirmed
+
+    if _ffc_missing_confirmed is True:
+        return None
+    if _ffc_missing_confirmed is False:
+        raise ImageProcessingError(
+            "Flat-field calibration files not found and user chose to abort. "
+            f"Checked: {', '.join(attempted_dirs)}."
+        )
+
+    # First time: ask the user.
+    print(
+        f"\nFlat-field calibration directories were not found.\n"
+        f"Checked: {', '.join(attempted_dirs)}\n"
+        f"Expected files: {flat_filename} and {dark_filename}\n"
+        "Proceed without flat-field correction? [y/n]: ",
+        end="",
+        flush=True,
+    )
+    answer = input().strip().lower()
+
+    if answer == "y":
+        logger.warning(
+            "User confirmed: proceeding without flat-field correction. "
+            "Checked directories: %s.",
+            ", ".join(attempted_dirs),
+        )
+        _ffc_missing_confirmed = True
+        return None
+
+    _ffc_missing_confirmed = False
     raise ImageProcessingError(
-        "Failed to load flat-field calibration images. "
-        f"Checked directories: {', '.join(attempted_dirs)}. "
-        f"Expected files: {flat_filename} and {dark_filename}."
+        "Flat-field calibration files not found and user chose to abort. "
+        f"Checked: {', '.join(attempted_dirs)}."
     )
 
 

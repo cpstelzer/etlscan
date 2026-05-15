@@ -16,6 +16,7 @@ active_hardware_profile: "TS1_0638_70_EL"
 # Flat-field calibration file layout
 # -----------------------------------------------------------------------------
 flat_field_calibration:
+  enabled: true
   subdir: "1_flat_field"
   flat_filename: "flat.png"
   dark_filename: "dark.png"
@@ -246,7 +247,7 @@ stage_01_initial_detection:
 stage_02_characterization:
   cropping:
     save_all_particle_crops: true
-    mode: "bounding_box" # "bounding_box" or "rotational_rectangle"
+    mode: "rotational_rectangle" # "bounding_box" or "rotational_rectangle"
     adaptive_padding_factor: 0.2
   quality_features:
     black_mask_check:

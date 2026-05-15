@@ -176,7 +176,7 @@ def process_frame_pair(
     fg_row: pd.Series,
     bg_row: pd.Series,
     config: Dict[str, Any],
-    ffc_assets,
+    ffc_assets: Optional[Any],
     masks: Optional[Dict[str, Any]] = None
 ) -> pd.DataFrame:
     """Process a FG/BG pair and return fused particle detections."""
@@ -189,15 +189,12 @@ def process_frame_pair(
         logger.warning(f"Could not load FG ({fg_filepath}) or BG ({bg_filepath}). Skipping pair.")
         return pd.DataFrame()
 
-    # Correct both frames for uneven lighting before any masking, subtraction, or thresholding.
-    # This makes intensity comparisons more reliable across the full field of view.
-    fg_img_float = apply_flat_field_correction(fg_img, ffc_assets)
-    bg_img_float = apply_flat_field_correction(bg_img, ffc_assets)
-
-    # Convert corrected [0, 1] floats back to uint8 because Stage 1 helpers below
-    # (masking, subtraction, and local Otsu routines) currently expect uint8 images.
-    fg_img_ffc = np.round(fg_img_float * 255.0).astype(np.uint8)
-    bg_img_ffc = np.round(bg_img_float * 255.0).astype(np.uint8)
+    if ffc_assets is not None:
+        fg_img_ffc = np.round(apply_flat_field_correction(fg_img, ffc_assets) * 255.0).astype(np.uint8)
+        bg_img_ffc = np.round(apply_flat_field_correction(bg_img, ffc_assets) * 255.0).astype(np.uint8)
+    else:
+        fg_img_ffc = fg_img
+        bg_img_ffc = bg_img
 
     prep_data = prepare_masked_foreground(
         fg_img_ffc,
