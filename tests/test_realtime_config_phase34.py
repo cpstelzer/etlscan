@@ -90,7 +90,6 @@ def _base_unified_config(**overrides):
             "output_root_dir": "output/realtime",
             "runtime": {
                 "target_fps": 5,
-                "max_processing_latency_ms": 250,
                 "drop_frame_if_backlogged": True,
                 "queue_size": 2,
             },

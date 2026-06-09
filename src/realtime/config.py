@@ -15,7 +15,6 @@ class RealtimeConfig:
     default_grayscale: bool
     output_root_dir: str
     target_fps: float
-    max_processing_latency_ms: int
     drop_frame_if_backlogged: bool
     queue_size: int
     bgi_min_age_s: float
@@ -125,7 +124,6 @@ def load_realtime_config(config_path: str = "config/config.yml") -> RealtimeConf
         default_grayscale=bool(rt["default_grayscale"]),
         output_root_dir=str(rt["output_root_dir"]),
         target_fps=float(runtime["target_fps"]),
-        max_processing_latency_ms=int(runtime["max_processing_latency_ms"]),
         drop_frame_if_backlogged=bool(runtime["drop_frame_if_backlogged"]),
         queue_size=int(runtime["queue_size"]),
         bgi_min_age_s=float(background["bgi_min_age_s"]),
@@ -184,7 +182,6 @@ def load_realtime_config(config_path: str = "config/config.yml") -> RealtimeConf
     )
 
     _must_be_positive("runtime.target_fps", parsed.target_fps)
-    _must_be_nonnegative("runtime.max_processing_latency_ms", parsed.max_processing_latency_ms)
     if parsed.queue_size < 1:
         raise ValueError("realtime_mode.runtime.queue_size must be >= 1")
     _must_be_positive("background.bgi_min_age_s", parsed.bgi_min_age_s)

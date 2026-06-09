@@ -189,8 +189,13 @@ Add a dedicated section, e.g. `realtime_mode:`
 - `output_root_dir`
 - `runtime:`
   - `target_fps`
-  - `max_processing_latency_ms`
   - `drop_frame_if_backlogged` (bool)
+  - `queue_size`
+  - Note: the per-frame processing budget is derived internally as
+    `1000 / target_fps`; there is no separate `max_processing_latency_ms`
+    knob. When frames exceed the budget (or are dropped), the runtime monitor
+    emits a single rate-limited "falling behind" warning per logging interval,
+    in both drop and blocking modes.
 - `background:`
   - `bgi_min_age_s` (default 2.0)
   - `bgi_max_age_s` (default 4.0)

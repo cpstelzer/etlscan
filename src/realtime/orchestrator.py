@@ -158,7 +158,7 @@ def run_realtime_session(config: RealtimeConfig, plate: int, well: int) -> str:
         logger.info("No-intentional-skip mode enabled: queue backpressure will block instead of dropping software frames.")
 
     ffc_assets = _load_optional_ffc_assets(config)
-    monitor = RuntimeMonitor(config.metric_print_interval_s)
+    monitor = RuntimeMonitor(config.metric_print_interval_s, config.target_fps)
     accepted_csv_path = os.path.join(session.output_dir, "accepted_particles.csv")
     accepted_csv_header_written = False
     accepted_rows_count = 0
@@ -283,6 +283,7 @@ def run_realtime_session(config: RealtimeConfig, plate: int, well: int) -> str:
                     stage1_reacquire_threshold,
                 )
                 elapsed_ms = (time.monotonic() - frame_start) * 1000.0
+                monitor.record_latency(elapsed_ms)
                 frame_row = {
                     "frame_no": packet.frame_index,
                     "BG_diopters": float(packet.diopter),
@@ -397,9 +398,9 @@ def run_realtime_session(config: RealtimeConfig, plate: int, well: int) -> str:
             monitor.counters.saved_crops += saved_count
             monitor.counters.accepted_particles += len(s3.accepted_df)
             monitor.counters.frames_processed += 1
-            monitor.maybe_log()
 
             elapsed_ms = (time.monotonic() - frame_start) * 1000.0
+            monitor.record_latency(elapsed_ms)
             frame_row = {
                 "frame_no": packet.frame_index,
                 "BG_diopters": float(packet.diopter),
@@ -421,8 +422,7 @@ def run_realtime_session(config: RealtimeConfig, plate: int, well: int) -> str:
                 index=False,
             )
             frame_metrics_header_written = True
-            if elapsed_ms > config.max_processing_latency_ms:
-                logger.warning("Frame %d processing latency %.2fms > budget %dms", packet.frame_index, elapsed_ms, config.max_processing_latency_ms)
+            monitor.maybe_log()
     except KeyboardInterrupt:
         logger.info("Realtime session interrupted by user; finalizing outputs written so far.")
     finally:

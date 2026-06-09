@@ -152,7 +152,8 @@ realtime_mode:
   output_root_dir: "data/output/realtime"
   runtime:
     target_fps: 5
-    max_processing_latency_ms: 250
+    # Per-frame processing budget is derived internally as 1000/target_fps; when
+    # frames exceed it the monitor emits a rate-limited "falling behind" warning.
     drop_frame_if_backlogged: false
     queue_size: 2
   background:
