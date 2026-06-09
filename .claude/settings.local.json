@@ -10,7 +10,9 @@
       "Bash(/c/Users/cpstelzer/anaconda3/Scripts/pytest.exe tests/ --ignore=tests/test_acquire_refactor_contracts.py -q)",
       "Bash(/c/Users/cpstelzer/anaconda3/Scripts/pytest.exe tests/ --ignore=tests/test_acquire_refactor_contracts.py --ignore=tests/test_float01_to_uint8.py -q)",
       "Bash(git stash *)",
-      "Bash(/c/Users/cpstelzer/anaconda3/Scripts/pytest.exe tests/test_project_base_dir_expansion.py -q)"
+      "Bash(/c/Users/cpstelzer/anaconda3/Scripts/pytest.exe tests/test_project_base_dir_expansion.py -q)",
+      "Bash(python -m pytest tests/test_well_analysis.py -v)",
+      "PowerShell(py -m pytest tests/test_well_analysis.py -v 2>&1)"
     ]
   }
 }

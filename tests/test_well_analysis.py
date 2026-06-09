@@ -9,6 +9,7 @@ cv2 = pytest.importorskip("cv2", reason="OpenCV required.", exc_type=ImportError
 
 from src.core.well_analysis import (
     create_well_mask_black_plate,
+    create_full_frame_bright_mask,
     calculate_well_brightness_peak,
     match_well_brightness,
 )
@@ -129,3 +130,59 @@ def test_match_well_brightness_missing_config_returns_originals(fg_image, bg_ima
     adj_fg, adj_bg = match_well_brightness(fg_image, bg_image_brighter, {})
     assert np.array_equal(adj_fg, fg_image)
     assert np.array_equal(adj_bg, bg_image_brighter)
+
+
+# --- Full-frame fallback (no discrete well present) ---------------------------
+
+@pytest.fixture()
+def full_frame_fg():
+    """Bright sample that fills the whole frame (no black plate border)."""
+    img = np.full((200, 200), 150, dtype=np.uint8)
+    cv2.circle(img, (80, 80), 8, 30, -1)  # a dark feature
+    return img
+
+
+@pytest.fixture()
+def full_frame_bg_brighter():
+    return np.full((200, 200), 210, dtype=np.uint8)
+
+
+def test_create_full_frame_bright_mask_thresholds_dark_pixels():
+    img = np.full((50, 50), 100, dtype=np.uint8)
+    img[0:10, 0:10] = 2  # below low_threshold_value
+    mask = create_full_frame_bright_mask(img, low_threshold_value=10)
+    assert mask is not None
+    assert mask.shape == img.shape
+    assert mask[25, 25] == 255          # bright region kept
+    assert mask[5, 5] == 0              # dark corner excluded
+
+
+def test_create_full_frame_bright_mask_invalid_input():
+    assert create_full_frame_bright_mask(None) is None
+    assert create_full_frame_bright_mask(np.zeros((4, 4, 3), dtype=np.uint8)) is None
+
+
+def test_match_well_brightness_fallback_normalizes_when_no_well(
+    full_frame_fg, full_frame_bg_brighter, full_analysis_config
+):
+    # max_expected_diameter_px (190) is smaller than the full-frame enclosing
+    # circle, so circle detection fails and the fallback should engage.
+    adj_fg, adj_bg = match_well_brightness(
+        full_frame_fg, full_frame_bg_brighter, full_analysis_config
+    )
+    # BG (210) is brighter than FG (150) beyond tolerance, so it must be dimmed.
+    assert not np.array_equal(adj_bg, full_frame_bg_brighter)
+    assert adj_bg.mean() < full_frame_bg_brighter.mean()
+    assert adj_bg.dtype == np.uint8
+
+
+def test_match_well_brightness_fallback_can_be_disabled(
+    full_frame_fg, full_frame_bg_brighter, full_analysis_config
+):
+    full_analysis_config["well_identification"]["fallback_full_frame_on_failure"] = False
+    adj_fg, adj_bg = match_well_brightness(
+        full_frame_fg, full_frame_bg_brighter, full_analysis_config
+    )
+    # Fallback disabled -> original images returned unchanged.
+    assert np.array_equal(adj_fg, full_frame_fg)
+    assert np.array_equal(adj_bg, full_frame_bg_brighter)

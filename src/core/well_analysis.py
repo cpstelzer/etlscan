@@ -116,6 +116,28 @@ def create_well_mask_black_plate(
     )
     return well_mask, well_properties
 
+def create_full_frame_bright_mask(
+    image_gray_uint8: np.ndarray,
+    low_threshold_value: int = 5,
+) -> Optional[np.ndarray]:
+    """Build a full-frame brightness mask for samples without a discrete well.
+
+    Used as a fallback when ``create_well_mask_black_plate`` cannot find a valid
+    circular well (e.g. no multi-well plate is present and the sample fills or
+    exceeds the entire frame). Pixels brighter than ``low_threshold_value`` are
+    masked in (255), so vignetting or dark borders do not skew the brightness
+    peak; everything else is excluded.
+    """
+    if image_gray_uint8 is None or image_gray_uint8.ndim != 2:
+        logger.error("create_full_frame_bright_mask: Invalid input image.")
+        return None
+
+    _, bright_mask = cv2.threshold(
+        image_gray_uint8, low_threshold_value, 255, cv2.THRESH_BINARY
+    )
+    return bright_mask.astype(np.uint8)
+
+
 def calculate_well_brightness_peak(
     image_gray_uint8: np.ndarray,
     well_mask_uint8: np.ndarray,
@@ -193,8 +215,23 @@ def match_well_brightness(
     bg_mask, _ = create_well_mask_black_plate(bg_img_uint8, cfg_well_id)
 
     if fg_mask is None or bg_mask is None:
-        logger.warning("match_well_brightness: Could not create well masks for FG or BG. Returning original images.")
-        return fg_img_uint8, bg_img_uint8
+        # Fall back to a full-frame bright-pixel mask when no discrete well is
+        # found (e.g. no multi-well plate; sample fills/exceeds the frame). This
+        # keeps brightness normalization working instead of returning the raw
+        # images. Controlled by 'fallback_full_frame_on_failure' (default on).
+        if cfg_well_id.get('fallback_full_frame_on_failure', True):
+            low_thresh = cfg_well_id.get('low_threshold_value', 5)
+            if fg_mask is None:
+                fg_mask = create_full_frame_bright_mask(fg_img_uint8, low_thresh)
+            if bg_mask is None:
+                bg_mask = create_full_frame_bright_mask(bg_img_uint8, low_thresh)
+            if fg_mask is None or bg_mask is None:
+                logger.warning("match_well_brightness: Full-frame fallback mask failed. Returning original images.")
+                return fg_img_uint8, bg_img_uint8
+            logger.info("match_well_brightness: No discrete well found; using full-frame bright-pixel fallback mask for brightness normalization.")
+        else:
+            logger.warning("match_well_brightness: Could not create well masks for FG or BG. Returning original images.")
+            return fg_img_uint8, bg_img_uint8
 
     fg_peak = calculate_well_brightness_peak(
         fg_img_uint8, fg_mask,

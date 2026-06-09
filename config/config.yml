@@ -10,7 +10,7 @@ project_base_dir: "C:/sandbox"
 sample_subdir_name: "C:/wellscanner/test/"
 
 # Selects which entry under `hardware_profiles:` is deep-merged into `acquisition:` at load time.
-active_hardware_profile: "TS1_0638_70_EL"
+active_hardware_profile: "S5VPJ6415"
 
 # -----------------------------------------------------------------------------
 # Flat-field calibration file layout
@@ -126,11 +126,11 @@ hardware_profiles:
         origin_y: 17.963
   S5VPJ6415:
     focusing:
-      scan_height_mm: 12.5
-      scan_ratio: 3.56
-      lens_controller_port: "COM6"
+      scan_height_mm: 11
+      scan_ratio: 4.89 # Optical leverage (mm/dpt) Dry:3.56 mm/dpt; Wet: 4.89 mm/dpt
+      lens_controller_port: "COM10"
     camera:
-      exposure_us: 2700
+      exposure_us: 750
     roi:
       width: 4512
       height: 4512
@@ -166,7 +166,7 @@ realtime_mode:
     flat_field_dir: null
     retrieve_timeout_margin_ms: 150
     etl_control_enabled: true
-    start_dpt: -2.0
+    start_dpt: -1.074
     adaptive_enabled: false
     adaptive_window_fraction: 0.1
     adaptive_min_window_points: 3
@@ -209,6 +209,10 @@ stage_01_initial_detection:
       max_expected_diameter_px: 4000
       min_fill_ratio_to_enclosing_circle: 0.8
       center_offset_fraction_threshold: 0.1
+      # When no discrete circular well is found (e.g. no multi-well plate; the
+      # sample fills or exceeds the frame), fall back to a full-frame bright-pixel
+      # mask so brightness normalization still runs instead of returning raw images.
+      fallback_full_frame_on_failure: true
     brightness_peak_calculation:
       min_well_pixels: 100
       min_intensity_for_peak_search: 75
@@ -265,7 +269,7 @@ stage_02_characterization:
     min_sharpness_fraction: 0.3
     min_prominence_fraction: 0.05
     smooth_window: 3
-    sharpness_min_threshold: 100
+    sharpness_min_threshold: 70
     max_tracks_to_plot: 15
     save_plots: true
     crop_filename_prefix: null
