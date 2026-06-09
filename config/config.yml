@@ -154,8 +154,8 @@ realtime_mode:
     target_fps: 5
     # Per-frame processing budget is derived internally as 1000/target_fps; when
     # frames exceed it the monitor emits a rate-limited "falling behind" warning.
-    drop_frame_if_backlogged: false
-    queue_size: 2
+    drop_frame_if_backlogged: true
+    queue_size: 3
   background:
     bgi_min_age_s: 2.0
     bgi_max_age_s: 4.0
