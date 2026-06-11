@@ -61,7 +61,7 @@ acquisition:
     experiment_summary_log_filename: "experiment_summary_log.csv"
   focusing:
     pattern: "zigzag"
-    scan_step_um: 350
+    scan_step_um: 150
     lens_settle_time_sec: 0.025
     large_jump_threshold_dpt: -3.0
     large_jump_settle_sec: 0.040
@@ -168,9 +168,9 @@ realtime_mode:
     retrieve_timeout_margin_ms: 150
     etl_control_enabled: true
     start_dpt: -1.074
-    adaptive_enabled: false
+    adaptive_enabled: true
     adaptive_window_fraction: 0.1
-    adaptive_min_window_points: 3
+    adaptive_min_window_points: 5
     adaptive_dispersion_coeff: 1
   stage1:
     foreground_diff_threshold: 10
@@ -179,7 +179,7 @@ realtime_mode:
   stage2:
     # Kept distinct from stage_01.unsubtracted_particle_analysis.min_particle_area (1000).
     # This governs realtime stage2 filtering and has historically been 500.
-    min_particle_area: 500
+    min_particle_area: 5000
     max_candidates_per_frame: 200
   persistence:
     save_accepted_crops: true
@@ -252,7 +252,7 @@ stage_01_initial_detection:
 stage_02_characterization:
   cropping:
     save_all_particle_crops: true
-    mode: "rotational_rectangle" # "bounding_box" or "rotational_rectangle"
+    mode: "bounding_box" # "bounding_box" or "rotational_rectangle"
     adaptive_padding_factor: 0.2
   quality_features:
     black_mask_check:
@@ -270,7 +270,7 @@ stage_02_characterization:
     min_sharpness_fraction: 0.3
     min_prominence_fraction: 0.05
     smooth_window: 3
-    sharpness_min_threshold: 70
+    sharpness_min_threshold: 110
     max_tracks_to_plot: 15
     save_plots: true
     crop_filename_prefix: null
