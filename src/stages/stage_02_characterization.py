@@ -577,19 +577,20 @@ def plot_track_with_collage(
 
     peak_idx = detect_peaks_in_track(track_df, sharp_col, focus_cfg)
 
-    fig = plt.figure(figsize=(10, 10))
+    fig = plt.figure(figsize=(16, 14))
     grid_spec = fig.add_gridspec(2, 1, height_ratios=[2, 1])
     ax_sharpness = fig.add_subplot(grid_spec[0])
 
-    ax_sharpness.plot(track_df[frame_col], track_df[sharp_col], color='tab:blue', linewidth=1.2)
-    ax_sharpness.set_xlabel('Frame')
-    ax_sharpness.set_ylabel('Sharpness', color='tab:blue')
+    ax_sharpness.plot(track_df[frame_col], track_df[sharp_col], color='tab:blue', linewidth=3.0)
+    ax_sharpness.set_xlabel('Frame', fontsize=20, fontweight='bold')
+    ax_sharpness.set_ylabel('Sharpness', color='tab:blue', fontsize=20, fontweight='bold')
+    ax_sharpness.tick_params(axis='both', labelsize=16, width=1.5, length=6)
     ax_sharpness.tick_params(axis='y', labelcolor='tab:blue')
 
     ax_z = ax_sharpness.twinx()
-    ax_z.plot(track_df[frame_col], track_df[z_col], color='tab:orange', linewidth=1.0)
-    ax_z.set_ylabel('z_mm', color='tab:orange')
-    ax_z.tick_params(axis='y', labelcolor='tab:orange')
+    ax_z.plot(track_df[frame_col], track_df[z_col], color='tab:orange', linewidth=3.0)
+    ax_z.set_ylabel('z_mm', color='tab:orange', fontsize=20, fontweight='bold')
+    ax_z.tick_params(axis='y', labelsize=16, labelcolor='tab:orange', width=1.5, length=6)
 
     maxima_frames: List[Tuple[int, int, Optional[int], Optional[int]]] = []
     x_pix_col = FOCUS_X_PIXEL_COLUMN
@@ -597,7 +598,11 @@ def plot_track_with_collage(
 
     for idx, peak_position in enumerate(peak_idx):
         peak_row = track_df.iloc[peak_position]
-        ax_z.scatter(peak_row[frame_col], peak_row[z_col], color='red', marker='o', s=40, zorder=5)
+        ax_z.scatter(
+            peak_row[frame_col], peak_row[z_col],
+            color='red', marker='o', s=140, zorder=5,
+            edgecolors='black', linewidths=1.5
+        )
         offset_x = 2
         offset_y = 0.02 * (track_df[z_col].max() - track_df[z_col].min() + 1e-9)
         ax_z.text(
@@ -605,14 +610,19 @@ def plot_track_with_collage(
             peak_row[z_col] + offset_y,
             str(idx + 1),
             color='black',
-            fontsize=8
+            fontsize=16,
+            fontweight='bold'
         )
 
         x_pix_val = peak_row.get(x_pix_col, np.nan)
         y_pix_val = peak_row.get(y_pix_col, np.nan)
         maxima_frames.append((idx + 1, int(peak_row[frame_col]), x_pix_val, y_pix_val))
 
-    ax_sharpness.set_title(f'Track {track_id} (length={len(track_df)})')
+    ax_sharpness.set_title(
+        f'Track {track_id} (length={len(track_df)})',
+        fontsize=24,
+        fontweight='bold'
+    )
 
     ax_collage = fig.add_subplot(grid_spec[1])
     ax_collage.axis('off')
@@ -651,17 +661,21 @@ def plot_track_with_collage(
                 10,
                 str(label),
                 color='yellow',
-                fontsize=10,
+                fontsize=18,
+                fontweight='bold',
                 ha='left',
                 va='top',
-                bbox=dict(facecolor='black', alpha=0.5, boxstyle='round')
+                bbox=dict(facecolor='black', alpha=0.6, boxstyle='round')
             )
     else:
-        ax_collage.text(0.5, 0.5, 'No crop images available', ha='center', va='center')
+        ax_collage.text(
+            0.5, 0.5, 'No crop images available',
+            ha='center', va='center', fontsize=20, fontweight='bold'
+        )
 
     plt.tight_layout()
     try:
-        plt.savefig(outpath, dpi=150)
+        plt.savefig(outpath, dpi=200, bbox_inches='tight')
         if FOCUS_SHOW_PLOTS:
             plt.show()
     finally:
