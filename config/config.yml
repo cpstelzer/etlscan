@@ -10,7 +10,7 @@ project_base_dir: "C:/sandbox"
 sample_subdir_name: "C:/wellscanner/test/"
 
 # Selects which entry under `hardware_profiles:` is deep-merged into `acquisition:` at load time.
-active_hardware_profile: "S5VPJ6415"
+active_hardware_profile: "TS1_0638_70_EL"
 
 # -----------------------------------------------------------------------------
 # Flat-field calibration file layout
@@ -111,7 +111,7 @@ hardware_profiles:
   TS1_0638_70_EL:
     focusing:
       scan_height_mm: 11.2
-      scan_ratio: 2.25
+      scan_ratio: 3.36 # Optical leverage (mm/dpt) Dry:3.52 mm/dpt; Wet: 3.36 mm/dpt
       lens_controller_port: "COM5"
     camera:
       exposure_us: 750
@@ -168,7 +168,7 @@ realtime_mode:
     retrieve_timeout_margin_ms: 150
     etl_control_enabled: true
     start_dpt: -1.074
-    adaptive_enabled: true
+    adaptive_enabled: false
     adaptive_window_fraction: 0.1
     adaptive_min_window_points: 5
     adaptive_dispersion_coeff: 1
@@ -179,7 +179,7 @@ realtime_mode:
   stage2:
     # Kept distinct from stage_01.unsubtracted_particle_analysis.min_particle_area (1000).
     # This governs realtime stage2 filtering and has historically been 500.
-    min_particle_area: 5000
+    min_particle_area: 1000
     max_candidates_per_frame: 200
   persistence:
     save_accepted_crops: true
