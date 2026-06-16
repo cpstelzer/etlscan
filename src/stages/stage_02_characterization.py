@@ -744,7 +744,7 @@ def plot_3d_reconstructed(
         return None
 
     from mpl_toolkits.mplot3d import Axes3D  # noqa: F401
-    fig = plt.figure(figsize=(10, 8))
+    fig = plt.figure(figsize=(12, 10))
     ax = fig.add_subplot(111, projection='3d')
 
     cmap = plt.get_cmap('tab20')
@@ -763,16 +763,16 @@ def plot_3d_reconstructed(
         z_line = np.full_like(x_vals, z_real, dtype=float)
 
         color = cmap(idx % ncol)
-        ax.plot(x_vals, y_vals, z_line, linewidth=0.8, alpha=0.7, color=color)
+        ax.plot(x_vals, y_vals, z_line, linewidth=2.0, alpha=0.8, color=color)
         ax.scatter(
             selected_df[x_mm_col].values,
             selected_df[y_mm_col].values,
             selected_df[z_col].values,
             marker='o',
-            s=18,
+            s=45,
             color=color,
             edgecolor='k',
-            linewidth=0.3
+            linewidth=0.6
         )
         plotted += 1
 
@@ -780,10 +780,11 @@ def plot_3d_reconstructed(
         plt.close(fig)
         return None
 
-    ax.set_xlabel(x_mm_col)
-    ax.set_ylabel(y_mm_col)
-    ax.set_zlabel(z_col)
-    ax.set_title(f'Reconstructed trajectories of {plotted} tracks')
+    ax.set_xlabel('x [mm]', fontsize=20, labelpad=18)
+    ax.set_ylabel('y [mm]', fontsize=20, labelpad=18)
+    ax.set_zlabel('z [mm]', fontsize=20, labelpad=18)
+    ax.tick_params(axis='both', which='major', labelsize=14)
+    ax.set_title(f'Reconstructed trajectories of {plotted} tracks', fontsize=22)
     plt.tight_layout()
     try:
         plt.savefig(outpath, dpi=200)
