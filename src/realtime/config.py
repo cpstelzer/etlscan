@@ -149,7 +149,8 @@ def load_realtime_config(config_path: str = "config/config.yml") -> RealtimeConf
         input_dir=acquisition_rt["input_dir"],
         max_frames=acquisition_rt["max_frames"],
         flat_field_dir=acquisition_rt["flat_field_dir"],
-        retrieve_timeout_margin_ms=int(acquisition_rt["retrieve_timeout_margin_ms"]),
+        # Single source of truth: the shared acquisition camera setting.
+        retrieve_timeout_margin_ms=int(camera_cfg["retrieve_timeout_margin_ms"]),
         adaptive_enabled=bool(acquisition_rt["adaptive_enabled"]),
         adaptive_window_fraction=(
             float(acquisition_rt["adaptive_window_fraction"])

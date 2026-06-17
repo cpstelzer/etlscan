@@ -23,32 +23,27 @@ def normalize_plate_type(plate_type) -> str:
     return mapping[plate_type]
 
 
-def get_plate_settings(acq_conf, default_plate_24, default_plate_96) -> tuple:
-    """Resolve the active plate type and its merged coordinate settings.
+def get_plate_settings(acq_conf) -> tuple:
+    """Resolve the active plate type and its coordinate settings.
 
-    Reads the ``plate`` sub-tree from *acq_conf*, determines whether a 24-well
-    or 96-well plate is in use, and deep-merges the caller-supplied defaults
-    with any per-run overrides found in the config.
+    Reads the ``plate`` sub-tree from *acq_conf*: the run-level ``type`` selection
+    and the (hardware-profile-merged) ``definitions`` for that plate.
 
     Args:
         acq_conf: The acquisition config dict (may be ``None`` or empty).
-        default_plate_24: Fallback coordinate settings for a 24-well plate.
-        default_plate_96: Fallback coordinate settings for a 96-well plate.
 
     Returns:
         ``(plate_type, settings)`` where *plate_type* is ``"24"`` or ``"96"``
-        and *settings* is a dict containing at minimum the keys ``start_x``,
-        ``start_y``, ``spacing``, ``origin_x``, ``origin_y``.
+        and *settings* is a dict containing the keys ``start_x``, ``start_y``,
+        ``spacing``, ``origin_x``, ``origin_y``.
 
     Raises:
-        ValueError: If required keys are absent after merging.
+        ValueError: If required keys are absent for the selected plate.
     """
     plate_cfg = acq_conf.get("plate", {}) if acq_conf else {}
     plate_type = normalize_plate_type(plate_cfg.get("type", "24"))
     definitions = plate_cfg.get("definitions", {})
-    defaults = default_plate_24 if plate_type == "24" else default_plate_96
-    plate_def = definitions.get(plate_type, {})
-    merged = {**defaults, **plate_def}
+    merged = dict(definitions.get(plate_type, {}))
     required = ["start_x", "start_y", "spacing", "origin_x", "origin_y"]
     missing = [key for key in required if merged.get(key) is None]
     if missing:

@@ -132,6 +132,32 @@ properly named pytest functions (`test_*`).
 
 ---
 
+## 8a. Config-file organization (`config/config.yml`)
+
+A new setting must go in the section that matches *what kind* of setting it is:
+
+| Kind | Goes in | Example |
+|------|---------|---------|
+| Filesystem root | `paths` | `pipeline_base`, `raw_data_root` |
+| Hardware-specific to the ETL-lens rig (camera / lens / per-rig plate origin) | `hardware_profiles.<name>` | `camera.exposure_us`, `roi`, `focusing.scan_ratio`, `plate.definitions.<n>.origin_x` |
+| Hardware-specific to the Zaber XY stage | `stage_hardware_profile` (dedicated, injected into `acquisition.stage_controller`) | `serial_port`, `microstep_size_um` |
+| Rig-agnostic acquisition runtime | `acquisition` | `focusing.pattern`, `watermark`, `camera.fps` |
+| Shared imaging geometry | `imaging` | `image_width_px` |
+| Shared segmentation / thresholding | `segmentation` | `thresholding.otsu_threshold_multiplier` |
+| Stage-only tuning | `stage_0N_*` | detection/crop/filter knobs |
+| Realtime-only tuning | `realtime_mode` | `background.bgi_min_age_s` |
+
+Rules:
+- **Do not duplicate a value across sections.** If two modules need it, keep one
+  home and reference/inject it (e.g. `paths.raw_data_root` is injected into
+  `acquisition.paths.output_folder_base`; `retrieve_timeout_margin_ms` lives only
+  in `acquisition.camera`).
+- **Do not hardcode hardware constants in entry scripts** (`scripts/run_acquire*.py`).
+  They belong in `hardware_profiles` and are read from the merged config.
+- New load-time transforms belong in `load_config_once`, kept small and named.
+
+---
+
 ## 9. Type annotations
 
 All public functions (those not prefixed with `_`) **must** have complete

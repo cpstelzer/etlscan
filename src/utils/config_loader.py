@@ -37,6 +37,58 @@ def _deep_merge(base: Dict[str, Any], overlay: Dict[str, Any]) -> Dict[str, Any]
     return merged
 
 
+def _link_acquisition_output_root(config: Dict[str, Any]) -> None:
+    """Inject paths.raw_data_root as acquisition.paths.output_folder_base.
+
+    Keeps raw_data_root the single source of truth for where acquisition writes
+    captured frames, while the acquisition module still reads it from its own
+    subtree (which is all it receives).
+    """
+    raw_data_root = config.get("paths", {}).get("raw_data_root")
+    if raw_data_root is None:
+        return
+    acquisition = config.setdefault("acquisition", {})
+    acq_paths = acquisition.setdefault("paths", {})
+    acq_paths["output_folder_base"] = raw_data_root
+
+
+def _assemble_system_view(config: Dict[str, Any]) -> None:
+    """Assemble the internal `system` view from the `imaging` + `segmentation` sections.
+
+    The config file keeps imaging geometry and segmentation/thresholding in two
+    clearly separated sections, but a lot of pipeline code consumes a single
+    combined `config['system']` dict (image dims + source_image_illumination_type
+    + thresholding + segmentation tuning).  This reconstructs that view so the
+    split is purely a config-file concern with no behavior change.
+    """
+    imaging = config.get("imaging")
+    segmentation = config.get("segmentation")
+    if imaging is None or segmentation is None:
+        return
+    seg = dict(segmentation)
+    thresholding = seg.pop("thresholding", {})
+    config["system"] = {
+        **imaging,
+        "thresholding": thresholding,
+        "segmentation": seg,
+    }
+
+
+def _link_stage_controller(config: Dict[str, Any]) -> None:
+    """Inject the dedicated stage_hardware_profile into acquisition.stage_controller.
+
+    The Zaber XY stage is independent of the ETL-lens hardware_profiles, so its
+    settings live in a single top-level `stage_hardware_profile` block. Injecting
+    it here keeps `acquisition.stage_controller` as the single read location for
+    all consumers (workflows, zaber_move_binary) without duplicating values.
+    """
+    stage_profile = config.get("stage_hardware_profile")
+    if stage_profile is None:
+        return
+    acquisition = config.setdefault("acquisition", {})
+    acquisition["stage_controller"] = copy.deepcopy(stage_profile)
+
+
 def _apply_hardware_profile(config: Dict[str, Any]) -> None:
     """Deep-merge the active hardware profile into config['acquisition'] in place."""
     profile_name = config.get("active_hardware_profile")
@@ -65,7 +117,10 @@ def load_config_once(config_path: str = "config/config.yml") -> Dict[str, Any]:
         raise
 
     _replace_null_with_none(loaded_config)
+    _assemble_system_view(loaded_config)
     _apply_hardware_profile(loaded_config)
+    _link_stage_controller(loaded_config)
+    _link_acquisition_output_root(loaded_config)
     return loaded_config
 
 
@@ -85,7 +140,11 @@ def _replace_null_with_none(d: Dict[str, Any]):
 
 
 def get_unified_segmentation_params(config: Dict[str, Any]) -> Dict[str, Any]:
-    """Assemble a segmentation parameter dictionary from system + stage_04 egg keys.
+    """Assemble the shared segmentation parameter dictionary from the system view.
+
+    Returns thresholding + segmentation tuning + source illumination only.  Stage-4
+    egg-detection parameters are intentionally NOT merged here: only stage 4 needs
+    them, and it merges ``stage_04_biological_analysis.egg_detection`` itself.
 
     All required keys must be present under config['system']; missing keys raise KeyError.
     """
@@ -98,10 +157,5 @@ def get_unified_segmentation_params(config: Dict[str, Any]) -> Dict[str, Any]:
     unified_params["thresholding_mode"] = global_thresh_cfg["thresholding_mode"]
     unified_params["otsu_threshold_multiplier"] = global_thresh_cfg["otsu_threshold_multiplier"]
     unified_params["fixed_threshold_value"] = global_thresh_cfg["fixed_threshold_value"]
-
-    # Merge egg detection parameters so the extractor receives them in a single dict.
-    egg_detection_params = config["stage_04_biological_analysis"]["egg_detection"]
-    for key, value in egg_detection_params.items():
-        unified_params[key] = value
 
     return unified_params

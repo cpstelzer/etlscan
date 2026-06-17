@@ -99,6 +99,25 @@ python scripts/run_pipeline.py \
 
 ---
 
+## Config organization (`config/config.yml`)
+
+The single config is loaded by `load_config_once` (`src/utils/config_loader.py`),
+which applies these transforms at load time:
+
+| Section | Notes |
+|---------|-------|
+| `paths.pipeline_base` | Offline-pipeline root (output, models, training data). Legacy `project_base_dir` still accepted as a fallback in `get_project_base_dir`. |
+| `paths.raw_data_root` | Acquisition output root; **injected** into `acquisition.paths.output_folder_base` (single source of truth). Point `run_pipeline --input_batch_dir` here. |
+| `imaging` + `segmentation` | Split for clarity; the loader **assembles** them into the internal `config['system']` view that pipeline code consumes. Don't read `imaging`/`segmentation` directly in stage code — read `system`. |
+| `acquisition` | Rig-agnostic runtime. Hardware-specific values come from `hardware_profiles`. |
+| `hardware_profiles.<name>` | Deep-merged into `acquisition` per `active_hardware_profile`. Holds camera exposure, ROI, ETL focus, and per-rig plate origin overrides (ETL-lens rig). |
+| `stage_hardware_profile` | Dedicated Zaber XY-stage profile, independent of the ETL-lens profiles. **Injected** into `acquisition.stage_controller` (single source — not duplicated per lens profile). |
+| `acquisition.plate.type` | Run-level plate selection (`24`/`96`), **decoupled** from the hardware profile. `acquisition.plate.definitions` holds geometry; profiles override only `origin_x`/`origin_y`. Read via `get_plate_settings(acq_conf)`. |
+| Particle-area thresholds | The five `min_*_area` knobs are intentionally distinct (see the note atop `config.yml`) — do not consolidate. |
+| Egg detection | `stage_04_biological_analysis.egg_detection` is only consumed by stage 4; it is **not** merged into `get_unified_segmentation_params`. |
+
+---
+
 ## Development setup
 
 ```bash

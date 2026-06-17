@@ -21,7 +21,7 @@ CSV_FILENAME = "wellscanner_coords.csv"
 def main():
     sc_cfg = load_config_once().get('acquisition', {}).get('stage_controller', {})
     controller = StageController(
-        serial_port=sc_cfg.get('serial_port', 'COM7'),
+        serial_port=sc_cfg.get('serial_port', 'COM4'),
         device_x_number=sc_cfg.get('device_x_number', 1),
         device_y_number=sc_cfg.get('device_y_number', 2),
         device_x_microstep_size=sc_cfg.get('microstep_size_um', 0.15625),

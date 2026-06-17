@@ -2,12 +2,29 @@
 # Single source of truth for the well_plate_analyzer pipeline.
 # Consolidates the former config/pipeline_config.yml, src/acquire/ws_config.yaml,
 # and src/acquire/ws_config_S5VPJ6415.yaml.
+#
+# NOTE ON PARTICLE-AREA THRESHOLDS (px^2): the pipeline has several deliberately
+# DISTINCT minimum-area knobs. They govern different stages/inputs and are NOT
+# duplicates -- do not consolidate them:
+#   - segmentation.min_significant_area (300)                                    : smallest region kept during segmentation
+#   - stage_01_initial_detection.particle_analysis.min_microorganism_area (500) : background-subtracted detection
+#   - stage_01_initial_detection.unsubtracted_particle_analysis.min_particle_area (1000) : unsubtracted-frame detection
+#   - stage_01_initial_detection.particle_comparison.default_particle_area (2000): fallback area used in track matching
+#   - realtime_mode.stage2.min_particle_area (5000)                             : realtime stage-2 candidate filtering
 
 # -----------------------------------------------------------------------------
 # Global
 # -----------------------------------------------------------------------------
-project_base_dir: "C:/sandbox"
-sample_subdir_name: "C:/wellscanner/test/"
+# All filesystem roots live here. Raw input and analysis results are deliberately
+# kept on separate roots; the acquire -> pipeline data flow is made explicit by
+# raw_data_root (acquire writes it; point run_pipeline --input_batch_dir at it).
+paths:
+  # Offline analysis pipeline root: writes data/output/<batch>/<sample>, and hosts
+  # models/ and data/training_data/. (Pipeline input comes from --input_batch_dir.)
+  pipeline_base: "C:/sandbox"
+  # Raw captured-frame root. Acquisition writes here; this is injected into
+  # acquisition.paths.output_folder_base so it stays the single source of truth.
+  raw_data_root: "C:/wellscanner/test/"
 
 # Selects which entry under `hardware_profiles:` is deep-merged into `acquisition:` at load time.
 active_hardware_profile: "S5VPJ6415"
@@ -32,23 +49,28 @@ logging:
   log_file: "pipeline_run.log"
 
 # -----------------------------------------------------------------------------
-# Imaging system
+# Imaging geometry (frame dimensions + illumination source)
 # -----------------------------------------------------------------------------
-system:
+imaging:
   image_width_px: 4504
   image_height_px: 4504
   source_image_illumination_type: "collimated"
+
+# -----------------------------------------------------------------------------
+# Segmentation / thresholding (shared by stage 1/2/4 and realtime)
+# The loader assembles imaging + segmentation into the internal `system` view.
+# -----------------------------------------------------------------------------
+segmentation:
   thresholding:
     thresholding_mode: "otsu"
     otsu_threshold_multiplier: 0.7
     fixed_threshold_value: 70
-  segmentation:
-    enable_unsharp_masking: false
-    unsharp_mask_sigma: 1.0
-    unsharp_mask_amount: 1.0
-    min_noise_size: 50
-    closing_selem_size: 3
-    min_significant_area: 300
+  enable_unsharp_masking: false
+  unsharp_mask_sigma: 1.0
+  unsharp_mask_amount: 1.0
+  min_noise_size: 50
+  closing_selem_size: 3
+  min_significant_area: 300
 
 # -----------------------------------------------------------------------------
 # Acquisition runtime (rig-agnostic defaults)
@@ -56,7 +78,7 @@ system:
 # -----------------------------------------------------------------------------
 acquisition:
   paths:
-    output_folder_base: "C:/wellscanner/test/"
+    # output_folder_base is injected from paths.raw_data_root at load time.
     log_filename: "metadata_log.csv"
     experiment_summary_log_filename: "experiment_summary_log.csv"
   focusing:
@@ -78,12 +100,8 @@ acquisition:
   # roi.width/height: set by hardware_profiles
   output:
     image_format: "bmp"
-  stage_controller:
-    serial_port: "COM7"
-    device_x_number: 1
-    device_y_number: 2
-    microstep_size_um: 0.15625
-    position_tolerance_microsteps: 10
+  # stage_controller (Zaber XY stage) is injected from the dedicated
+  # stage_hardware_profile block (see below).
   watermark:
     font: "FONT_HERSHEY_SIMPLEX"
     font_scale: 2.0
@@ -91,18 +109,21 @@ acquisition:
     thickness: 2
     offset_horizontal: 600
     offset_vertical: 200
-  plate_definitions:
-    "24":
-      start_x: 15.74
-      start_y: 18.88
-      spacing: 18.0
-      # origin_x, origin_y: set by hardware_profiles
-    "96":
-      start_x: 20.3
-      start_y: 14.5
-      spacing: 9.0
-      origin_x: 17.096
-      origin_y: 14.981
+  plate:
+    # Run-level plate selection, decoupled from the hardware (ETL) profile so any
+    # lens can run any plate. Use "24" or "96".
+    type: 96
+    # Plate geometry (mm). origin_x/origin_y are rig-specific and supplied per
+    # hardware_profile; start_x/start_y/spacing are shared here.
+    definitions:
+      "24":
+        start_x: 15.74
+        start_y: 18.88
+        spacing: 18.0
+      "96":
+        start_x: 20.3
+        start_y: 14.5
+        spacing: 9.0
 
 # -----------------------------------------------------------------------------
 # Hardware profiles (deep-merged into `acquisition:` at load time)
@@ -119,11 +140,10 @@ hardware_profiles:
       width: 3600
       height: 3600
     plate:
-      type: 24
-    plate_definitions:
-      "24":
-        origin_x: 6.387
-        origin_y: 17.963
+      definitions:
+        "24":
+          origin_x: 6.387
+          origin_y: 17.963
   S5VPJ6415:
     focusing:
       scan_height_mm: 11
@@ -135,11 +155,27 @@ hardware_profiles:
       width: 4512
       height: 4512
     plate:
-      type: 96
-    plate_definitions:
-      "24":
-        origin_x: 17.096
-        origin_y: 14.981
+      definitions:
+        "24":
+          origin_x: 17.096
+          origin_y: 14.981
+        "96":
+          origin_x: 17.096
+          origin_y: 14.981
+
+# -----------------------------------------------------------------------------
+# Zaber XY stage hardware profile
+# Dedicated to the motorized stage, which is independent of the ETL-lens
+# hardware_profiles above (the same stage is used regardless of which lens is
+# mounted). Injected into acquisition.stage_controller at load time, so it is the
+# single source of truth and is never duplicated per lens profile.
+# -----------------------------------------------------------------------------
+stage_hardware_profile:
+  serial_port: "COM4"
+  device_x_number: 1
+  device_y_number: 2
+  microstep_size_um: 0.15625
+  position_tolerance_microsteps: 10
 
 # -----------------------------------------------------------------------------
 # Realtime mode
@@ -149,6 +185,7 @@ hardware_profiles:
 realtime_mode:
   enabled: true
   default_grayscale: true
+  # Realtime keeps its own output root, separate from batch results and raw captures.
   output_root_dir: "data/output/realtime"
   runtime:
     target_fps: 5
@@ -165,12 +202,12 @@ realtime_mode:
     input_dir: null
     max_frames: null
     flat_field_dir: null
-    retrieve_timeout_margin_ms: 150
+    # retrieve_timeout_margin_ms is shared from acquisition.camera (single source).
     etl_control_enabled: true
     start_dpt: -1.074
     adaptive_enabled: true
     adaptive_window_fraction: 0.1
-    adaptive_min_window_points: 5
+    adaptive_min_window_points: 3
     adaptive_dispersion_coeff: 1
   stage1:
     foreground_diff_threshold: 10

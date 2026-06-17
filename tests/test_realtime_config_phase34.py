@@ -24,7 +24,7 @@ def _load_rt_config_module():
 def _base_unified_config(**overrides):
     cfg = {
         "acquisition": {
-            "camera": {"exposure_us": 1234},
+            "camera": {"exposure_us": 1234, "retrieve_timeout_margin_ms": 150},
             "roi": {"width": 3333, "height": 2222},
             "focusing": {
                 "pattern": "zigzag",
@@ -108,7 +108,6 @@ def _base_unified_config(**overrides):
                 "input_dir": None,
                 "max_frames": None,
                 "flat_field_dir": None,
-                "retrieve_timeout_margin_ms": 150,
                 "adaptive_enabled": False,
                 "adaptive_window_fraction": None,
                 "adaptive_min_window_points": None,

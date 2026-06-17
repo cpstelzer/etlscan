@@ -60,8 +60,8 @@ DEFAULT_CONFIG_PATH = "config/config.yml"
 def load_config(config_path=DEFAULT_CONFIG_PATH):
     """Load the unified config and return the acquisition subtree (hardware profile merged).
 
-    Restructures `plate_definitions` into `plate.definitions` so `get_plate_settings`
-    keeps working on the returned dict, and resolves the cv2/pylon string constants.
+    Resolves the cv2/pylon string constants into runtime objects. Plate geometry
+    is already shaped as `acquisition.plate.definitions`, so no reshaping is needed.
     """
     from src.utils.config_loader import load_config_once
 
@@ -80,17 +80,12 @@ def load_config(config_path=DEFAULT_CONFIG_PATH):
 
     acq = unified_config["acquisition"]
 
-    plate_cfg = acq.get("plate", {})
-    plate_definitions = acq.get("plate_definitions", {})
-    plate_cfg = {**plate_cfg, "definitions": plate_definitions}
-    acq["plate"] = plate_cfg
+    # Plate geometry is already shaped as acquisition.plate.definitions in the
+    # config, so get_plate_settings reads it directly -- no reshaping needed.
 
     watermark_cfg = acq.get("watermark")
     if watermark_cfg and "font" in watermark_cfg:
         watermark_cfg["font"] = getattr(cv2, watermark_cfg["font"], cv2.FONT_HERSHEY_SIMPLEX)
-    if watermark_cfg and "color_grayscale" in watermark_cfg and "color_bgr" not in watermark_cfg:
-        c = watermark_cfg["color_grayscale"]
-        watermark_cfg["color_bgr"] = [c, c, c]
 
     camera_cfg = acq.get("camera")
     if camera_cfg and "grab_strategy" in camera_cfg:

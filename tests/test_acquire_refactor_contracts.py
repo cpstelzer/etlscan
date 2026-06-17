@@ -16,11 +16,19 @@ def test_normalize_plate_type_aliases():
     assert normalize_plate_type(96) == "96"
 
 
-def test_get_plate_settings_defaults():
-    plate_type, settings = get_plate_settings({}, {"start_x": 1, "start_y": 2, "spacing": 3, "origin_x": 4, "origin_y": 5},
-                                             {"start_x": 6, "start_y": 7, "spacing": 8, "origin_x": 9, "origin_y": 10})
+def test_get_plate_settings_reads_definitions():
+    acq = {
+        "plate": {
+            "type": "24",
+            "definitions": {
+                "24": {"start_x": 1, "start_y": 2, "spacing": 3, "origin_x": 4, "origin_y": 5},
+            },
+        }
+    }
+    plate_type, settings = get_plate_settings(acq)
     assert plate_type == "24"
     assert settings["start_x"] == 1
+    assert settings["origin_y"] == 5
 
 
 def test_plate_coordinate_snapshots():

@@ -12,7 +12,10 @@
       "Bash(git stash *)",
       "Bash(/c/Users/cpstelzer/anaconda3/Scripts/pytest.exe tests/test_project_base_dir_expansion.py -q)",
       "Bash(python -m pytest tests/test_well_analysis.py -v)",
-      "PowerShell(py -m pytest tests/test_well_analysis.py -v 2>&1)"
+      "PowerShell(py -m pytest tests/test_well_analysis.py -v 2>&1)",
+      "PowerShell(& \"C:\\\\ProgramData\\\\anaconda3\\\\python.exe\" -m pytest tests/ --ignore=tests/test_acquire_refactor_contracts.py -q 2>&1)",
+      "PowerShell($envs = @\\(\"C:\\\\ProgramData\\\\anaconda3\\\\envs\\\\wellcount6_clean\",\"C:\\\\Users\\\\Stelzer Lab\\\\.conda\\\\envs\\\\wellcount6\",\"C:\\\\Users\\\\Stelzer Lab\\\\.conda\\\\envs\\\\wellcount6b\",\"C:\\\\Users\\\\Stelzer Lab\\\\.conda\\\\envs\\\\wellscan24_env_backup\"\\); foreach \\($e in $envs\\) { $py = Join-Path $e \"python.exe\"; if \\(Test-Path $py\\) { $r = & $py -c \"import pytest, skimage, cv2, pandas, numpy, yaml; print\\('OK'\\)\" 2>&1; Write-Output \\('{0} -> {1}' -f $e, \\($r -join ' '\\)\\) } })",
+      "PowerShell($env:PYTHONPATH = \"C:\\\\CodeLab\\\\well_plate_analyzer\"; & \"C:\\\\Users\\\\Stelzer Lab\\\\.conda\\\\envs\\\\wellcount6\\\\python.exe\" -m pytest tests/ --ignore=tests/test_acquire_refactor_contracts.py -q 2>&1 | Select-Object -Last 35)"
     ]
   }
 }

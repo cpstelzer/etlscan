@@ -11,12 +11,12 @@ Raw data, i.e., sample directories containing the image series (e.g., 20260212_p
 
 ## 2) Output placement (important)
 
-`run_pipeline.py` writes outputs relative to `project_base_dir` from your config:
+`run_pipeline.py` writes outputs relative to `paths.pipeline_base` from your config (the legacy top-level `project_base_dir` key is still accepted as a fallback):
 
-- per-sample outputs: `<project_base_dir>/data/output/<batch>/<sample>/...`
-- batch rollups: `<project_base_dir>/<batch>.csv`, `<batch>_stage3_filtered_good.csv`, etc.
+- per-sample outputs: `<paths.pipeline_base>/data/output/<batch>/<sample>/...`
+- batch rollups: `<paths.pipeline_base>/<batch>.csv`, `<batch>_stage3_filtered_good.csv`, etc.
 
-For cluster runs, set `project_base_dir` in `config/config.yml` to a writable shared filesystem path (e.g., under `$SCRATCH`) so:
+For cluster runs, set `paths.pipeline_base` in `config/config.yml` to a writable shared filesystem path (e.g., under `$SCRATCH`) so:
 
 - compute nodes can write stage outputs,
 - login nodes can read results later,
@@ -24,7 +24,7 @@ For cluster runs, set `project_base_dir` in `config/config.yml` to a writable sh
 
 ## 3) Stage 3 model artifacts from a separate path
 
-Stage 3 loads model artifacts from `<project_base_dir>/models/`.
+Stage 3 loads model artifacts from `<paths.pipeline_base>/models/`.
 
 RandomForest defaults:
 - `rf_fem_classifier.joblib`
@@ -36,26 +36,26 @@ EfficientNet default:
 
 If your canonical model/training assets live elsewhere, you currently have two safe options:
 
-1. **Symlink** `<project_base_dir>/models` to your shared model store.
-2. **Copy** required model files into `<project_base_dir>/models` before launching jobs.
+1. **Symlink** `<paths.pipeline_base>/models` to your shared model store.
+2. **Copy** required model files into `<paths.pipeline_base>/models` before launching jobs.
 
 Also ensure training and inference used compatible feature schemas. For RF mode, Stage 3 aligns data to the persisted feature-name file; missing features are filled with zero, but large schema drift can still hurt predictions.
 
 ## 4) Concurrency and reruns
 
-When a stage is selected, the runner deletes and recreates that stage's output folder for each sample before writing new files. Avoid launching two jobs that target the same `project_base_dir + batch + sample`, or they can clobber each other.
+When a stage is selected, the runner deletes and recreates that stage's output folder for each sample before writing new files. Avoid launching two jobs that target the same `paths.pipeline_base + batch + sample`, or they can clobber each other.
 
 Recommended pattern:
 - unique batch/date input per job,
-- or unique `project_base_dir` per active run,
+- or unique `paths.pipeline_base` per active run,
 - or strict scheduler-level mutual exclusion for the same dataset.
 
 ## 5) Preflight checklist
 
 Before `sbatch`:
 
-1. `project_base_dir` points to writable shared storage.
+1. `paths.pipeline_base` points to writable shared storage.
 2. `--input_batch_dir` exists and contains sample subfolders in the expected naming format (`YYYYMMDD_plateX_wellY`).
-3. Stage 3 model artifacts exist under `<project_base_dir>/models` (or symlink resolves).
+3. Stage 3 model artifacts exist under `<paths.pipeline_base>/models` (or symlink resolves).
 4. Conda env includes optional dependencies if using EfficientNet (`torch`, `torchvision`, `Pillow`).
 5. Job log paths are configured via `#SBATCH --output/--error`.

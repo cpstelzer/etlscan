@@ -8,9 +8,16 @@ logger = logging.getLogger(__name__)
 
 
 def get_project_base_dir(config: Dict[str, Any]) -> str:
-    """Input: config dict. Output: project root path without creating files."""
-    configured_base_dir = str(config["project_base_dir"])
-    expanded_base_dir = os.path.expanduser(os.path.expandvars(configured_base_dir))
+    """Input: config dict. Output: project root path without creating files.
+
+    Reads ``paths.pipeline_base`` and falls back to the legacy top-level
+    ``project_base_dir`` key for configs that have not been migrated.
+    """
+    paths_cfg = config.get("paths", {})
+    configured_base_dir = paths_cfg.get("pipeline_base", config.get("project_base_dir"))
+    if configured_base_dir is None:
+        raise KeyError("config must define paths.pipeline_base (or legacy project_base_dir)")
+    expanded_base_dir = os.path.expanduser(os.path.expandvars(str(configured_base_dir)))
     return expanded_base_dir
 
 
@@ -24,7 +31,7 @@ def get_sample_dir(config: Dict[str, Any], sample_subdir_name: Optional[str] = N
     input_data_root = os.path.join(base_dir, 'data', 'input')
 
     if sample_subdir_name is None:
-        sample_subdir_name_resolved = config["sample_subdir_name"]
+        sample_subdir_name_resolved = config.get("sample_subdir_name", "")
     else:
         sample_subdir_name_resolved = sample_subdir_name
 
@@ -45,7 +52,7 @@ def get_output_dir_for_sample(
     output_data_root = os.path.join(base_dir, 'data', 'output')
 
     if sample_subdir_name is None:
-        sample_subdir_name_resolved = config["sample_subdir_name"]
+        sample_subdir_name_resolved = config.get("sample_subdir_name", "")
     else:
         sample_subdir_name_resolved = sample_subdir_name
 

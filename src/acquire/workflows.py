@@ -53,10 +53,24 @@ def _get_acquisition_api():
     return load_config, run_acquisition
 
 
-def select_wells(acq_conf, default_plate_24, default_plate_96, csv_filename):
+def _build_stage_controller(acq_conf):
+    """Construct a StageController from the hardware-profile-merged stage settings."""
+    sc_cfg = acq_conf['stage_controller']
+    microstep_um = sc_cfg['microstep_size_um']
+    return StageController(
+        sc_cfg['serial_port'],
+        sc_cfg['device_x_number'],
+        sc_cfg['device_y_number'],
+        microstep_um,
+        microstep_um,
+        sc_cfg['position_tolerance_microsteps'],
+    )
+
+
+def select_wells(acq_conf, csv_filename):
     print("Starting well selection GUI...")
     try:
-        plate_type, plate_settings = get_plate_settings(acq_conf, default_plate_24, default_plate_96)
+        plate_type, plate_settings = get_plate_settings(acq_conf)
     except ValueError as e:
         print(f"ERROR: {e}")
         return False
@@ -262,9 +276,7 @@ def rename_files_after_run(run_folder_path, string_to_remove, config):
         print(f"  Warning: Could not find log file to update at {metadata_log_path}")
 
 
-def run_multiwell_workflow(*, acquisition_config_path, csv_filename, default_plate_24, default_plate_96, serial_port,
-                           device_x_number, device_y_number, device_x_microstep_size, device_y_microstep_size,
-                           position_tolerance):
+def run_multiwell_workflow(*, acquisition_config_path, csv_filename):
     try:
         acq_conf = load_acquisition_config(acquisition_config_path)
     except SystemExit:
@@ -274,7 +286,7 @@ def run_multiwell_workflow(*, acquisition_config_path, csv_filename, default_pla
         return
 
     print("Step 1: Well Selection")
-    if not select_wells(acq_conf, default_plate_24, default_plate_96, csv_filename):
+    if not select_wells(acq_conf, csv_filename):
         return
     if not validate_selection_csv(csv_filename):
         return
@@ -327,14 +339,7 @@ def run_multiwell_workflow(*, acquisition_config_path, csv_filename, default_pla
 
     input("Ensure:\n1) Plate orientation (A1 lower right)\n2) Lid\n3) Light source\n4) Devices connected\n(Enter to start)\n")
 
-    stage_controller = StageController(
-        serial_port,
-        device_x_number,
-        device_y_number,
-        device_x_microstep_size,
-        device_y_microstep_size,
-        position_tolerance,
-    )
+    stage_controller = _build_stage_controller(acq_conf)
     zab_port, zab_device_x, zab_device_y = None, None, None
     initialization_successful = False
 
@@ -417,9 +422,8 @@ def run_multiwell_workflow(*, acquisition_config_path, csv_filename, default_pla
         finalize_stage_cleanup(initialization_successful, zab_port, zab_device_x, zab_device_y, stage_controller)
 
 
-def run_experiment_sweep_workflow(*, acquisition_config_path, csv_filename, default_plate_24, default_plate_96, serial_port,
-                                  device_x_number, device_y_number, device_x_microstep_size, device_y_microstep_size,
-                                  position_tolerance, scan_steps_um_options, focusing_pattern_options):
+def run_experiment_sweep_workflow(*, acquisition_config_path, csv_filename,
+                                  scan_steps_um_options, focusing_pattern_options):
     try:
         acq_conf = load_acquisition_config(acquisition_config_path)
     except SystemExit:
@@ -429,7 +433,7 @@ def run_experiment_sweep_workflow(*, acquisition_config_path, csv_filename, defa
         return
 
     print("Step 1: Well Selection")
-    if not select_wells(acq_conf, default_plate_24, default_plate_96, csv_filename):
+    if not select_wells(acq_conf, csv_filename):
         return
     if not validate_selection_csv(csv_filename):
         return
@@ -489,14 +493,7 @@ def run_experiment_sweep_workflow(*, acquisition_config_path, csv_filename, defa
 
     input("Ensure:\n1) Plate orientation (A1 lower right)\n2) Lid\n3) Light source\n4) Devices connected\n(Enter to start)\n")
 
-    stage_controller = StageController(
-        serial_port,
-        device_x_number,
-        device_y_number,
-        device_x_microstep_size,
-        device_y_microstep_size,
-        position_tolerance,
-    )
+    stage_controller = _build_stage_controller(acq_conf)
     zab_port, zab_device_x, zab_device_y = None, None, None
     initialization_successful = False
 
