@@ -407,6 +407,15 @@ def emit_focus_artifacts(
             max_tracks
         )
 
+        plot_xy_reconstructed(
+            comprehensive_df,
+            filtered_df,
+            focus_cfg.get('track_column', 'track_id'),
+            focus_cfg.get('frame_column', 'frame'),
+            os.path.join(focus_plots_dir, 'reconstructed_trajectories_xy.png'),
+            max_tracks
+        )
+
         plot_diagnostics_summary(
             diagnostics_df,
             os.path.join(focus_plots_dir, 'diagnostics_summary.png')
@@ -785,6 +794,86 @@ def plot_3d_reconstructed(
     ax.set_zlabel('z [mm]', fontsize=20, labelpad=18)
     ax.tick_params(axis='both', which='major', labelsize=14)
     ax.set_title(f'Reconstructed trajectories of {plotted} tracks', fontsize=22)
+    plt.tight_layout()
+    try:
+        plt.savefig(outpath, dpi=200)
+    finally:
+        plt.close(fig)
+
+    return outpath
+
+
+def plot_xy_reconstructed(
+    df: pd.DataFrame,
+    filtered_df: pd.DataFrame,
+    track_col: str,
+    frame_col: str,
+    outpath: str,
+    n_tracks: Optional[int]
+) -> Optional[str]:
+    """Render the flat XY projection of the reconstructed trajectories.
+
+    Companion to :func:`plot_3d_reconstructed`, plotting the exact same tracks
+    and in-focus selections on the true XY plane. The 3D view is subject to
+    perspective distortion (a point's screen position depends on its Z and on
+    auto-scaled axis limits), which can make the XY layout look shifted versus
+    Stage 1; this projection removes that ambiguity so the two stages can be
+    compared point-for-point.
+    """
+    x_mm_col = FOCUS_X_MM_COLUMN
+    y_mm_col = FOCUS_Y_MM_COLUMN
+
+    if x_mm_col not in df.columns or y_mm_col not in df.columns:
+        logger.debug('Skipping XY plot because x_mm/y_mm columns are missing.')
+        return None
+
+    track_lengths = df.groupby(track_col)[frame_col].count().sort_values(ascending=False)
+    track_ids = track_lengths.index if n_tracks is None else track_lengths.index[:n_tracks]
+
+    if track_lengths.empty:
+        return None
+
+    fig = plt.figure(figsize=(10, 10))
+    ax = fig.add_subplot(111)
+
+    cmap = plt.get_cmap('tab20')
+    ncol = max(1, min(20, len(track_ids)))
+    plotted = 0
+
+    for idx, tid in enumerate(track_ids):
+        track_df = df[df[track_col] == tid].sort_values(frame_col)
+        selected_df = filtered_df[filtered_df[track_col] == tid]
+        if track_df.empty or selected_df.empty:
+            continue
+
+        color = cmap(idx % ncol)
+        ax.plot(
+            track_df[x_mm_col].values,
+            track_df[y_mm_col].values,
+            linewidth=2.0,
+            alpha=0.8,
+            color=color
+        )
+        ax.scatter(
+            selected_df[x_mm_col].values,
+            selected_df[y_mm_col].values,
+            marker='o',
+            s=45,
+            color=color,
+            edgecolor='k',
+            linewidth=0.6
+        )
+        plotted += 1
+
+    if plotted == 0:
+        plt.close(fig)
+        return None
+
+    ax.set_xlabel('x [mm]', fontsize=20, labelpad=10)
+    ax.set_ylabel('y [mm]', fontsize=20, labelpad=10)
+    ax.tick_params(axis='both', which='major', labelsize=14)
+    ax.set_aspect('equal', adjustable='datalim')
+    ax.set_title(f'Reconstructed XY trajectories of {plotted} tracks', fontsize=22)
     plt.tight_layout()
     try:
         plt.savefig(outpath, dpi=200)

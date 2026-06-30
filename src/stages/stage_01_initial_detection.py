@@ -582,12 +582,39 @@ def _build_tracking_figure(tracked_df: pd.DataFrame) -> Optional[plt.Figure]:
     return fig
 
 
+def _build_tracking_xy_figure(tracked_df: pd.DataFrame) -> Optional[plt.Figure]:
+    """Create a 2D XY-projection figure of all tracked particle paths.
+
+    Companion to :func:`_build_tracking_figure`. The 3D view is subject to
+    perspective distortion (a point's screen position depends on its Z), which
+    can make the XY layout look different from how it really is. This flat
+    projection plots the same trajectories on the true XY plane so the spatial
+    layout can be read and compared against Stage 2 without that distortion.
+    """
+    if tracked_df.empty:
+        return None
+    fig = plt.figure(figsize=(8, 8))
+    ax = fig.add_subplot(111)
+    ax.set_title("2D XY Projection of Particle Tracks")
+    ax.set_xlabel("X (mm)")
+    ax.set_ylabel("Y (mm)")
+    for _, track in tracked_df.groupby('track_id'):
+        ax.plot(track['x_mm'], track['y_mm'], linewidth=1)
+    ax.set_aspect('equal', adjustable='datalim')
+    plt.tight_layout()
+    return fig
+
+
 def run_particle_tracking(
     fused_df: pd.DataFrame,
     sample_id: str,
     tracking_config: Dict[str, Any]
-) -> Tuple[pd.DataFrame, Optional[plt.Figure]]:
-    """Perform particle tracking on fused detections and return data instead of writing files."""
+) -> Tuple[pd.DataFrame, Optional[plt.Figure], Optional[plt.Figure]]:
+    """Perform particle tracking on fused detections and return data instead of writing files.
+
+    Returns the tracked dataframe plus two companion figures: the 3D track plot
+    and its 2D XY projection (both ``None`` when there is nothing to plot).
+    """
     logger.info(f"--- Post-S1 Tracking initiated for: {sample_id} ---")
     pixel_size_um = tracking_config.get('pixel_size_um')
     magnification = tracking_config.get('magnification')
@@ -600,13 +627,13 @@ def run_particle_tracking(
     processed_data = _process_particle_coordinates_for_tracking_df(fused_df, pixel_size_um, magnification)
     if processed_data.empty:
         logger.warning("Tracking workflow stopped: No data after initial processing.")
-        return processed_data, None
+        return processed_data, None, None
 
     tracked_data = _track_particles_3d(processed_data, search_range_mm, memory_frames, min_track_length)
     if tracked_data.empty:
         logger.warning("Tracking workflow stopped: No tracks survived the filtering process.")
         processed_data['track_id'] = np.nan
-        return processed_data, None
+        return processed_data, None, None
 
     logger.info("Tracking Step 3: Merging tracking results with original data...")
     merge_cols = ['frame', 'x_mm', 'y_mm', 'z_mm']
@@ -631,8 +658,9 @@ def run_particle_tracking(
         final_tracked_particles_df['track_id'] = final_tracked_particles_df['track_id'].astype(int)
 
     tracking_figure = _build_tracking_figure(final_tracked_particles_df)
+    tracking_xy_figure = _build_tracking_xy_figure(final_tracked_particles_df)
     logger.info(f"--- Post-S1 Tracking for {sample_id} COMPLETED ---")
-    return final_tracked_particles_df, tracking_figure
+    return final_tracked_particles_df, tracking_figure, tracking_xy_figure
 
 
 def run_stage_01_initial_detection(
@@ -752,10 +780,10 @@ def run_stage_01_initial_detection(
     if tracking_config['enabled']:
         # Track fused particles and defer file I/O to the stage wrapper.
         try:
-            tracked_df, tracking_fig = run_particle_tracking(final_sample_df, sample_id, tracking_config)
+            tracked_df, tracking_fig, tracking_xy_fig = run_particle_tracking(final_sample_df, sample_id, tracking_config)
         except Exception as e:
             logger.exception(f"Particle tracking failed for sample {sample_id}: {e}")
-            tracked_df, tracking_fig = pd.DataFrame(), None
+            tracked_df, tracking_fig, tracking_xy_fig = pd.DataFrame(), None, None
 
         if tracked_df.empty and not final_sample_df.empty:
             logger.warning("Particle tracking returned no tracks; saving fused detections with empty track IDs.")
@@ -768,6 +796,11 @@ def run_stage_01_initial_detection(
             tracking_fig.savefig(figure_3d_path, dpi=150)
             plt.close(tracking_fig)
             # Tracking figure documents the trajectories visually.
+        if tracking_xy_fig is not None:
+            figure_xy_path = os.path.join(output_dir_stage1, f"{sample_id}_stage1_tracks_xy.png")
+            tracking_xy_fig.savefig(figure_xy_path, dpi=150)
+            plt.close(tracking_xy_fig)
+            # Flat XY projection makes the spatial layout directly comparable to Stage 2.
     else:
         logger.info("Particle tracking is disabled. Saving fused data as final output.")
         final_sample_df['track_id'] = np.nan
