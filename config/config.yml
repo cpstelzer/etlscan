@@ -27,7 +27,7 @@ paths:
   raw_data_root: "C:/wellscanner/test/"
 
 # Selects which entry under `hardware_profiles:` is deep-merged into `acquisition:` at load time.
-active_hardware_profile: "TS1_0638_70_EL"
+active_hardware_profile: "S5VPJ6415"
 
 # -----------------------------------------------------------------------------
 # Flat-field calibration file layout
@@ -83,7 +83,7 @@ acquisition:
     experiment_summary_log_filename: "experiment_summary_log.csv"
   focusing:
     pattern: "zigzag"
-    scan_step_um: 150
+    scan_step_um: 250
     lens_settle_time_sec: 0.025
     large_jump_threshold_dpt: -3.0
     large_jump_settle_sec: 0.040
@@ -146,7 +146,7 @@ hardware_profiles:
           origin_y: 17.963
   S5VPJ6415:
     focusing:
-      scan_height_mm: 11
+      scan_height_mm: 3
       scan_ratio: 4.89 # Optical leverage (mm/dpt) Dry:3.56 mm/dpt; Wet: 4.89 mm/dpt
       lens_controller_port: "COM10"
     camera:
@@ -204,7 +204,7 @@ realtime_mode:
     flat_field_dir: null
     # retrieve_timeout_margin_ms is shared from acquisition.camera (single source).
     etl_control_enabled: true
-    start_dpt: -1.074
+    start_dpt: -1.5
     adaptive_enabled: false
     adaptive_window_fraction: 0.1
     adaptive_min_window_points: 3
