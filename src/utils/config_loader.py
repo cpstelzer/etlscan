@@ -67,11 +67,32 @@ def _assemble_system_view(config: Dict[str, Any]) -> None:
         return
     seg = dict(segmentation)
     thresholding = seg.pop("thresholding", {})
+    # subtracted_foreground is the shared FG/BG gate for stage 1 (batch + realtime). Lift it
+    # to a top-level system key (like thresholding) so it stays out of the segmentation-tuning
+    # view consumed by get_unified_segmentation_params (stage 2/4).
+    subtracted_foreground = seg.pop("subtracted_foreground", {})
     config["system"] = {
         **imaging,
         "thresholding": thresholding,
+        "subtracted_foreground": subtracted_foreground,
         "segmentation": seg,
     }
+
+
+def _link_imaging_dimensions_from_roi(config: Dict[str, Any]) -> None:
+    """Derive imaging.image_width_px/height_px from the active hardware profile's ROI.
+
+    The saved frame size equals the camera ROI, which is per-hardware-profile. Keeping a
+    separately hard-coded imaging dimension lets it silently drift from the real frames
+    (it did: 4504 vs the actual 4512 for S5VPJ6415). ROI is the single source of truth, so
+    this must run after _apply_hardware_profile and before _assemble_system_view.
+    """
+    roi = config.get("acquisition", {}).get("roi", {})
+    imaging = config.setdefault("imaging", {})
+    if roi.get("width") is not None:
+        imaging["image_width_px"] = int(roi["width"])
+    if roi.get("height") is not None:
+        imaging["image_height_px"] = int(roi["height"])
 
 
 def _link_stage_controller(config: Dict[str, Any]) -> None:
@@ -117,8 +138,11 @@ def load_config_once(config_path: str = "config/config.yml") -> Dict[str, Any]:
         raise
 
     _replace_null_with_none(loaded_config)
-    _assemble_system_view(loaded_config)
+    # Order matters: resolve the active hardware profile (ROI) first, derive the imaging
+    # dimensions from it, then assemble the system view so it picks up the derived dims.
     _apply_hardware_profile(loaded_config)
+    _link_imaging_dimensions_from_roi(loaded_config)
+    _assemble_system_view(loaded_config)
     _link_stage_controller(loaded_config)
     _link_acquisition_output_root(loaded_config)
     return loaded_config

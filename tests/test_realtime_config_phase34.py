@@ -40,6 +40,7 @@ def _base_unified_config(**overrides):
         "system": {
             "source_image_illumination_type": "collimated",
             "thresholding": {"thresholding_mode": "otsu", "otsu_threshold_multiplier": 0.7, "fixed_threshold_value": 70},
+            "subtracted_foreground": {"foreground_diff_threshold": 10, "max_foreground_fraction": 0.08},
             "segmentation": {"min_noise_size": 99, "closing_selem_size": 3},
         },
         "stage_01_initial_detection": {
@@ -146,6 +147,8 @@ def test_realtime_loader_uses_pipeline_for_shared_analysis(tmp_path: Path) -> No
     assert rt_cfg.stage2_segmentation_params["closing_selem_size"] == 3
     assert rt_cfg.stage2_quality_features_config["black_mask_check"]["max_black_pixel_value"] == 15
     assert rt_cfg.stage1_config["global_threshold_config"]["otsu_threshold_multiplier"] == 0.7
+    assert rt_cfg.stage1_config["subtracted_foreground_config"]["foreground_diff_threshold"] == 10
+    assert rt_cfg.stage1_config["subtracted_foreground_config"]["max_foreground_fraction"] == 0.08
     assert rt_cfg.min_focus_score == 80
     assert rt_cfg.stage3_enable_artifact_filter is True
     assert rt_cfg.stage3_enable_boundary_filter is True

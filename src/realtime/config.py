@@ -76,6 +76,7 @@ def _resolve_stage1_config(pipeline_cfg: Dict[str, Any], rt: Dict[str, Any]) -> 
     stage1_cfg["particle_comparison_config"] = stage1_root["particle_comparison"]
     stage1_cfg["unsubtracted_analysis_config"] = stage1_root["unsubtracted_particle_analysis"]
     stage1_cfg["global_threshold_config"] = system_cfg["thresholding"]
+    stage1_cfg["subtracted_foreground_config"] = system_cfg["subtracted_foreground"]
 
     return stage1_cfg
 

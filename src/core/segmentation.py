@@ -66,6 +66,43 @@ def generate_binary_mask_from_float_image(
     return image_processed_float > final_threshold_value_float
 
 
+def assess_subtracted_foreground(
+    subtracted_img_uint8: np.ndarray,
+    foreground_diff_threshold: int,
+    max_foreground_fraction: float,
+    *,
+    area_px: Optional[int] = None,
+) -> Tuple[np.ndarray, float, bool]:
+    """Threshold a background-subtracted frame and judge whether the subtraction is usable.
+
+    Single source of truth for the FG/BG foreground gate shared by the batch (stage 1)
+    and realtime pipelines. Otsu is unstable on the near-zero subtracted image: when a
+    FG/BG pair subtracts poorly it collapses into the noise floor and floods the whole
+    well with false particles. Callers use the returned floor mask (a fixed minimum the
+    downstream Otsu may tighten but not fall below) and the failure verdict.
+
+    Args:
+        subtracted_img_uint8: Background-subtracted frame (uint8), already well-masked.
+        foreground_diff_threshold: Fixed minimum subtracted difference (0-255) to count
+            as foreground.
+        max_foreground_fraction: Fraction of ``area_px`` above which the subtraction is
+            deemed failed (illumination drift / bad BG pairing).
+        area_px: Denominator for the foreground fraction (typically the well-mask pixel
+            count). Defaults to the full image size when None.
+
+    Returns:
+        Tuple of (foreground_mask boolean array, foreground_fraction float,
+        subtraction_failed bool). ``subtraction_failed`` is True when the fraction exceeds
+        ``max_foreground_fraction`` and the frame should yield no candidates.
+    """
+    foreground_mask = subtracted_img_uint8 >= int(foreground_diff_threshold)
+    denominator = float(area_px) if area_px else float(foreground_mask.size)
+    foreground_fraction = (
+        float(np.count_nonzero(foreground_mask)) / denominator if denominator else 0.0
+    )
+    return foreground_mask, foreground_fraction, foreground_fraction > float(max_foreground_fraction)
+
+
 def segment_main_body_from_image_float(
     image_gray_float_input: np.ndarray, 
     segmentation_params: Dict[str, Any] 

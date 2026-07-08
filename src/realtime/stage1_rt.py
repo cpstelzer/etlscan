@@ -4,7 +4,6 @@ from dataclasses import dataclass
 import logging
 from typing import Any, Dict, Optional
 
-import cv2
 import numpy as np
 import pandas as pd
 
@@ -70,24 +69,13 @@ def run_stage1_realtime(
     if subtracted_img_uint8 is None:
         return Stage1Result(detections_df=pd.DataFrame())
 
-    foreground_diff_threshold = int(config["foreground_diff_threshold"])
-    max_foreground_fraction = float(config["max_foreground_fraction"])
-    _, motion_mask = cv2.threshold(subtracted_img_uint8, foreground_diff_threshold, 255, cv2.THRESH_BINARY)
-    foreground_fraction = float(np.count_nonzero(motion_mask)) / float(motion_mask.size) if motion_mask.size else 0.0
-
-    if foreground_fraction > max_foreground_fraction:
-        if frame_index % 30 == 0:
-            logger.warning(
-                f"Frame {frame_index} skipped: foreground fraction {foreground_fraction:.3f} "
-                f"exceeds max_foreground_fraction {max_foreground_fraction:.3f} "
-                "(possible bg mismatch/illumination drift)."
-            )
-        return Stage1Result(detections_df=pd.DataFrame())
-
     sub_cfg = config["particle_analysis_subtracted_config"]
     global_cfg = config["global_threshold_config"]
     local_cfg = config["unsubtracted_analysis_config"]
 
+    # The shared FG/BG foreground gate (floor + max-fraction guard) is applied inside
+    # analyze_subtracted_image via subtracted_foreground_config; it reports subtraction_failed
+    # when a poorly-subtracted frame would flood with false positives.
     sub_analysis = analyze_subtracted_image(
         subtracted_img_uint8,
         well_mask_uint8=prep.get("well_mask"),
@@ -95,7 +83,15 @@ def run_stage1_realtime(
         global_threshold_config=global_cfg,
         sample_id="REALTIME",
         source_filename=f"realtime_frame_{frame_index:06d}.png",
+        subtracted_foreground_config=config["subtracted_foreground_config"],
     )
+    if sub_analysis.get("subtraction_failed"):
+        if frame_index % 30 == 0:
+            logger.warning(
+                f"Frame {frame_index} skipped: FG/BG subtraction failed (foreground exceeds "
+                "max_foreground_fraction; possible bg mismatch/illumination drift)."
+            )
+        return Stage1Result(detections_df=pd.DataFrame())
     refined = refine_with_local_otsu(
         unsub_prepared_uint8=prep["unsub_prepared"],
         candidate_particles=sub_analysis["particles_df"],

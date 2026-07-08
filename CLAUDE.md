@@ -9,6 +9,22 @@ the first three stages runs frame-by-frame during live acquisition.
 
 ---
 
+## Working approach: diagnose before implementing
+
+When investigating a bug or unexpected behavior, explore breadth-first and confirm the
+root cause with evidence **before** writing a fix — don't latch onto the first vivid clue
+and start coding:
+
+- Establish the expected ground-truth outcome first (e.g. "1–4 organisms across the
+  sequence") and sanity-check results against that magnitude — a wrong order of magnitude
+  is a signal, not noise.
+- Weigh 2–3 candidate causes by evidence and look for what would *disconfirm* the leading
+  one; trace the whole pipeline, not just the first suspicious stage.
+- Distinguish symptom from cause, and present the diagnosis before implementing unless the
+  fix is trivial.
+
+---
+
 ## Repository layout
 
 ```

@@ -52,8 +52,10 @@ logging:
 # Imaging geometry (frame dimensions + illumination source)
 # -----------------------------------------------------------------------------
 imaging:
-  image_width_px: 4504
-  image_height_px: 4504
+  # image_width_px / image_height_px are injected at load time from the active hardware
+  # profile's acquisition.roi (the saved frame size equals the camera ROI). ROI is the single
+  # source of truth, so these can never drift from the real frames -- they had (4504 vs the
+  # actual 4512 for S5VPJ6415), which silently mismatched manual mask centering.
   source_image_illumination_type: "collimated"
 
 # -----------------------------------------------------------------------------
@@ -65,6 +67,18 @@ segmentation:
     thresholding_mode: "otsu"
     otsu_threshold_multiplier: 0.7
     fixed_threshold_value: 70
+  # Background-subtracted foreground gate. Shared single source of truth for BOTH the
+  # batch (stage 1) and realtime pipelines; assembled into config['system'] by the loader.
+  # Otsu on the near-zero subtracted image collapses into the noise floor when a FG/BG pair
+  # subtracts poorly (e.g. the modulo-wrapped BG pairing of late batch frames, or
+  # illumination drift in realtime), flooding the whole well with false particles.
+  #   foreground_diff_threshold: fixed minimum on the subtracted diff (0-255); Otsu may
+  #     tighten this floor but not fall below it.
+  #   max_foreground_fraction: if the floored foreground still covers more than this fraction
+  #     of the analyzed well area, the subtraction failed and the frame yields no candidates.
+  subtracted_foreground:
+    foreground_diff_threshold: 10
+    max_foreground_fraction: 0.08
   enable_unsharp_masking: false
   unsharp_mask_sigma: 1.0
   unsharp_mask_amount: 1.0
@@ -210,13 +224,14 @@ realtime_mode:
     adaptive_min_window_points: 3
     adaptive_dispersion_coeff: 1
   stage1:
-    foreground_diff_threshold: 10
-    max_foreground_fraction: 0.08
+    # foreground_diff_threshold / max_foreground_fraction now live centrally under
+    # segmentation.subtracted_foreground (shared with the batch pipeline).
     reacquire_detection_threshold: 20
   stage2:
-    # Kept distinct from stage_01.unsubtracted_particle_analysis.min_particle_area (1000).
-    # This governs realtime stage2 filtering and has historically been 500.
-    min_particle_area: 1000
+    # Kept distinct from stage_01.unsubtracted_particle_analysis.min_particle_area (1000):
+    # realtime stage-2 keeps only larger, confident particles. (Was inadvertently set to
+    # 1000 in commit 268192a; restored to the documented 5000.)
+    min_particle_area: 5000
     max_candidates_per_frame: 200
   persistence:
     save_accepted_crops: true
@@ -269,9 +284,22 @@ stage_01_initial_detection:
       - [0,  0,  0,  0,  0]
     min_microorganism_area: 500
     microorganism_blur_kernel: 5
+    # Background-subtracted foreground gate lives centrally under
+    # segmentation.subtracted_foreground (shared with the realtime pipeline).
   unsubtracted_particle_analysis:
     min_particle_area: 1000
     adaptive_padding_factor: 0.2
+    # Local background suppression for the unsubtracted local-Otsu refinement.
+    # The Otsu multiplier (segmentation.thresholding.otsu_threshold_multiplier) is <1
+    # and implicitly assumes a near-zero background floor. On unsubtracted collimated
+    # frames whose raw background is mid-gray (not near-white), that assumption fails:
+    # the multiplied threshold lands below the background and every square ROI floods
+    # to a solid foreground (perfect-square false particles). Subtracting this robust
+    # low-percentile floor restores the near-zero-background assumption regardless of
+    # exposure/illumination level; max_roi_foreground_fraction is a safety net that
+    # rejects any residual flooded ROI before it becomes a detection.
+    background_floor_percentile: 25
+    max_roi_foreground_fraction: 0.85
   particle_comparison:
     search_radius_factor: 2.0
     default_particle_area: 2000

@@ -26,7 +26,7 @@ from src.core.image_io_operations import (
 from src.core.image_enhancement import subtract_images, apply_blur
 from src.core.masking_operations import mask_well_area, apply_mask
 from src.core.region_props_calculator import find_contours, calculate_contour_measurements, filter_contours_by_area
-from src.core.segmentation import generate_binary_mask_from_float_image
+from src.core.segmentation import generate_binary_mask_from_float_image, assess_subtracted_foreground
 from src.core.well_analysis import (
     create_well_mask_black_plate,
     match_well_brightness
@@ -106,16 +106,26 @@ def analyze_subtracted_image(
     particle_analysis_config: Dict[str, Any],
     global_threshold_config: Dict[str, Any],
     sample_id: str,
-    source_filename: str
+    source_filename: str,
+    subtracted_foreground_config: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
-    """Find particles on the subtracted image and return structured results."""
+    """Find particles on the subtracted image and return structured results.
+
+    ``subtracted_foreground_config`` (shared FG/BG gate, from system.subtracted_foreground)
+    applies a fixed foreground floor and a max-foreground-fraction guard via
+    :func:`assess_subtracted_foreground`. This is the single place where both the batch and
+    realtime pipelines evaluate that gate. On a failed subtraction the result carries
+    ``subtraction_failed=True`` and no candidates.
+    """
+    empty_result = {
+        "particles": [],
+        "particles_df": pd.DataFrame(),
+        "binary_mask": None,
+        "masked_subtracted_image": None,
+        "subtraction_failed": False,
+    }
     if subtracted_img_uint8 is None:
-        return {
-            "particles": [],
-            "particles_df": pd.DataFrame(),
-            "binary_mask": None,
-            "masked_subtracted_image": None,
-        }
+        return empty_result
 
     masked_subtracted_img_uint8 = (
         apply_mask(subtracted_img_uint8, well_mask_uint8)
@@ -123,10 +133,38 @@ def analyze_subtracted_image(
         else subtracted_img_uint8
     )
 
+    # Shared FG/BG foreground gate: a fixed floor Otsu may tighten but not fall below, plus a
+    # guard that rejects the whole frame when the subtraction failed (flood of false positives).
+    foreground_floor_mask = None
+    if subtracted_foreground_config:
+        well_area_px = (
+            int(np.count_nonzero(well_mask_uint8)) if well_mask_uint8 is not None
+            else int(masked_subtracted_img_uint8.size)
+        )
+        foreground_floor_mask, foreground_fraction, subtraction_failed = assess_subtracted_foreground(
+            masked_subtracted_img_uint8,
+            int(subtracted_foreground_config['foreground_diff_threshold']),
+            float(subtracted_foreground_config['max_foreground_fraction']),
+            area_px=well_area_px,
+        )
+        if subtraction_failed:
+            logger.warning(
+                "S1 Subtracted: foreground fraction %.3f exceeds %.3f of the well area; treating the "
+                "FG/BG subtraction as failed and emitting no candidates for this frame.",
+                foreground_fraction, float(subtracted_foreground_config['max_foreground_fraction']),
+            )
+            return {
+                **empty_result,
+                "binary_mask": foreground_floor_mask.astype(np.uint8) * 255,
+                "masked_subtracted_image": masked_subtracted_img_uint8,
+                "subtraction_failed": True,
+            }
+
     particles_subtracted_list_dicts, binary_mask_display_uint8 = _analyze_single_subtracted_image_global_thresh(
         masked_subtracted_img_uint8,
         particle_analysis_config,
-        global_threshold_config
+        global_threshold_config,
+        foreground_floor_mask=foreground_floor_mask,
     )
     df_subtracted_particles = pd.DataFrame(particles_subtracted_list_dicts)
     if not df_subtracted_particles.empty:
@@ -138,6 +176,7 @@ def analyze_subtracted_image(
         "particles_df": df_subtracted_particles,
         "binary_mask": binary_mask_display_uint8,
         "masked_subtracted_image": masked_subtracted_img_uint8,
+        "subtraction_failed": False,
     }
 
 
@@ -218,7 +257,8 @@ def process_frame_pair(
         config.get('particle_analysis_subtracted_config', {}),
         config.get('global_threshold_config', {}),
         config.get('sample_id', 'UNKNOWN_SAMPLE'),
-        fg_row.get('filename', 'UNKNOWN_FILE')
+        fg_row.get('filename', 'UNKNOWN_FILE'),
+        subtracted_foreground_config=config.get('subtracted_foreground_config'),
     )
     unsubtracted_cfg = config['unsubtracted_analysis_config']
     unsub_analysis = refine_with_local_otsu(
@@ -368,12 +408,18 @@ def _determine_bg_offset_for_fg_bg_pairs(
     )
     return fallback_offset
 
-def _analyze_single_subtracted_image_global_thresh( # Unchanged
+def _analyze_single_subtracted_image_global_thresh(
     image_to_analyze_gray_uint8: np.ndarray,
     config_stage1_particle_analysis: Dict[str, Any],
-    global_threshold_config: Dict[str, Any]
+    global_threshold_config: Dict[str, Any],
+    foreground_floor_mask: Optional[np.ndarray] = None,
 ) -> Tuple[List[Dict[str, Any]], Optional[np.ndarray]]:
-    """Detect particles on a subtracted frame using global thresholding settings."""
+    """Detect particles on a subtracted frame using global thresholding settings.
+
+    ``foreground_floor_mask`` (from :func:`assess_subtracted_foreground`) is ANDed into the
+    Otsu mask so the detection cannot fall below the shared fixed foreground floor. The
+    subtraction-failed guard is applied upstream in :func:`analyze_subtracted_image`.
+    """
     particles_data = []; binary_mask_display_uint8 = None
     if image_to_analyze_gray_uint8 is None: return particles_data, binary_mask_display_uint8
     processed_img_uint8 = image_to_analyze_gray_uint8.copy()
@@ -387,6 +433,8 @@ def _analyze_single_subtracted_image_global_thresh( # Unchanged
     img_float_for_segment = skimage.util.img_as_float(processed_img_uint8)
     binary_mask = generate_binary_mask_from_float_image(img_float_for_segment, global_threshold_config)
     if binary_mask is None: logger.error("S1 Subtracted: Failed to generate binary mask via helper."); return particles_data, binary_mask_display_uint8
+    if foreground_floor_mask is not None:
+        binary_mask = binary_mask & foreground_floor_mask
     binary_mask_uint8 = binary_mask.astype(np.uint8) * 255; binary_mask_display_uint8 = binary_mask_uint8.copy()
     img_for_contours = binary_mask_uint8
     blur_kernel_size_sub_binary = config_stage1_particle_analysis.get('microorganism_blur_kernel', 0)
@@ -401,7 +449,29 @@ def _analyze_single_subtracted_image_global_thresh( # Unchanged
     logger.debug(f"S1 Subtracted: Found {len(particles_data)} particles after area filter.")
     return particles_data, binary_mask_display_uint8
 
-def _analyze_unsubtracted_locally( # Unchanged
+def _suppress_roi_background(
+    roi_signal_float: np.ndarray,
+    background_floor_percentile: float,
+) -> np.ndarray:
+    """Shift a bright-particle-on-background ROI so its background floor sits at ~0.
+
+    The local refinement thresholds at ``Otsu * otsu_threshold_multiplier`` with a
+    multiplier < 1. That only behaves when the background floor is already near zero
+    -- true on the background-subtracted frame, but NOT on the unsubtracted frame
+    when the raw background is mid-gray rather than near-white. There the (inverted)
+    background sits well above zero, the multiplied threshold lands below it, and the
+    whole square ROI floods to foreground (perfect-square false particles).
+    Subtracting a robust low-percentile floor restores the near-zero-background
+    assumption independently of absolute exposure/illumination level. It is a near
+    no-op when the background is already near zero (bright collimated or darkfield).
+    """
+    floor = float(np.percentile(roi_signal_float, background_floor_percentile))
+    shifted = roi_signal_float - floor
+    np.clip(shifted, 0.0, 1.0, out=shifted)
+    return shifted
+
+
+def _analyze_unsubtracted_locally(
     full_unsub_prepped_uint8: np.ndarray,
     candidate_particles_subtracted: List[Dict[str, Any]],
     adaptive_padding_factor: float,
@@ -414,6 +484,8 @@ def _analyze_unsubtracted_locally( # Unchanged
     all_local_particle_data = []; composite_binary_mask_full_image = np.zeros_like(full_unsub_prepped_uint8, dtype=np.uint8)
     first_roi_img_2d_for_display, first_roi_hist_data_ravel, first_roi_effective_thresh_val_float = None, None, None
     min_area_unsub = analysis_config.get('min_particle_area', 50); h_full, w_full = full_unsub_prepped_uint8.shape
+    background_floor_percentile = float(analysis_config.get('background_floor_percentile', 25))
+    max_roi_foreground_fraction = float(analysis_config.get('max_roi_foreground_fraction', 0.85))
     logger.debug(f"Local Unsub: Processing {len(candidate_particles_subtracted)} candidate ROIs with adaptive padding factor {adaptive_padding_factor}")
     for i, cand_p_sub in enumerate(candidate_particles_subtracted):
         if 'X' not in cand_p_sub or 'Y' not in cand_p_sub: continue
@@ -428,9 +500,22 @@ def _analyze_unsubtracted_locally( # Unchanged
         if roi_img_uint8.size == 0 or roi_img_uint8.shape[0] < 3 or roi_img_uint8.shape[1] < 3: continue
         roi_float_original_2d = skimage.util.img_as_float(roi_img_uint8); roi_float_for_segment_2d = roi_float_original_2d.copy()
         if source_illumination == 'collimated': roi_float_for_segment_2d = 1.0 - roi_float_for_segment_2d
+        # Pull the local background floor down to ~0 so the sub-1.0 Otsu multiplier
+        # cannot drop below an elevated (mid-gray) background and flood the ROI.
+        roi_float_for_segment_2d = _suppress_roi_background(roi_float_for_segment_2d, background_floor_percentile)
         current_roi_hist_data_ravel = roi_float_for_segment_2d.ravel()
         local_binary_mask_roi = generate_binary_mask_from_float_image(roi_float_for_segment_2d, global_threshold_config)
         if local_binary_mask_roi is None: logger.error(f"S1 Local Unsub: Failed to generate binary mask for ROI {i+1}."); continue
+        # Safety net: a mask that still fills most of the square ROI is a degenerate
+        # flood, not a particle. Drop it so it cannot surface as a perfect-square false
+        # detection (circularity == pi/4). Real particles stay well under this fraction.
+        roi_foreground_fraction = float(np.count_nonzero(local_binary_mask_roi)) / float(local_binary_mask_roi.size)
+        if roi_foreground_fraction > max_roi_foreground_fraction:
+            logger.debug(
+                f"S1 Local Unsub: ROI {i+1} foreground fraction {roi_foreground_fraction:.2f} exceeds "
+                f"{max_roi_foreground_fraction:.2f}; skipping degenerate (flooded) segmentation."
+            )
+            continue
         local_threshold_value_for_data = np.nan
         if i == 0:
             first_roi_img_2d_for_display, first_roi_hist_data_ravel = roi_float_for_segment_2d.copy(), current_roi_hist_data_ravel
@@ -675,6 +760,7 @@ def run_stage_01_initial_detection(
     system_cfg = config['system']
     source_image_illumination = system_cfg['source_image_illumination_type']
     global_threshold_config = system_cfg['thresholding']
+    subtracted_foreground_config = system_cfg['subtracted_foreground']
 
     config_black_plate_well = config_s1['black_plate_well_analysis']
     enable_brightness_adjustment = config_black_plate_well['enable_brightness_adjustment']
@@ -707,6 +793,7 @@ def run_stage_01_initial_detection(
         "source_image_illumination": source_image_illumination,
         "particle_analysis_subtracted_config": particle_analysis_subtracted_config,
         "global_threshold_config": global_threshold_config,
+        "subtracted_foreground_config": subtracted_foreground_config,
         "unsubtracted_analysis_config": unsubtracted_analysis_config,
         "particle_comparison_config": particle_comparison_config,
         "sample_id": sample_id,
