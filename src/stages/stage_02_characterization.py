@@ -15,6 +15,7 @@ matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 import matplotlib.image as mpimg
 from matplotlib.gridspec import GridSpecFromSubplotSpec
+from scipy.signal import find_peaks
 
 from src.utils import (
     load_dataframe_from_csv, save_dataframe_to_csv, build_crop_filename
@@ -497,40 +498,46 @@ def detect_peaks_in_track(
     sharp_col: str,
     focus_cfg: dict
 ) -> np.ndarray:
-    """Identify indices of sharpness peaks within a single track."""
-    smooth_window = max(1, int(focus_cfg.get('smooth_window', 3)))
+    """Identify positional indices of sharpness peaks within a single track.
+
+    Peaks are located with :func:`scipy.signal.find_peaks` on the raw (or, when
+    ``smooth_window > 1``, lightly smoothed) sharpness signal, gated by an
+    absolute height, a fraction of the track maximum, topographic prominence,
+    and a minimum inter-peak distance. Topographic prominence — unlike the
+    previous fixed ±5-frame median heuristic — does not collapse when peaks sit
+    close together, so the closely-spaced peaks produced by a fast focus sweep
+    are resolved correctly.
+
+    The returned indices are positional into ``track_df`` as passed; callers
+    must supply the track already sorted by frame (both current callers do).
+    """
+    smooth_window = max(1, int(focus_cfg.get('smooth_window', 1)))
     min_sharpness_frac = float(focus_cfg.get('min_sharpness_fraction', 0.3))
     min_prominence_frac = float(focus_cfg.get('min_prominence_fraction', 0.05))
     sharpness_min_threshold = float(focus_cfg.get('sharpness_min_threshold', 0))
+    min_peak_distance = max(1, int(focus_cfg.get('min_peak_distance_frames', 1)))
 
     sharp_series = pd.to_numeric(track_df[sharp_col], errors='coerce').fillna(0)
-    y = sharp_series.values
-    if len(y) == 0:
+    y = sharp_series.to_numpy(dtype=float)
+    if y.size == 0:
         return np.array([], dtype=int)
 
-    try:
-        max_val = np.nanmax(y)
-    except ValueError:
-        return np.array([], dtype=int)
+    max_val = np.nanmax(y)
     if not np.isfinite(max_val) or max_val <= 0:
         return np.array([], dtype=int)
 
-    threshold = min_sharpness_frac * max_val
-    smoothed = smooth_series(pd.Series(y), smooth_window)
-    peaks: List[int] = []
+    signal = smooth_series(pd.Series(y), smooth_window) if smooth_window > 1 else y
 
-    for i in range(1, len(smoothed) - 1):
-        if (
-            smoothed[i] > smoothed[i - 1]
-            and smoothed[i] > smoothed[i + 1]
-            and smoothed[i] >= threshold
-            and smoothed[i] >= sharpness_min_threshold
-        ):
-            local_window = smoothed[max(0, i - 5):min(len(smoothed), i + 6)]
-            prominence = smoothed[i] - np.median(local_window)
-            if prominence >= min_prominence_frac * max_val:
-                peaks.append(i)
-    return np.array(peaks, dtype=int)
+    height_threshold = max(sharpness_min_threshold, min_sharpness_frac * max_val)
+    prominence_threshold = min_prominence_frac * max_val
+
+    peaks, _ = find_peaks(
+        signal,
+        height=height_threshold,
+        prominence=prominence_threshold,
+        distance=min_peak_distance,
+    )
+    return peaks.astype(int)
 
 
 def filter_focused_frames(
@@ -591,6 +598,16 @@ def plot_track_with_collage(
     ax_sharpness = fig.add_subplot(grid_spec[0])
 
     ax_sharpness.plot(track_df[frame_col], track_df[sharp_col], color='tab:blue', linewidth=3.0)
+    detection_smooth_window = max(1, int(focus_cfg.get('smooth_window', 1)))
+    if detection_smooth_window > 1:
+        smoothed_for_plot = smooth_series(
+            pd.to_numeric(track_df[sharp_col], errors='coerce').fillna(0),
+            detection_smooth_window
+        )
+        ax_sharpness.plot(
+            track_df[frame_col], smoothed_for_plot,
+            color='tab:blue', linewidth=1.5, linestyle='--', alpha=0.7
+        )
     ax_sharpness.set_xlabel('Frame', fontsize=20, fontweight='bold')
     ax_sharpness.set_ylabel('Sharpness', color='tab:blue', fontsize=20, fontweight='bold')
     ax_sharpness.tick_params(axis='both', labelsize=16, width=1.5, length=6)

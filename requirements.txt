@@ -4,6 +4,7 @@ pandas
 PyYAML
 scikit-learn
 scikit-image
+scipy
 matplotlib
 joblib
 pytest

@@ -332,10 +332,11 @@ stage_02_characterization:
     frame_column: "frame"
     track_column: "track_id"
     sharpness_column: "variance_laplacian" 
-    min_sharpness_fraction: 0.3
+    min_sharpness_fraction: 0.15      # was 0.3: dropped genuine short peaks on fast (S5VPJ6415) sweeps
     min_prominence_fraction: 0.05
-    smooth_window: 3
-    sharpness_min_threshold: 110
+    smooth_window: 1                  # was 3: smoothing filled inter-peak valleys, collapsing prominence
+    sharpness_min_threshold: 90       # was 110: retune to this rig's variance_laplacian magnitudes
+    min_peak_distance_frames: 2       # min frames between adjacent peaks (scipy find_peaks distance)
     max_tracks_to_plot: 15
     save_plots: true
     crop_filename_prefix: null
