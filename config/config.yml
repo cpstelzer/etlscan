@@ -338,6 +338,8 @@ stage_02_characterization:
     sharpness_min_threshold: 90       # was 110: retune to this rig's variance_laplacian magnitudes
     min_peak_distance_frames: 2       # min frames between adjacent peaks (scipy find_peaks distance)
     max_tracks_to_plot: 15
+    trajectory_smoothing_factor: 0.5   # 3D depth spline: 0 interpolates, larger smooths more (unitless)
+    min_points_for_spline: 5           # tracks with fewer in-focus points get a constant mean depth
     save_plots: true
     crop_filename_prefix: null
 

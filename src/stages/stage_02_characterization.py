@@ -16,6 +16,7 @@ import matplotlib.pyplot as plt
 import matplotlib.image as mpimg
 from matplotlib.gridspec import GridSpecFromSubplotSpec
 from scipy.signal import find_peaks
+from scipy.interpolate import UnivariateSpline
 
 from src.utils import (
     load_dataframe_from_csv, save_dataframe_to_csv, build_crop_filename
@@ -37,6 +38,7 @@ from src.core.feature_calculators.shape_descriptors import calculate_shape_descr
 logger = logging.getLogger(__name__)
 
 FOCUS_Z_COLUMN = 'z_mm'
+FOCUS_Z_RECONSTRUCTED_COLUMN = 'z_reconstructed'
 FOCUS_X_PIXEL_COLUMN = 'X'
 FOCUS_Y_PIXEL_COLUMN = 'Y'
 FOCUS_X_MM_COLUMN = 'x_mm'
@@ -140,6 +142,9 @@ def run_stage_02_characterization(
 
     # focus filter
     filtered_df, diagnostics_df = select_focused_tracks(comprehensive_df, focus_cfg)
+
+    # reconstruct continuous per-frame depth (z) from the sparse in-focus points
+    comprehensive_df = add_reconstructed_depth(comprehensive_df, filtered_df, focus_cfg)
 
     final_particles_df = pd.DataFrame()
     if filtered_df is not None and not filtered_df.empty:
@@ -405,7 +410,9 @@ def emit_focus_artifacts(
             focus_cfg.get('frame_column', 'frame'),
             FOCUS_Z_COLUMN,
             os.path.join(focus_plots_dir, 'reconstructed_trajectories_3d.png'),
-            max_tracks
+            max_tracks,
+            focus_cfg.get('trajectory_smoothing_factor', 0.5),
+            focus_cfg.get('min_points_for_spline', 5)
         )
 
         plot_xy_reconstructed(
@@ -746,6 +753,97 @@ def plot_example_tracks_with_collages(
     return saved_paths
 
 
+def reconstruct_track_depth(
+    frames: np.ndarray,
+    knot_frames: np.ndarray,
+    knot_z: np.ndarray,
+    smoothing_factor: float,
+    min_points_for_spline: int
+) -> np.ndarray:
+    """Estimate per-frame depth (z) along a track from sparse in-focus measurements.
+
+    For tracks with at least ``min_points_for_spline`` in-focus points a cubic
+    smoothing spline (:class:`scipy.interpolate.UnivariateSpline`) is fitted to
+    the measured ``(knot_frames, knot_z)`` pairs and evaluated at every frame,
+    clamped to the measured frame span to avoid extrapolation artefacts. The
+    smoothing budget ``s = smoothing_factor * m * Var(z)`` (m = number of knots)
+    is scaled by the spread of z, making ``smoothing_factor`` unitless and
+    data-scale independent (0 interpolates, larger smooths more). Shorter tracks
+    lack support for a meaningful spline and are assigned a constant depth equal
+    to the mean of their in-focus measurements. Returns an array aligned with
+    ``frames`` (all NaN when there are no knots).
+    """
+    frames = np.asarray(frames, dtype=float)
+    knot_frames = np.asarray(knot_frames, dtype=float)
+    knot_z = np.asarray(knot_z, dtype=float)
+
+    if knot_z.size == 0:
+        return np.full(frames.shape, np.nan, dtype=float)
+
+    if knot_z.size >= min_points_for_spline and knot_z.size >= 2:
+        spline = UnivariateSpline(
+            knot_frames,
+            knot_z,
+            k=min(3, knot_z.size - 1),
+            s=smoothing_factor * knot_z.size * float(np.var(knot_z))
+        )
+        frame_eval = np.clip(frames, knot_frames[0], knot_frames[-1])
+        return spline(frame_eval)
+
+    return np.full(frames.shape, float(np.mean(knot_z)), dtype=float)
+
+
+def add_reconstructed_depth(
+    comprehensive_df: pd.DataFrame,
+    filtered_df: Optional[pd.DataFrame],
+    focus_cfg: Dict[str, Any]
+) -> pd.DataFrame:
+    """Attach a per-frame ``z_reconstructed`` column to the Stage-2 feature table.
+
+    The in-focus selections (``filtered_df``) provide sparse depth knots; depth
+    between them is reconstructed per track with :func:`reconstruct_track_depth`
+    and evaluated at every frame of the track. In-plane (x, y) coordinates are
+    left unaltered. When focus analysis produced no selections, or required
+    columns are missing, the input is returned unchanged (no column added).
+    """
+    if filtered_df is None or filtered_df.empty:
+        return comprehensive_df
+
+    track_col = focus_cfg.get('track_column', 'track_id')
+    frame_col = focus_cfg.get('frame_column', 'frame')
+    z_col = FOCUS_Z_COLUMN
+    smoothing_factor = float(focus_cfg.get('trajectory_smoothing_factor', 0.5))
+    min_points_for_spline = int(focus_cfg.get('min_points_for_spline', 5))
+
+    required = {track_col, frame_col, z_col}
+    if not required.issubset(comprehensive_df.columns) or not required.issubset(filtered_df.columns):
+        missing = required - (set(comprehensive_df.columns) & set(filtered_df.columns))
+        logger.warning("Skipping z reconstruction; required columns missing: %s", ', '.join(sorted(missing)))
+        return comprehensive_df
+
+    result_df = comprehensive_df.copy()
+    result_df[FOCUS_Z_RECONSTRUCTED_COLUMN] = np.nan
+    knots_by_track = filtered_df.groupby(track_col)
+
+    for tid, track_group in result_df.groupby(track_col):
+        if tid not in knots_by_track.groups:
+            continue
+        z_knots = knots_by_track.get_group(tid).groupby(frame_col)[z_col].mean()
+        if z_knots.empty:
+            continue
+        frames_sorted = track_group.sort_values(frame_col)
+        z_values = reconstruct_track_depth(
+            frames_sorted[frame_col].to_numpy(dtype=float),
+            z_knots.index.to_numpy(dtype=float),
+            z_knots.to_numpy(dtype=float),
+            smoothing_factor,
+            min_points_for_spline
+        )
+        result_df.loc[frames_sorted.index, FOCUS_Z_RECONSTRUCTED_COLUMN] = z_values
+
+    return result_df
+
+
 def plot_3d_reconstructed(
     df: pd.DataFrame,
     filtered_df: pd.DataFrame,
@@ -753,9 +851,19 @@ def plot_3d_reconstructed(
     frame_col: str,
     z_col: str,
     outpath: str,
-    n_tracks: Optional[int]
+    n_tracks: Optional[int],
+    smoothing_factor: float,
+    min_points_for_spline: int
 ) -> Optional[str]:
-    """Render 3D trajectories showing selected in-focus points for each track."""
+    """Render 3D trajectories with a spline-reconstructed depth profile per track.
+
+    The trajectory line follows a continuous depth estimate: the precomputed
+    ``z_reconstructed`` column when present (so the figure matches the saved
+    CSV), otherwise an on-the-fly reconstruction from the in-focus knots via
+    :func:`reconstruct_track_depth`. In-focus points are scattered at their
+    measured depth. ``smoothing_factor`` and ``min_points_for_spline`` control
+    the fallback reconstruction.
+    """
     x_mm_col = FOCUS_X_MM_COLUMN
     y_mm_col = FOCUS_Y_MM_COLUMN
 
@@ -785,8 +893,22 @@ def plot_3d_reconstructed(
 
         x_vals = track_df[x_mm_col].values
         y_vals = track_df[y_mm_col].values
-        z_real = selected_df[z_col].mean()
-        z_line = np.full_like(x_vals, z_real, dtype=float)
+
+        # Depth line: prefer the persisted per-frame reconstruction so the figure
+        # matches the saved CSV; fall back to reconstructing from the in-focus
+        # knots if the column is absent (e.g. called in isolation).
+        if (FOCUS_Z_RECONSTRUCTED_COLUMN in track_df.columns
+                and track_df[FOCUS_Z_RECONSTRUCTED_COLUMN].notna().any()):
+            z_line = track_df[FOCUS_Z_RECONSTRUCTED_COLUMN].to_numpy(dtype=float)
+        else:
+            z_knots = selected_df.groupby(frame_col)[z_col].mean()
+            z_line = reconstruct_track_depth(
+                track_df[frame_col].to_numpy(dtype=float),
+                z_knots.index.to_numpy(dtype=float),
+                z_knots.to_numpy(dtype=float),
+                smoothing_factor,
+                min_points_for_spline
+            )
 
         color = cmap(idx % ncol)
         ax.plot(x_vals, y_vals, z_line, linewidth=2.0, alpha=0.8, color=color)
