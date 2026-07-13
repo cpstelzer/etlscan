@@ -11,6 +11,7 @@ import pandas as pd
 from src.stages.stage_02_characterization import (
     reconstruct_track_depth,
     add_reconstructed_depth,
+    attach_reconstructed_depth_to_subset,
     FOCUS_Z_RECONSTRUCTED_COLUMN,
 )
 
@@ -107,3 +108,33 @@ def test_add_reconstructed_depth_leaves_xy_unaltered():
     out = add_reconstructed_depth(comp, knots, _cfg())
     pd.testing.assert_series_equal(out['x_mm'], comp['x_mm'])
     pd.testing.assert_series_equal(out['y_mm'], comp['y_mm'])
+
+
+def test_attach_reconstructed_depth_to_subset_carries_column():
+    # per-frame table with reconstructed depth already computed
+    comp = pd.DataFrame([{'track_id': 1, 'frame': f, 'z_mm': np.nan} for f in range(10, 61)])
+    knots = pd.DataFrame([{'track_id': 1, 'frame': f, 'z_mm': z}
+                          for f, z in zip([10, 20, 30, 40, 50, 60],
+                                          [0.5, 0.9, 1.3, 1.8, 2.3, 2.8])])
+    comp = add_reconstructed_depth(comp, knots, _cfg())
+
+    subset = knots.copy()  # the in-focus selections, lacking the column
+    assert FOCUS_Z_RECONSTRUCTED_COLUMN not in subset.columns
+
+    out = attach_reconstructed_depth_to_subset(subset, comp, 'track_id', 'frame')
+
+    assert FOCUS_Z_RECONSTRUCTED_COLUMN in out.columns
+    assert len(out) == len(subset)
+    # subset values equal the per-frame reconstruction at those frames
+    check = out.merge(comp[['track_id', 'frame', FOCUS_Z_RECONSTRUCTED_COLUMN]],
+                      on=['track_id', 'frame'], suffixes=('_sub', '_comp'))
+    assert np.allclose(check[f'{FOCUS_Z_RECONSTRUCTED_COLUMN}_sub'],
+                       check[f'{FOCUS_Z_RECONSTRUCTED_COLUMN}_comp'])
+
+
+def test_attach_reconstructed_depth_noop_when_column_absent():
+    comp = pd.DataFrame({'track_id': [1], 'frame': [10], 'z_mm': [1.0]})  # no z_reconstructed
+    subset = pd.DataFrame({'track_id': [1], 'frame': [10]})
+    out = attach_reconstructed_depth_to_subset(subset, comp, 'track_id', 'frame')
+    assert FOCUS_Z_RECONSTRUCTED_COLUMN not in out.columns
+    assert len(out) == 1

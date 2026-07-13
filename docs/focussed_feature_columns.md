@@ -66,7 +66,7 @@ Boolean quality guards (`has_black_mask_artifact`, `is_on_crop_boundary`) are
 kept alongside these numeric features but are intentionally omitted from the
 numeric list above because they serve as filtering flags instead of ML inputs.
 
-## Stage 2 3D depth reconstruction (per-frame; not in this table)
+## Stage 2 3D depth reconstruction
 Stage 2 reconstructs a continuous per-frame depth for each track from the sparse
 in-focus `z_mm` measurements (the sharpness-peak frames), using a cubic smoothing
 spline (`reconstruct_track_depth`, controlled by
@@ -76,10 +76,13 @@ tracks receive a constant depth (their mean in-focus `z_mm`); the estimate is
 clamped to the measured frame span. This drives the
 `reconstructed_trajectories_3d.png` figure.
 
-- `z_reconstructed` — reconstructed depth (mm) at every frame of a track.
+- `z_reconstructed` — reconstructed depth (mm).
 
-It is written per frame to `<sample_id>_stage2_all_particle_features.csv`, **not**
-to `focussed_and_filtered.csv`: it is a per-frame trajectory quantity (one value
-per frame rather than per selected particle) and is deliberately kept out of the
-ML feature hand-off so it can never be picked up as a classifier input. Frames of
+It is written per frame to `<sample_id>_stage2_all_particle_features.csv`, and the
+value at each in-focus frame is also carried onto the selected particles
+(`attach_reconstructed_depth_to_subset`), so it appears in `filtered_in_focus.csv`,
+`final_particles.csv`, and — passed through Stage 3 — `focussed_and_filtered.csv`.
+It is a **pass-through column, not an ML feature**: it is absent from
+`BASE_NUMERIC_FEATURE_COLUMNS`, and Stage 3 reindexes each row to the trained
+model's feature list before scoring, so the classifier never sees it. Frames of
 tracks with no in-focus point are `NaN`.

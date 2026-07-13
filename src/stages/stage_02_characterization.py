@@ -145,6 +145,11 @@ def run_stage_02_characterization(
 
     # reconstruct continuous per-frame depth (z) from the sparse in-focus points
     comprehensive_df = add_reconstructed_depth(comprehensive_df, filtered_df, focus_cfg)
+    # carry that per-frame depth onto the in-focus selections so it also reaches
+    # filtered_in_focus.csv and final_particles.csv (a pass-through, not an ML feature)
+    filtered_df = attach_reconstructed_depth_to_subset(
+        filtered_df, comprehensive_df, track_col, focus_cfg.get('frame_column', 'frame')
+    )
 
     final_particles_df = pd.DataFrame()
     if filtered_df is not None and not filtered_df.empty:
@@ -842,6 +847,39 @@ def add_reconstructed_depth(
         result_df.loc[frames_sorted.index, FOCUS_Z_RECONSTRUCTED_COLUMN] = z_values
 
     return result_df
+
+
+def attach_reconstructed_depth_to_subset(
+    subset_df: pd.DataFrame,
+    comprehensive_df: pd.DataFrame,
+    track_col: str,
+    frame_col: str
+) -> pd.DataFrame:
+    """Copy the per-frame ``z_reconstructed`` value onto a subset of track rows.
+
+    :func:`add_reconstructed_depth` computes the depth once on the full per-frame
+    table; this matches a subset (e.g. the in-focus selections) to
+    ``comprehensive_df`` on ``(track_col, frame_col)`` so the reconstructed depth
+    travels onto the selected rows and therefore into ``filtered_in_focus.csv``
+    and ``final_particles.csv``. Returns ``subset_df`` unchanged when the column
+    or the key columns are unavailable.
+    """
+    if subset_df is None or subset_df.empty:
+        return subset_df
+    if FOCUS_Z_RECONSTRUCTED_COLUMN not in comprehensive_df.columns:
+        return subset_df
+    key_cols = {track_col, frame_col}
+    if not key_cols.issubset(subset_df.columns) or not key_cols.issubset(comprehensive_df.columns):
+        return subset_df
+
+    if FOCUS_Z_RECONSTRUCTED_COLUMN in subset_df.columns:
+        subset_df = subset_df.drop(columns=[FOCUS_Z_RECONSTRUCTED_COLUMN])
+
+    depth_lookup = (
+        comprehensive_df[[track_col, frame_col, FOCUS_Z_RECONSTRUCTED_COLUMN]]
+        .drop_duplicates(subset=[track_col, frame_col])
+    )
+    return subset_df.merge(depth_lookup, on=[track_col, frame_col], how='left')
 
 
 def plot_3d_reconstructed(
