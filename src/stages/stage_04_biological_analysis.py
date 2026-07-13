@@ -9,7 +9,7 @@ import skimage.measure
 from typing import Dict, Any, Optional, Tuple
 
 from src.utils import (
-    get_config, load_dataframe_from_csv, save_dataframe_to_csv
+    load_dataframe_from_csv, save_dataframe_to_csv
 )
 # --- MODIFIED: Import visualization tools ---
 from src.utils.config_loader import get_unified_segmentation_params
@@ -17,7 +17,7 @@ from src.visualization.feature_visualization import visualize_ml_features
 from src.utils.common_exceptions import ProcessingError
 from src.core.image_io_operations import load_image
 from src.core.segmentation import segment_main_body_from_image_float
-from src.core.ml_feature_extractor import _calculate_and_attach_posterior_attributes
+from src.core.feature_calculators.bio_features_calculator import calculate_posterior_attributes
 
 logger = logging.getLogger(__name__)
 
@@ -48,11 +48,11 @@ def perform_egg_analysis(
 
     egg_features['main_area_filled_s4'] = float(main_props.area)
 
-    egg_config = s4_config.get('egg_detection', {})
-    
-    egg_posterior_fraction = egg_config.get('egg_posterior_pixel_fraction', 0.45)
+    egg_config = s4_config['egg_detection']
+
+    egg_posterior_fraction = egg_config['egg_posterior_pixel_fraction']
     # Get main_props with posterior attributes attached for visualization
-    main_props_with_posterior, _, posterior_coords = _calculate_and_attach_posterior_attributes(
+    main_props_with_posterior, _, posterior_coords = calculate_posterior_attributes(
         main_props, crop_float.shape, egg_posterior_fraction
     )
 
@@ -62,12 +62,12 @@ def perform_egg_analysis(
 
     # Egg thresholding and filtering logic
     image_for_egg_detection = crop_float.copy()
-    if segmentation_params.get('source_image_illumination_type') == 'collimated':
+    if segmentation_params['source_image_illumination_type'] == 'collimated':
         image_for_egg_detection = 1.0 - image_for_egg_detection
 
-    egg_blurred = skimage.filters.gaussian(image_for_egg_detection, sigma=egg_config.get('gaussian_sigma', 1.0))
-    
-    quantile = egg_config.get('egg_threshold_quantile', 0.92)
+    egg_blurred = skimage.filters.gaussian(image_for_egg_detection, sigma=egg_config['gaussian_sigma'])
+
+    quantile = egg_config['egg_threshold_quantile']
     non_zero_pixels = egg_blurred[egg_blurred > 1e-6]
     if non_zero_pixels.size == 0:
         return egg_features, main_props_with_posterior, None
@@ -79,16 +79,16 @@ def perform_egg_analysis(
     valid_rows = np.clip(posterior_coords[:, 0].astype(int), 0, crop_float.shape[0] - 1)
     valid_cols = np.clip(posterior_coords[:, 1].astype(int), 0, crop_float.shape[1] - 1)
     posterior_pixel_mask[valid_rows, valid_cols] = True
-    
+
     egg_mask_constrained = egg_binary_mask & posterior_pixel_mask
     egg_labeled_mask = skimage.measure.label(egg_mask_constrained, connectivity=2)
-    
+
     egg_props_candidates = skimage.measure.regionprops(egg_labeled_mask, intensity_image=image_for_egg_detection)
 
     valid_eggs = []
     for p_egg in egg_props_candidates:
-        if (egg_config.get('egg_min_area', 50) <= p_egg.area <= egg_config.get('egg_max_area', 5000) and
-            egg_config.get('egg_min_solidity', 0.6) < p_egg.solidity < egg_config.get('egg_max_solidity', 0.99)):
+        if (egg_config['egg_min_area'] <= p_egg.area <= egg_config['egg_max_area'] and
+            egg_config['egg_min_solidity'] < p_egg.solidity < egg_config['egg_max_solidity']):
             valid_eggs.append(p_egg)
 
     best_egg_props = None
@@ -106,17 +106,16 @@ def run_stage_04_biological_analysis(
     stage3_crops_dir: str,
     output_dir_stage4: str,
     sample_id: str,
-    config: Optional[Dict[str, Any]] = None
+    config: Dict[str, Any]
 ) -> Optional[str]:
     """
     Performs final biological analysis and generates visualizations for each
     curated particle.
     """
     logger.info(f"--- Stage 4: Biological Analysis for Sample ID: {sample_id} ---")
-    
-    config = config or get_config()
-    s4_config = config.get('stage_04_biological_analysis', {})
-    egg_config = s4_config.get('egg_detection', {})
+
+    s4_config = config['stage_04_biological_analysis']
+    egg_config = s4_config['egg_detection']
 
     # --- MODIFIED: Get unified params for segmentation and visualization ---
     seg_params = get_unified_segmentation_params(config)

@@ -1,22 +1,25 @@
 # src/stages/stage_02_characterization.py
-import os
-import cv2
-import pandas as pd
-import numpy as np
-import logging
-import skimage.util
-import math
 import glob
-import matplotlib
+import logging
+import math
 import numbers
+import os
+from typing import Optional, List, Tuple, Dict, Any
+
+import cv2
+import matplotlib
+import numpy as np
+import pandas as pd
+import skimage.util
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 import matplotlib.image as mpimg
 from matplotlib.gridspec import GridSpecFromSubplotSpec
-from typing import Optional, List, Tuple, Dict, Any
+from scipy.signal import find_peaks
+from scipy.interpolate import UnivariateSpline
 
 from src.utils import (
-    get_config, load_dataframe_from_csv, save_dataframe_to_csv
+    load_dataframe_from_csv, save_dataframe_to_csv, build_crop_filename
 )
 from src.utils.config_loader import get_unified_segmentation_params
 from src.utils.path_helpers import extract_frame_from_filename
@@ -35,6 +38,7 @@ from src.core.feature_calculators.shape_descriptors import calculate_shape_descr
 logger = logging.getLogger(__name__)
 
 FOCUS_Z_COLUMN = 'z_mm'
+FOCUS_Z_RECONSTRUCTED_COLUMN = 'z_reconstructed'
 FOCUS_X_PIXEL_COLUMN = 'X'
 FOCUS_Y_PIXEL_COLUMN = 'Y'
 FOCUS_X_MM_COLUMN = 'x_mm'
@@ -46,40 +50,36 @@ def run_stage_02_characterization(
     image_dir_path: str,
     output_dir_stage2: str,
     sample_id: str,
-    config: Optional[Dict[str, Any]] = None
+    config: Dict[str, Any]
 ) -> Optional[str]:
     """
     Performs detailed characterization for every particle candidate from Stage 1
     using a modular feature calculator architecture.
     """
     logger.info(f"--- Stage 2: Universal Characterization for Sample ID: {sample_id} ---")
-    config = config or get_config()
-    s2_config = config.get('stage_02_characterization', {})
+    s2_config = config['stage_02_characterization']
     segmentation_params = get_unified_segmentation_params(config)
-    
+
     s1_particles_df = load_dataframe_from_csv(input_s1_csv_path)
     if s1_particles_df is None or s1_particles_df.empty:
         logger.warning(f"No particles loaded from Stage 1 CSV: {input_s1_csv_path}. Aborting Stage 2.")
         return None
 
-    cropping_config = s2_config.get('cropping', {})
-    if not cropping_config:
-        logger.warning("Cropping configuration not found in 'stage_02_characterization'. Using defaults.")
-        cropping_config = {'mode': 'rotational_rectangle', 'rotational_padding': 10}
+    cropping_config = s2_config['cropping']
 
     try:
         normalized_cropping = normalized_crop_config(cropping_config)
-        logger.info(f"Initialized ParticleCropper with mode: '{normalized_cropping.get('mode')}'")
+        logger.info(f"Initialized ParticleCropper with mode: '{normalized_cropping['mode']}'")
     except ConfigError as e:
         logger.error(f"Failed to initialize ParticleCropper: {e}")
         return None
 
     boundary_threshold_params = {
-        'thresholding_mode': segmentation_params.get('thresholding_mode', 'otsu'),
-        'otsu_threshold_multiplier': segmentation_params.get('otsu_threshold_multiplier', 0.45),
-        'fixed_threshold_value': segmentation_params.get('fixed_threshold_value', 70),
+        'thresholding_mode': segmentation_params['thresholding_mode'],
+        'otsu_threshold_multiplier': segmentation_params['otsu_threshold_multiplier'],
+        'fixed_threshold_value': segmentation_params['fixed_threshold_value'],
     }
-    illumination_mode = str(segmentation_params.get('source_image_illumination_type', 'darkfield')).strip().lower()
+    illumination_mode = str(segmentation_params['source_image_illumination_type']).strip().lower()
 
     s1_particles_df['s1_original_index'] = s1_particles_df.index
 
@@ -89,18 +89,18 @@ def run_stage_02_characterization(
         logger.info(f"Characterizing {len(group)} particles from image: {image_filename}")
         full_image_path = os.path.join(image_dir_path, image_filename)
         
-        main_img_color = load_image(full_image_path, mode='color')
-        main_img_gray = convert_to_grayscale(main_img_color)
+        main_image_color = load_image(full_image_path, mode='color')
+        main_image_gray = convert_to_grayscale(main_image_color)
 
-        if main_img_color is None or main_img_gray is None:
+        if main_image_color is None or main_image_gray is None:
             logger.warning(f"Failed to load image {full_image_path}. Skipping {len(group)} particles.")
             continue
 
         frame_num = extract_frame_from_filename(image_filename)
         crop_records.extend(
             crop_particles(
-                main_img_color,
-                main_img_gray,
+                main_image_color,
+                main_image_gray,
                 group,
                 normalized_cropping,
                 sample_id,
@@ -137,11 +137,19 @@ def run_stage_02_characterization(
     )
     comprehensive_df.drop(columns=['s1_original_index'], inplace=True, errors='ignore')
 
-    focus_cfg = s2_config.get('focussed_particles', {})
-    track_col = focus_cfg.get('track_column', 'track_id')
+    focus_cfg = s2_config['focussed_particles']
+    track_col = focus_cfg['track_column']
 
     # focus filter
     filtered_df, diagnostics_df = select_focused_tracks(comprehensive_df, focus_cfg)
+
+    # reconstruct continuous per-frame depth (z) from the sparse in-focus points
+    comprehensive_df = add_reconstructed_depth(comprehensive_df, filtered_df, focus_cfg)
+    # carry that per-frame depth onto the in-focus selections so it also reaches
+    # filtered_in_focus.csv and final_particles.csv (a pass-through, not an ML feature)
+    filtered_df = attach_reconstructed_depth_to_subset(
+        filtered_df, comprehensive_df, track_col, focus_cfg.get('frame_column', 'frame')
+    )
 
     final_particles_df = pd.DataFrame()
     if filtered_df is not None and not filtered_df.empty:
@@ -163,37 +171,16 @@ def run_stage_02_characterization(
         normalized_cropping,
         image_dir_path,
         focus_cfg,
-        bool(cropping_config.get('save_all_particle_crops', True)),
+        bool(cropping_config['save_all_particle_crops']),
     )
 
     logger.info(f"--- Stage 2: Characterization for {sample_id} COMPLETED ---")
     return saved_csv_path
 
 
-def build_crop_filename(
-    sample_id: str,
-    track_label: str,
-    frame_num: int,
-    x_value: Any,
-    y_value: Any
-) -> str:
-    """Assemble a descriptive filename for a particle crop using track and frame info."""
-    try:
-        x_int = int(x_value) if pd.notna(x_value) else 0
-    except (TypeError, ValueError):
-        x_int = 0
-
-    try:
-        y_int = int(y_value) if pd.notna(y_value) else 0
-    except (TypeError, ValueError):
-        y_int = 0
-
-    return f"{sample_id}_{track_label}_frame{frame_num}_X{x_int}_Y{y_int}.png"
-
-
 def crop_particles(
-    main_img_color: np.ndarray,
-    main_img_gray: np.ndarray,
+    main_image_color: np.ndarray,
+    main_image_gray: np.ndarray,
     particles_df: pd.DataFrame,
     crop_config: Dict[str, Any],
     sample_id: str,
@@ -216,23 +203,20 @@ def crop_particles(
         original_index = s1_particle_row['s1_original_index']
         track_label = _format_track_label(s1_particle_row, fallback_suffix=original_index)
 
-        crop_filename = build_crop_filename(
-            sample_id,
-            track_label,
-            frame_num,
-            s1_particle_row.get('X'),
-            s1_particle_row.get('Y')
-        )
+        x_raw, y_raw = s1_particle_row.get('X'), s1_particle_row.get('Y')
+        x_int = int(x_raw) if pd.notna(x_raw) else 0
+        y_int = int(y_raw) if pd.notna(y_raw) else 0
+        crop_filename = build_crop_filename(sample_id, track_label, frame_num, x_int, y_int)
 
         crop_gray, crop_metadata = crop_particle_from_arrays(
             crop_config,
-            main_img_color,
-            main_img_gray,
+            main_image_color,
+            main_image_gray,
             s1_particle_row
         )
 
         if crop_gray is None:
-            logger.warning("Failed to crop particle at index %s. Skipping.", original_index)
+            logger.warning(f"Failed to crop particle at index {original_index}. Skipping.")
             continue
 
         crop_identifier_for_logs = crop_filename or "unsaved_crop"
@@ -386,7 +370,7 @@ def save_all_particle_crops(
         try:
             cv2.imwrite(crop_path, crop_gray)
         except Exception as exc:  # noqa: BLE001
-            logger.error("Failed to save crop to %s: %s", crop_path, exc)
+            logger.error(f"Failed to save crop to {crop_path}: {exc}")
 
 
 def emit_focus_artifacts(
@@ -431,6 +415,17 @@ def emit_focus_artifacts(
             focus_cfg.get('frame_column', 'frame'),
             FOCUS_Z_COLUMN,
             os.path.join(focus_plots_dir, 'reconstructed_trajectories_3d.png'),
+            max_tracks,
+            focus_cfg.get('trajectory_smoothing_factor', 0.5),
+            focus_cfg.get('min_points_for_spline', 5)
+        )
+
+        plot_xy_reconstructed(
+            comprehensive_df,
+            filtered_df,
+            focus_cfg.get('track_column', 'track_id'),
+            focus_cfg.get('frame_column', 'frame'),
+            os.path.join(focus_plots_dir, 'reconstructed_trajectories_xy.png'),
             max_tracks
         )
 
@@ -515,40 +510,46 @@ def detect_peaks_in_track(
     sharp_col: str,
     focus_cfg: dict
 ) -> np.ndarray:
-    """Identify indices of sharpness peaks within a single track."""
-    smooth_window = max(1, int(focus_cfg.get('smooth_window', 3)))
+    """Identify positional indices of sharpness peaks within a single track.
+
+    Peaks are located with :func:`scipy.signal.find_peaks` on the raw (or, when
+    ``smooth_window > 1``, lightly smoothed) sharpness signal, gated by an
+    absolute height, a fraction of the track maximum, topographic prominence,
+    and a minimum inter-peak distance. Topographic prominence — unlike the
+    previous fixed ±5-frame median heuristic — does not collapse when peaks sit
+    close together, so the closely-spaced peaks produced by a fast focus sweep
+    are resolved correctly.
+
+    The returned indices are positional into ``track_df`` as passed; callers
+    must supply the track already sorted by frame (both current callers do).
+    """
+    smooth_window = max(1, int(focus_cfg.get('smooth_window', 1)))
     min_sharpness_frac = float(focus_cfg.get('min_sharpness_fraction', 0.3))
     min_prominence_frac = float(focus_cfg.get('min_prominence_fraction', 0.05))
     sharpness_min_threshold = float(focus_cfg.get('sharpness_min_threshold', 0))
+    min_peak_distance = max(1, int(focus_cfg.get('min_peak_distance_frames', 1)))
 
     sharp_series = pd.to_numeric(track_df[sharp_col], errors='coerce').fillna(0)
-    y = sharp_series.values
-    if len(y) == 0:
+    y = sharp_series.to_numpy(dtype=float)
+    if y.size == 0:
         return np.array([], dtype=int)
 
-    try:
-        max_val = np.nanmax(y)
-    except ValueError:
-        return np.array([], dtype=int)
+    max_val = np.nanmax(y)
     if not np.isfinite(max_val) or max_val <= 0:
         return np.array([], dtype=int)
 
-    threshold = min_sharpness_frac * max_val
-    smoothed = smooth_series(pd.Series(y), smooth_window)
-    peaks: List[int] = []
+    signal = smooth_series(pd.Series(y), smooth_window) if smooth_window > 1 else y
 
-    for i in range(1, len(smoothed) - 1):
-        if (
-            smoothed[i] > smoothed[i - 1]
-            and smoothed[i] > smoothed[i + 1]
-            and smoothed[i] >= threshold
-            and smoothed[i] >= sharpness_min_threshold
-        ):
-            local_window = smoothed[max(0, i - 5):min(len(smoothed), i + 6)]
-            prominence = smoothed[i] - np.median(local_window)
-            if prominence >= min_prominence_frac * max_val:
-                peaks.append(i)
-    return np.array(peaks, dtype=int)
+    height_threshold = max(sharpness_min_threshold, min_sharpness_frac * max_val)
+    prominence_threshold = min_prominence_frac * max_val
+
+    peaks, _ = find_peaks(
+        signal,
+        height=height_threshold,
+        prominence=prominence_threshold,
+        distance=min_peak_distance,
+    )
+    return peaks.astype(int)
 
 
 def filter_focused_frames(
@@ -604,19 +605,30 @@ def plot_track_with_collage(
 
     peak_idx = detect_peaks_in_track(track_df, sharp_col, focus_cfg)
 
-    fig = plt.figure(figsize=(10, 10))
+    fig = plt.figure(figsize=(16, 14))
     grid_spec = fig.add_gridspec(2, 1, height_ratios=[2, 1])
     ax_sharpness = fig.add_subplot(grid_spec[0])
 
-    ax_sharpness.plot(track_df[frame_col], track_df[sharp_col], color='tab:blue', linewidth=1.2)
-    ax_sharpness.set_xlabel('Frame')
-    ax_sharpness.set_ylabel('Sharpness', color='tab:blue')
+    ax_sharpness.plot(track_df[frame_col], track_df[sharp_col], color='tab:blue', linewidth=3.0)
+    detection_smooth_window = max(1, int(focus_cfg.get('smooth_window', 1)))
+    if detection_smooth_window > 1:
+        smoothed_for_plot = smooth_series(
+            pd.to_numeric(track_df[sharp_col], errors='coerce').fillna(0),
+            detection_smooth_window
+        )
+        ax_sharpness.plot(
+            track_df[frame_col], smoothed_for_plot,
+            color='tab:blue', linewidth=1.5, linestyle='--', alpha=0.7
+        )
+    ax_sharpness.set_xlabel('Frame', fontsize=20, fontweight='bold')
+    ax_sharpness.set_ylabel('Sharpness', color='tab:blue', fontsize=20, fontweight='bold')
+    ax_sharpness.tick_params(axis='both', labelsize=16, width=1.5, length=6)
     ax_sharpness.tick_params(axis='y', labelcolor='tab:blue')
 
     ax_z = ax_sharpness.twinx()
-    ax_z.plot(track_df[frame_col], track_df[z_col], color='tab:orange', linewidth=1.0)
-    ax_z.set_ylabel('z_mm', color='tab:orange')
-    ax_z.tick_params(axis='y', labelcolor='tab:orange')
+    ax_z.plot(track_df[frame_col], track_df[z_col], color='tab:orange', linewidth=3.0)
+    ax_z.set_ylabel('z_mm', color='tab:orange', fontsize=20, fontweight='bold')
+    ax_z.tick_params(axis='y', labelsize=16, labelcolor='tab:orange', width=1.5, length=6)
 
     maxima_frames: List[Tuple[int, int, Optional[int], Optional[int]]] = []
     x_pix_col = FOCUS_X_PIXEL_COLUMN
@@ -624,7 +636,11 @@ def plot_track_with_collage(
 
     for idx, peak_position in enumerate(peak_idx):
         peak_row = track_df.iloc[peak_position]
-        ax_z.scatter(peak_row[frame_col], peak_row[z_col], color='red', marker='o', s=40, zorder=5)
+        ax_z.scatter(
+            peak_row[frame_col], peak_row[z_col],
+            color='red', marker='o', s=140, zorder=5,
+            edgecolors='black', linewidths=1.5
+        )
         offset_x = 2
         offset_y = 0.02 * (track_df[z_col].max() - track_df[z_col].min() + 1e-9)
         ax_z.text(
@@ -632,14 +648,19 @@ def plot_track_with_collage(
             peak_row[z_col] + offset_y,
             str(idx + 1),
             color='black',
-            fontsize=8
+            fontsize=16,
+            fontweight='bold'
         )
 
         x_pix_val = peak_row.get(x_pix_col, np.nan)
         y_pix_val = peak_row.get(y_pix_col, np.nan)
         maxima_frames.append((idx + 1, int(peak_row[frame_col]), x_pix_val, y_pix_val))
 
-    ax_sharpness.set_title(f'Track {track_id} (length={len(track_df)})')
+    ax_sharpness.set_title(
+        f'Track {track_id} (length={len(track_df)})',
+        fontsize=24,
+        fontweight='bold'
+    )
 
     ax_collage = fig.add_subplot(grid_spec[1])
     ax_collage.axis('off')
@@ -678,17 +699,21 @@ def plot_track_with_collage(
                 10,
                 str(label),
                 color='yellow',
-                fontsize=10,
+                fontsize=18,
+                fontweight='bold',
                 ha='left',
                 va='top',
-                bbox=dict(facecolor='black', alpha=0.5, boxstyle='round')
+                bbox=dict(facecolor='black', alpha=0.6, boxstyle='round')
             )
     else:
-        ax_collage.text(0.5, 0.5, 'No crop images available', ha='center', va='center')
+        ax_collage.text(
+            0.5, 0.5, 'No crop images available',
+            ha='center', va='center', fontsize=20, fontweight='bold'
+        )
 
     plt.tight_layout()
     try:
-        plt.savefig(outpath, dpi=150)
+        plt.savefig(outpath, dpi=200, bbox_inches='tight')
         if FOCUS_SHOW_PLOTS:
             plt.show()
     finally:
@@ -733,6 +758,130 @@ def plot_example_tracks_with_collages(
     return saved_paths
 
 
+def reconstruct_track_depth(
+    frames: np.ndarray,
+    knot_frames: np.ndarray,
+    knot_z: np.ndarray,
+    smoothing_factor: float,
+    min_points_for_spline: int
+) -> np.ndarray:
+    """Estimate per-frame depth (z) along a track from sparse in-focus measurements.
+
+    For tracks with at least ``min_points_for_spline`` in-focus points a cubic
+    smoothing spline (:class:`scipy.interpolate.UnivariateSpline`) is fitted to
+    the measured ``(knot_frames, knot_z)`` pairs and evaluated at every frame,
+    clamped to the measured frame span to avoid extrapolation artefacts. The
+    smoothing budget ``s = smoothing_factor * m * Var(z)`` (m = number of knots)
+    is scaled by the spread of z, making ``smoothing_factor`` unitless and
+    data-scale independent (0 interpolates, larger smooths more). Shorter tracks
+    lack support for a meaningful spline and are assigned a constant depth equal
+    to the mean of their in-focus measurements. Returns an array aligned with
+    ``frames`` (all NaN when there are no knots).
+    """
+    frames = np.asarray(frames, dtype=float)
+    knot_frames = np.asarray(knot_frames, dtype=float)
+    knot_z = np.asarray(knot_z, dtype=float)
+
+    if knot_z.size == 0:
+        return np.full(frames.shape, np.nan, dtype=float)
+
+    if knot_z.size >= min_points_for_spline and knot_z.size >= 2:
+        spline = UnivariateSpline(
+            knot_frames,
+            knot_z,
+            k=min(3, knot_z.size - 1),
+            s=smoothing_factor * knot_z.size * float(np.var(knot_z))
+        )
+        frame_eval = np.clip(frames, knot_frames[0], knot_frames[-1])
+        return spline(frame_eval)
+
+    return np.full(frames.shape, float(np.mean(knot_z)), dtype=float)
+
+
+def add_reconstructed_depth(
+    comprehensive_df: pd.DataFrame,
+    filtered_df: Optional[pd.DataFrame],
+    focus_cfg: Dict[str, Any]
+) -> pd.DataFrame:
+    """Attach a per-frame ``z_reconstructed`` column to the Stage-2 feature table.
+
+    The in-focus selections (``filtered_df``) provide sparse depth knots; depth
+    between them is reconstructed per track with :func:`reconstruct_track_depth`
+    and evaluated at every frame of the track. In-plane (x, y) coordinates are
+    left unaltered. When focus analysis produced no selections, or required
+    columns are missing, the input is returned unchanged (no column added).
+    """
+    if filtered_df is None or filtered_df.empty:
+        return comprehensive_df
+
+    track_col = focus_cfg.get('track_column', 'track_id')
+    frame_col = focus_cfg.get('frame_column', 'frame')
+    z_col = FOCUS_Z_COLUMN
+    smoothing_factor = float(focus_cfg.get('trajectory_smoothing_factor', 0.5))
+    min_points_for_spline = int(focus_cfg.get('min_points_for_spline', 5))
+
+    required = {track_col, frame_col, z_col}
+    if not required.issubset(comprehensive_df.columns) or not required.issubset(filtered_df.columns):
+        missing = required - (set(comprehensive_df.columns) & set(filtered_df.columns))
+        logger.warning("Skipping z reconstruction; required columns missing: %s", ', '.join(sorted(missing)))
+        return comprehensive_df
+
+    result_df = comprehensive_df.copy()
+    result_df[FOCUS_Z_RECONSTRUCTED_COLUMN] = np.nan
+    knots_by_track = filtered_df.groupby(track_col)
+
+    for tid, track_group in result_df.groupby(track_col):
+        if tid not in knots_by_track.groups:
+            continue
+        z_knots = knots_by_track.get_group(tid).groupby(frame_col)[z_col].mean()
+        if z_knots.empty:
+            continue
+        frames_sorted = track_group.sort_values(frame_col)
+        z_values = reconstruct_track_depth(
+            frames_sorted[frame_col].to_numpy(dtype=float),
+            z_knots.index.to_numpy(dtype=float),
+            z_knots.to_numpy(dtype=float),
+            smoothing_factor,
+            min_points_for_spline
+        )
+        result_df.loc[frames_sorted.index, FOCUS_Z_RECONSTRUCTED_COLUMN] = z_values
+
+    return result_df
+
+
+def attach_reconstructed_depth_to_subset(
+    subset_df: pd.DataFrame,
+    comprehensive_df: pd.DataFrame,
+    track_col: str,
+    frame_col: str
+) -> pd.DataFrame:
+    """Copy the per-frame ``z_reconstructed`` value onto a subset of track rows.
+
+    :func:`add_reconstructed_depth` computes the depth once on the full per-frame
+    table; this matches a subset (e.g. the in-focus selections) to
+    ``comprehensive_df`` on ``(track_col, frame_col)`` so the reconstructed depth
+    travels onto the selected rows and therefore into ``filtered_in_focus.csv``
+    and ``final_particles.csv``. Returns ``subset_df`` unchanged when the column
+    or the key columns are unavailable.
+    """
+    if subset_df is None or subset_df.empty:
+        return subset_df
+    if FOCUS_Z_RECONSTRUCTED_COLUMN not in comprehensive_df.columns:
+        return subset_df
+    key_cols = {track_col, frame_col}
+    if not key_cols.issubset(subset_df.columns) or not key_cols.issubset(comprehensive_df.columns):
+        return subset_df
+
+    if FOCUS_Z_RECONSTRUCTED_COLUMN in subset_df.columns:
+        subset_df = subset_df.drop(columns=[FOCUS_Z_RECONSTRUCTED_COLUMN])
+
+    depth_lookup = (
+        comprehensive_df[[track_col, frame_col, FOCUS_Z_RECONSTRUCTED_COLUMN]]
+        .drop_duplicates(subset=[track_col, frame_col])
+    )
+    return subset_df.merge(depth_lookup, on=[track_col, frame_col], how='left')
+
+
 def plot_3d_reconstructed(
     df: pd.DataFrame,
     filtered_df: pd.DataFrame,
@@ -740,9 +889,19 @@ def plot_3d_reconstructed(
     frame_col: str,
     z_col: str,
     outpath: str,
-    n_tracks: Optional[int]
+    n_tracks: Optional[int],
+    smoothing_factor: float,
+    min_points_for_spline: int
 ) -> Optional[str]:
-    """Render 3D trajectories showing selected in-focus points for each track."""
+    """Render 3D trajectories with a spline-reconstructed depth profile per track.
+
+    The trajectory line follows a continuous depth estimate: the precomputed
+    ``z_reconstructed`` column when present (so the figure matches the saved
+    CSV), otherwise an on-the-fly reconstruction from the in-focus knots via
+    :func:`reconstruct_track_depth`. In-focus points are scattered at their
+    measured depth. ``smoothing_factor`` and ``min_points_for_spline`` control
+    the fallback reconstruction.
+    """
     x_mm_col = FOCUS_X_MM_COLUMN
     y_mm_col = FOCUS_Y_MM_COLUMN
 
@@ -757,7 +916,7 @@ def plot_3d_reconstructed(
         return None
 
     from mpl_toolkits.mplot3d import Axes3D  # noqa: F401
-    fig = plt.figure(figsize=(10, 8))
+    fig = plt.figure(figsize=(12, 10))
     ax = fig.add_subplot(111, projection='3d')
 
     cmap = plt.get_cmap('tab20')
@@ -772,20 +931,34 @@ def plot_3d_reconstructed(
 
         x_vals = track_df[x_mm_col].values
         y_vals = track_df[y_mm_col].values
-        z_real = selected_df[z_col].mean()
-        z_line = np.full_like(x_vals, z_real, dtype=float)
+
+        # Depth line: prefer the persisted per-frame reconstruction so the figure
+        # matches the saved CSV; fall back to reconstructing from the in-focus
+        # knots if the column is absent (e.g. called in isolation).
+        if (FOCUS_Z_RECONSTRUCTED_COLUMN in track_df.columns
+                and track_df[FOCUS_Z_RECONSTRUCTED_COLUMN].notna().any()):
+            z_line = track_df[FOCUS_Z_RECONSTRUCTED_COLUMN].to_numpy(dtype=float)
+        else:
+            z_knots = selected_df.groupby(frame_col)[z_col].mean()
+            z_line = reconstruct_track_depth(
+                track_df[frame_col].to_numpy(dtype=float),
+                z_knots.index.to_numpy(dtype=float),
+                z_knots.to_numpy(dtype=float),
+                smoothing_factor,
+                min_points_for_spline
+            )
 
         color = cmap(idx % ncol)
-        ax.plot(x_vals, y_vals, z_line, linewidth=0.8, alpha=0.7, color=color)
+        ax.plot(x_vals, y_vals, z_line, linewidth=2.0, alpha=0.8, color=color)
         ax.scatter(
             selected_df[x_mm_col].values,
             selected_df[y_mm_col].values,
             selected_df[z_col].values,
             marker='o',
-            s=18,
+            s=45,
             color=color,
             edgecolor='k',
-            linewidth=0.3
+            linewidth=0.6
         )
         plotted += 1
 
@@ -793,10 +966,91 @@ def plot_3d_reconstructed(
         plt.close(fig)
         return None
 
-    ax.set_xlabel(x_mm_col)
-    ax.set_ylabel(y_mm_col)
-    ax.set_zlabel(z_col)
-    ax.set_title(f'Reconstructed trajectories of {plotted} tracks')
+    ax.set_xlabel('x [mm]', fontsize=20, labelpad=18)
+    ax.set_ylabel('y [mm]', fontsize=20, labelpad=18)
+    ax.set_zlabel('z [mm]', fontsize=20, labelpad=18)
+    ax.tick_params(axis='both', which='major', labelsize=14)
+    ax.set_title(f'Reconstructed trajectories of {plotted} tracks', fontsize=22)
+    plt.tight_layout()
+    try:
+        plt.savefig(outpath, dpi=200)
+    finally:
+        plt.close(fig)
+
+    return outpath
+
+
+def plot_xy_reconstructed(
+    df: pd.DataFrame,
+    filtered_df: pd.DataFrame,
+    track_col: str,
+    frame_col: str,
+    outpath: str,
+    n_tracks: Optional[int]
+) -> Optional[str]:
+    """Render the flat XY projection of the reconstructed trajectories.
+
+    Companion to :func:`plot_3d_reconstructed`, plotting the exact same tracks
+    and in-focus selections on the true XY plane. The 3D view is subject to
+    perspective distortion (a point's screen position depends on its Z and on
+    auto-scaled axis limits), which can make the XY layout look shifted versus
+    Stage 1; this projection removes that ambiguity so the two stages can be
+    compared point-for-point.
+    """
+    x_mm_col = FOCUS_X_MM_COLUMN
+    y_mm_col = FOCUS_Y_MM_COLUMN
+
+    if x_mm_col not in df.columns or y_mm_col not in df.columns:
+        logger.debug('Skipping XY plot because x_mm/y_mm columns are missing.')
+        return None
+
+    track_lengths = df.groupby(track_col)[frame_col].count().sort_values(ascending=False)
+    track_ids = track_lengths.index if n_tracks is None else track_lengths.index[:n_tracks]
+
+    if track_lengths.empty:
+        return None
+
+    fig = plt.figure(figsize=(10, 10))
+    ax = fig.add_subplot(111)
+
+    cmap = plt.get_cmap('tab20')
+    ncol = max(1, min(20, len(track_ids)))
+    plotted = 0
+
+    for idx, tid in enumerate(track_ids):
+        track_df = df[df[track_col] == tid].sort_values(frame_col)
+        selected_df = filtered_df[filtered_df[track_col] == tid]
+        if track_df.empty or selected_df.empty:
+            continue
+
+        color = cmap(idx % ncol)
+        ax.plot(
+            track_df[x_mm_col].values,
+            track_df[y_mm_col].values,
+            linewidth=2.0,
+            alpha=0.8,
+            color=color
+        )
+        ax.scatter(
+            selected_df[x_mm_col].values,
+            selected_df[y_mm_col].values,
+            marker='o',
+            s=45,
+            color=color,
+            edgecolor='k',
+            linewidth=0.6
+        )
+        plotted += 1
+
+    if plotted == 0:
+        plt.close(fig)
+        return None
+
+    ax.set_xlabel('x [mm]', fontsize=20, labelpad=10)
+    ax.set_ylabel('y [mm]', fontsize=20, labelpad=10)
+    ax.tick_params(axis='both', which='major', labelsize=14)
+    ax.set_aspect('equal', adjustable='datalim')
+    ax.set_title(f'Reconstructed XY trajectories of {plotted} tracks', fontsize=22)
     plt.tight_layout()
     try:
         plt.savefig(outpath, dpi=200)
@@ -876,7 +1130,7 @@ def select_final_particles_by_area(
     valid_df = working_df.dropna(subset=[track_col, '_area_numeric'])
 
     if valid_df.empty:
-        logger.info('No valid rows with both track id and %s for final particle selection.', area_col)
+        logger.info(f"No valid rows with both track id and {area_col!r} for final particle selection.")
         return pd.DataFrame(columns=filtered_df.columns)
 
     idx = valid_df.groupby(track_col)['_area_numeric'].idxmax()
@@ -932,32 +1186,29 @@ def crop_and_save_final_particle_images(
             continue
 
         full_image_path = os.path.join(image_dir_path, image_filename)
-        main_img_color = load_image(full_image_path, mode='color')
-        main_img_gray = convert_to_grayscale(main_img_color)
+        main_image_color = load_image(full_image_path, mode='color')
+        main_image_gray = convert_to_grayscale(main_image_color)
 
-        if main_img_color is None or main_img_gray is None:
-            logger.warning('Failed to load image %s for final particle crops.', full_image_path)
+        if main_image_color is None or main_image_gray is None:
+            logger.warning(f"Failed to load image {full_image_path} for final particle crops.")
             continue
 
         frame_num = extract_frame_from_filename(image_filename)
         if frame_num is None:
-            logger.warning('Could not parse frame from filename %s for final particle crops.', image_filename)
+            logger.warning(f"Could not parse frame from filename {image_filename} for final particle crops.")
             continue
 
         for idx, row in group.iterrows():
             track_label = _format_track_label(row, fallback_suffix=idx)
-            crop_filename = build_crop_filename(
-                sample_id,
-                track_label,
-                frame_num,
-                row.get('X'),
-                row.get('Y')
-            )
+            x_raw, y_raw = row.get('X'), row.get('Y')
+            x_int = int(x_raw) if pd.notna(x_raw) else 0
+            y_int = int(y_raw) if pd.notna(y_raw) else 0
+            crop_filename = build_crop_filename(sample_id, track_label, frame_num, x_int, y_int)
 
             crop_gray, _ = crop_particle_from_arrays(
                 crop_config,
-                main_img_color,
-                main_img_gray,
+                main_image_color,
+                main_image_gray,
                 row
             )
 

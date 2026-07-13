@@ -1,20 +1,20 @@
 # src/stages/stage_01_initial_detection.py
+import logging
 import os
 import re
-import cv2
-import pandas as pd
-import numpy as np
-import logging
 from typing import Union, Optional, List, Dict, Any, Tuple
-from sklearn.neighbors import BallTree
-import shutil
-import skimage.util
-import skimage.filters
-import trackpy as tp
+
+import cv2
 import matplotlib.pyplot as plt
+import numpy as np
+import pandas as pd
+import skimage.filters
+import skimage.util
+import trackpy as tp
+from sklearn.neighbors import BallTree
 
 from src.utils import (
-    get_config, load_dataframe_from_csv, save_dataframe_to_csv,
+    load_dataframe_from_csv, save_dataframe_to_csv,
     parse_date_plate_well, extract_frame_from_filename
 )
 from src.utils.common_exceptions import ProcessingError, ConfigError, DataValidationError
@@ -26,7 +26,7 @@ from src.core.image_io_operations import (
 from src.core.image_enhancement import subtract_images, apply_blur
 from src.core.masking_operations import mask_well_area, apply_mask
 from src.core.region_props_calculator import find_contours, calculate_contour_measurements, filter_contours_by_area
-from src.core.segmentation import generate_binary_mask_from_float_image
+from src.core.segmentation import generate_binary_mask_from_float_image, assess_subtracted_foreground
 from src.core.well_analysis import (
     create_well_mask_black_plate,
     match_well_brightness
@@ -106,16 +106,26 @@ def analyze_subtracted_image(
     particle_analysis_config: Dict[str, Any],
     global_threshold_config: Dict[str, Any],
     sample_id: str,
-    source_filename: str
+    source_filename: str,
+    subtracted_foreground_config: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
-    """Find particles on the subtracted image and return structured results."""
+    """Find particles on the subtracted image and return structured results.
+
+    ``subtracted_foreground_config`` (shared FG/BG gate, from system.subtracted_foreground)
+    applies a fixed foreground floor and a max-foreground-fraction guard via
+    :func:`assess_subtracted_foreground`. This is the single place where both the batch and
+    realtime pipelines evaluate that gate. On a failed subtraction the result carries
+    ``subtraction_failed=True`` and no candidates.
+    """
+    empty_result = {
+        "particles": [],
+        "particles_df": pd.DataFrame(),
+        "binary_mask": None,
+        "masked_subtracted_image": None,
+        "subtraction_failed": False,
+    }
     if subtracted_img_uint8 is None:
-        return {
-            "particles": [],
-            "particles_df": pd.DataFrame(),
-            "binary_mask": None,
-            "masked_subtracted_image": None,
-        }
+        return empty_result
 
     masked_subtracted_img_uint8 = (
         apply_mask(subtracted_img_uint8, well_mask_uint8)
@@ -123,10 +133,38 @@ def analyze_subtracted_image(
         else subtracted_img_uint8
     )
 
+    # Shared FG/BG foreground gate: a fixed floor Otsu may tighten but not fall below, plus a
+    # guard that rejects the whole frame when the subtraction failed (flood of false positives).
+    foreground_floor_mask = None
+    if subtracted_foreground_config:
+        well_area_px = (
+            int(np.count_nonzero(well_mask_uint8)) if well_mask_uint8 is not None
+            else int(masked_subtracted_img_uint8.size)
+        )
+        foreground_floor_mask, foreground_fraction, subtraction_failed = assess_subtracted_foreground(
+            masked_subtracted_img_uint8,
+            int(subtracted_foreground_config['foreground_diff_threshold']),
+            float(subtracted_foreground_config['max_foreground_fraction']),
+            area_px=well_area_px,
+        )
+        if subtraction_failed:
+            logger.warning(
+                "S1 Subtracted: foreground fraction %.3f exceeds %.3f of the well area; treating the "
+                "FG/BG subtraction as failed and emitting no candidates for this frame.",
+                foreground_fraction, float(subtracted_foreground_config['max_foreground_fraction']),
+            )
+            return {
+                **empty_result,
+                "binary_mask": foreground_floor_mask.astype(np.uint8) * 255,
+                "masked_subtracted_image": masked_subtracted_img_uint8,
+                "subtraction_failed": True,
+            }
+
     particles_subtracted_list_dicts, binary_mask_display_uint8 = _analyze_single_subtracted_image_global_thresh(
         masked_subtracted_img_uint8,
         particle_analysis_config,
-        global_threshold_config
+        global_threshold_config,
+        foreground_floor_mask=foreground_floor_mask,
     )
     df_subtracted_particles = pd.DataFrame(particles_subtracted_list_dicts)
     if not df_subtracted_particles.empty:
@@ -138,13 +176,14 @@ def analyze_subtracted_image(
         "particles_df": df_subtracted_particles,
         "binary_mask": binary_mask_display_uint8,
         "masked_subtracted_image": masked_subtracted_img_uint8,
+        "subtraction_failed": False,
     }
 
 
 def refine_with_local_otsu(
     unsub_prepared_uint8: np.ndarray,
     candidate_particles: Union[List[Dict[str, Any]], pd.DataFrame],
-    roi_crop_size: int,
+    adaptive_padding_factor: float,
     analysis_config: Dict[str, Any],
     global_threshold_config: Dict[str, Any],
     source_illumination: str
@@ -157,7 +196,7 @@ def refine_with_local_otsu(
     particles_unsubtracted_list_dicts, composite_binary_mask_full_image, roi_debug = _analyze_unsubtracted_locally(
         unsub_prepared_uint8,
         candidate_records,
-        roi_crop_size,
+        adaptive_padding_factor,
         analysis_config,
         global_threshold_config,
         source_illumination
@@ -176,7 +215,7 @@ def process_frame_pair(
     fg_row: pd.Series,
     bg_row: pd.Series,
     config: Dict[str, Any],
-    ffc_assets,
+    ffc_assets: Optional[Any],
     masks: Optional[Dict[str, Any]] = None
 ) -> pd.DataFrame:
     """Process a FG/BG pair and return fused particle detections."""
@@ -189,15 +228,12 @@ def process_frame_pair(
         logger.warning(f"Could not load FG ({fg_filepath}) or BG ({bg_filepath}). Skipping pair.")
         return pd.DataFrame()
 
-    # Correct both frames for uneven lighting before any masking, subtraction, or thresholding.
-    # This makes intensity comparisons more reliable across the full field of view.
-    fg_img_float = apply_flat_field_correction(fg_img, ffc_assets)
-    bg_img_float = apply_flat_field_correction(bg_img, ffc_assets)
-
-    # Convert corrected [0, 1] floats back to uint8 because Stage 1 helpers below
-    # (masking, subtraction, and local Otsu routines) currently expect uint8 images.
-    fg_img_ffc = np.round(fg_img_float * 255.0).astype(np.uint8)
-    bg_img_ffc = np.round(bg_img_float * 255.0).astype(np.uint8)
+    if ffc_assets is not None:
+        fg_img_ffc = np.round(apply_flat_field_correction(fg_img, ffc_assets) * 255.0).astype(np.uint8)
+        bg_img_ffc = np.round(apply_flat_field_correction(bg_img, ffc_assets) * 255.0).astype(np.uint8)
+    else:
+        fg_img_ffc = fg_img
+        bg_img_ffc = bg_img
 
     prep_data = prepare_masked_foreground(
         fg_img_ffc,
@@ -221,15 +257,17 @@ def process_frame_pair(
         config.get('particle_analysis_subtracted_config', {}),
         config.get('global_threshold_config', {}),
         config.get('sample_id', 'UNKNOWN_SAMPLE'),
-        fg_row.get('filename', 'UNKNOWN_FILE')
+        fg_row.get('filename', 'UNKNOWN_FILE'),
+        subtracted_foreground_config=config.get('subtracted_foreground_config'),
     )
+    unsubtracted_cfg = config['unsubtracted_analysis_config']
     unsub_analysis = refine_with_local_otsu(
         prep_data["unsub_prepared"],
         sub_analysis["particles_df"],
-        config.get('local_otsu_roi_size', 150),
-        config.get('unsubtracted_analysis_config', {}),
-        config.get('global_threshold_config', {}),
-        config.get('source_image_illumination', 'darkfield')
+        float(unsubtracted_cfg['adaptive_padding_factor']),
+        unsubtracted_cfg,
+        config['global_threshold_config'],
+        config['source_image_illumination']
     )
     # Fuse subtracted and unsubtracted detections to keep confident matches.
     fused_df_frame = _compare_and_fuse_particle_dfs(
@@ -370,12 +408,18 @@ def _determine_bg_offset_for_fg_bg_pairs(
     )
     return fallback_offset
 
-def _analyze_single_subtracted_image_global_thresh( # Unchanged
+def _analyze_single_subtracted_image_global_thresh(
     image_to_analyze_gray_uint8: np.ndarray,
     config_stage1_particle_analysis: Dict[str, Any],
-    global_threshold_config: Dict[str, Any]
+    global_threshold_config: Dict[str, Any],
+    foreground_floor_mask: Optional[np.ndarray] = None,
 ) -> Tuple[List[Dict[str, Any]], Optional[np.ndarray]]:
-    """Detect particles on a subtracted frame using global thresholding settings."""
+    """Detect particles on a subtracted frame using global thresholding settings.
+
+    ``foreground_floor_mask`` (from :func:`assess_subtracted_foreground`) is ANDed into the
+    Otsu mask so the detection cannot fall below the shared fixed foreground floor. The
+    subtraction-failed guard is applied upstream in :func:`analyze_subtracted_image`.
+    """
     particles_data = []; binary_mask_display_uint8 = None
     if image_to_analyze_gray_uint8 is None: return particles_data, binary_mask_display_uint8
     processed_img_uint8 = image_to_analyze_gray_uint8.copy()
@@ -387,9 +431,11 @@ def _analyze_single_subtracted_image_global_thresh( # Unchanged
             if conv_kernel.ndim == 2 and conv_kernel.shape[0] > 0: processed_img_uint8 = cv2.filter2D(processed_img_uint8, -1, conv_kernel); logger.debug("S1 Subtracted: Applied convolution.")
         except Exception as e: logger.error(f"S1 Sub Conv Error: {e}")
     img_float_for_segment = skimage.util.img_as_float(processed_img_uint8)
-    binary_mask_bool = generate_binary_mask_from_float_image(img_float_for_segment, global_threshold_config)
-    if binary_mask_bool is None: logger.error("S1 Subtracted: Failed to generate binary mask via helper."); return particles_data, binary_mask_display_uint8
-    binary_mask_uint8 = binary_mask_bool.astype(np.uint8) * 255; binary_mask_display_uint8 = binary_mask_uint8.copy()
+    binary_mask = generate_binary_mask_from_float_image(img_float_for_segment, global_threshold_config)
+    if binary_mask is None: logger.error("S1 Subtracted: Failed to generate binary mask via helper."); return particles_data, binary_mask_display_uint8
+    if foreground_floor_mask is not None:
+        binary_mask = binary_mask & foreground_floor_mask
+    binary_mask_uint8 = binary_mask.astype(np.uint8) * 255; binary_mask_display_uint8 = binary_mask_uint8.copy()
     img_for_contours = binary_mask_uint8
     blur_kernel_size_sub_binary = config_stage1_particle_analysis.get('microorganism_blur_kernel', 0)
     if blur_kernel_size_sub_binary > 0 and blur_kernel_size_sub_binary % 2 == 1:
@@ -397,16 +443,38 @@ def _analyze_single_subtracted_image_global_thresh( # Unchanged
         if blurred_binary is not None: img_for_contours = blurred_binary; logger.debug(f"S1 Subtracted: Applied blur (kernel {blur_kernel_size_sub_binary}) to binary mask.")
     contours = find_contours(img_for_contours, mode="external", method="simple")
     if not contours: logger.debug("S1 Subtracted: No contours found after thresholding/blur."); return particles_data, binary_mask_display_uint8
-    min_area = config_stage1_particle_analysis.get('min_microorganism_area', 50)
+    min_area = config_stage1_particle_analysis['min_microorganism_area']
     valid_contours = filter_contours_by_area(contours, min_area)
     particles_data = [m for cnt in valid_contours if (m := calculate_contour_measurements(cnt))]
     logger.debug(f"S1 Subtracted: Found {len(particles_data)} particles after area filter.")
     return particles_data, binary_mask_display_uint8
 
-def _analyze_unsubtracted_locally( # Unchanged
+def _suppress_roi_background(
+    roi_signal_float: np.ndarray,
+    background_floor_percentile: float,
+) -> np.ndarray:
+    """Shift a bright-particle-on-background ROI so its background floor sits at ~0.
+
+    The local refinement thresholds at ``Otsu * otsu_threshold_multiplier`` with a
+    multiplier < 1. That only behaves when the background floor is already near zero
+    -- true on the background-subtracted frame, but NOT on the unsubtracted frame
+    when the raw background is mid-gray rather than near-white. There the (inverted)
+    background sits well above zero, the multiplied threshold lands below it, and the
+    whole square ROI floods to foreground (perfect-square false particles).
+    Subtracting a robust low-percentile floor restores the near-zero-background
+    assumption independently of absolute exposure/illumination level. It is a near
+    no-op when the background is already near zero (bright collimated or darkfield).
+    """
+    floor = float(np.percentile(roi_signal_float, background_floor_percentile))
+    shifted = roi_signal_float - floor
+    np.clip(shifted, 0.0, 1.0, out=shifted)
+    return shifted
+
+
+def _analyze_unsubtracted_locally(
     full_unsub_prepped_uint8: np.ndarray,
     candidate_particles_subtracted: List[Dict[str, Any]],
-    roi_crop_size: int,
+    adaptive_padding_factor: float,
     analysis_config: Dict[str, Any],
     global_threshold_config: Dict[str, Any],
     source_illumination: str
@@ -415,33 +483,54 @@ def _analyze_unsubtracted_locally( # Unchanged
     if full_unsub_prepped_uint8 is None: return [], None, (None, None, None)
     all_local_particle_data = []; composite_binary_mask_full_image = np.zeros_like(full_unsub_prepped_uint8, dtype=np.uint8)
     first_roi_img_2d_for_display, first_roi_hist_data_ravel, first_roi_effective_thresh_val_float = None, None, None
-    min_area_unsub = analysis_config.get('min_particle_area', 50); h_full, w_full = full_unsub_prepped_uint8.shape; half_crop = roi_crop_size // 2
-    logger.debug(f"Local Unsub: Processing {len(candidate_particles_subtracted)} candidate ROIs with crop_size {roi_crop_size}")
+    min_area_unsub = analysis_config.get('min_particle_area', 50); h_full, w_full = full_unsub_prepped_uint8.shape
+    background_floor_percentile = float(analysis_config.get('background_floor_percentile', 25))
+    max_roi_foreground_fraction = float(analysis_config.get('max_roi_foreground_fraction', 0.85))
+    logger.debug(f"Local Unsub: Processing {len(candidate_particles_subtracted)} candidate ROIs with adaptive padding factor {adaptive_padding_factor}")
     for i, cand_p_sub in enumerate(candidate_particles_subtracted):
         if 'X' not in cand_p_sub or 'Y' not in cand_p_sub: continue
-        cx, cy = int(cand_p_sub['X']), int(cand_p_sub['Y']); x1, y1 = max(0, cx - half_crop), max(0, cy - half_crop); x2, y2 = min(w_full, cx + half_crop), min(h_full, cy + half_crop)
+        cx, cy = int(cand_p_sub['X']), int(cand_p_sub['Y'])
+        candidate_w = max(float(cand_p_sub.get('bounding_w', 1.0)), 1.0)
+        candidate_h = max(float(cand_p_sub.get('bounding_h', 1.0)), 1.0)
+        pad_x = int(np.ceil(candidate_w * adaptive_padding_factor))
+        pad_y = int(np.ceil(candidate_h * adaptive_padding_factor))
+        adaptive_half_crop = int(np.ceil(max(candidate_w + 2 * pad_x, candidate_h + 2 * pad_y) / 2.0))
+        x1, y1 = max(0, cx - adaptive_half_crop), max(0, cy - adaptive_half_crop); x2, y2 = min(w_full, cx + adaptive_half_crop), min(h_full, cy + adaptive_half_crop)
         roi_img_uint8 = full_unsub_prepped_uint8[y1:y2, x1:x2]
         if roi_img_uint8.size == 0 or roi_img_uint8.shape[0] < 3 or roi_img_uint8.shape[1] < 3: continue
         roi_float_original_2d = skimage.util.img_as_float(roi_img_uint8); roi_float_for_segment_2d = roi_float_original_2d.copy()
         if source_illumination == 'collimated': roi_float_for_segment_2d = 1.0 - roi_float_for_segment_2d
+        # Pull the local background floor down to ~0 so the sub-1.0 Otsu multiplier
+        # cannot drop below an elevated (mid-gray) background and flood the ROI.
+        roi_float_for_segment_2d = _suppress_roi_background(roi_float_for_segment_2d, background_floor_percentile)
         current_roi_hist_data_ravel = roi_float_for_segment_2d.ravel()
-        local_binary_mask_roi_bool = generate_binary_mask_from_float_image(roi_float_for_segment_2d, global_threshold_config)
-        if local_binary_mask_roi_bool is None: logger.error(f"S1 Local Unsub: Failed to generate binary mask for ROI {i+1}."); continue
+        local_binary_mask_roi = generate_binary_mask_from_float_image(roi_float_for_segment_2d, global_threshold_config)
+        if local_binary_mask_roi is None: logger.error(f"S1 Local Unsub: Failed to generate binary mask for ROI {i+1}."); continue
+        # Safety net: a mask that still fills most of the square ROI is a degenerate
+        # flood, not a particle. Drop it so it cannot surface as a perfect-square false
+        # detection (circularity == pi/4). Real particles stay well under this fraction.
+        roi_foreground_fraction = float(np.count_nonzero(local_binary_mask_roi)) / float(local_binary_mask_roi.size)
+        if roi_foreground_fraction > max_roi_foreground_fraction:
+            logger.debug(
+                f"S1 Local Unsub: ROI {i+1} foreground fraction {roi_foreground_fraction:.2f} exceeds "
+                f"{max_roi_foreground_fraction:.2f}; skipping degenerate (flooded) segmentation."
+            )
+            continue
         local_threshold_value_for_data = np.nan
         if i == 0:
             first_roi_img_2d_for_display, first_roi_hist_data_ravel = roi_float_for_segment_2d.copy(), current_roi_hist_data_ravel
-            if global_threshold_config.get('mode') == 'otsu':
+            if global_threshold_config.get('thresholding_mode') == 'otsu':
                 if roi_float_for_segment_2d.min() != roi_float_for_segment_2d.max():
                     try: otsu_val_disp, otsu_mult_disp = skimage.filters.threshold_otsu(roi_float_for_segment_2d), global_threshold_config.get('otsu_threshold_multiplier', 0.45); first_roi_effective_thresh_val_float, local_threshold_value_for_data = otsu_val_disp * otsu_mult_disp, otsu_val_disp * otsu_mult_disp
                     except ValueError: pass
-            elif global_threshold_config.get('mode') == 'fixed': first_roi_effective_thresh_val_float, local_threshold_value_for_data = global_threshold_config.get('fixed_threshold_value', 70) / 255.0, global_threshold_config.get('fixed_threshold_value', 70) / 255.0
+            elif global_threshold_config.get('thresholding_mode') == 'fixed': first_roi_effective_thresh_val_float, local_threshold_value_for_data = global_threshold_config.get('fixed_threshold_value', 70) / 255.0, global_threshold_config.get('fixed_threshold_value', 70) / 255.0
         else:
-            if global_threshold_config.get('mode') == 'otsu':
+            if global_threshold_config.get('thresholding_mode') == 'otsu':
                  if roi_float_for_segment_2d.min() != roi_float_for_segment_2d.max():
                     try: otsu_val_data, otsu_mult_data = skimage.filters.threshold_otsu(roi_float_for_segment_2d), global_threshold_config.get('otsu_threshold_multiplier', 0.45); local_threshold_value_for_data = otsu_val_data * otsu_mult_data
                     except ValueError: pass
-            elif global_threshold_config.get('mode') == 'fixed': local_threshold_value_for_data = global_threshold_config.get('fixed_threshold_value', 70) / 255.0
-        local_binary_mask_roi_uint8 = local_binary_mask_roi_bool.astype(np.uint8) * 255
+            elif global_threshold_config.get('thresholding_mode') == 'fixed': local_threshold_value_for_data = global_threshold_config.get('fixed_threshold_value', 70) / 255.0
+        local_binary_mask_roi_uint8 = local_binary_mask_roi.astype(np.uint8) * 255
         composite_binary_mask_full_image[y1:y2, x1:x2] = np.maximum(composite_binary_mask_full_image[y1:y2, x1:x2], local_binary_mask_roi_uint8)
         contours_in_roi = find_contours(local_binary_mask_roi_uint8, mode="external", method="simple")
         if not contours_in_roi: continue
@@ -578,12 +667,39 @@ def _build_tracking_figure(tracked_df: pd.DataFrame) -> Optional[plt.Figure]:
     return fig
 
 
+def _build_tracking_xy_figure(tracked_df: pd.DataFrame) -> Optional[plt.Figure]:
+    """Create a 2D XY-projection figure of all tracked particle paths.
+
+    Companion to :func:`_build_tracking_figure`. The 3D view is subject to
+    perspective distortion (a point's screen position depends on its Z), which
+    can make the XY layout look different from how it really is. This flat
+    projection plots the same trajectories on the true XY plane so the spatial
+    layout can be read and compared against Stage 2 without that distortion.
+    """
+    if tracked_df.empty:
+        return None
+    fig = plt.figure(figsize=(8, 8))
+    ax = fig.add_subplot(111)
+    ax.set_title("2D XY Projection of Particle Tracks")
+    ax.set_xlabel("X (mm)")
+    ax.set_ylabel("Y (mm)")
+    for _, track in tracked_df.groupby('track_id'):
+        ax.plot(track['x_mm'], track['y_mm'], linewidth=1)
+    ax.set_aspect('equal', adjustable='datalim')
+    plt.tight_layout()
+    return fig
+
+
 def run_particle_tracking(
     fused_df: pd.DataFrame,
     sample_id: str,
     tracking_config: Dict[str, Any]
-) -> Tuple[pd.DataFrame, Optional[plt.Figure]]:
-    """Perform particle tracking on fused detections and return data instead of writing files."""
+) -> Tuple[pd.DataFrame, Optional[plt.Figure], Optional[plt.Figure]]:
+    """Perform particle tracking on fused detections and return data instead of writing files.
+
+    Returns the tracked dataframe plus two companion figures: the 3D track plot
+    and its 2D XY projection (both ``None`` when there is nothing to plot).
+    """
     logger.info(f"--- Post-S1 Tracking initiated for: {sample_id} ---")
     pixel_size_um = tracking_config.get('pixel_size_um')
     magnification = tracking_config.get('magnification')
@@ -596,13 +712,13 @@ def run_particle_tracking(
     processed_data = _process_particle_coordinates_for_tracking_df(fused_df, pixel_size_um, magnification)
     if processed_data.empty:
         logger.warning("Tracking workflow stopped: No data after initial processing.")
-        return processed_data, None
+        return processed_data, None, None
 
     tracked_data = _track_particles_3d(processed_data, search_range_mm, memory_frames, min_track_length)
     if tracked_data.empty:
         logger.warning("Tracking workflow stopped: No tracks survived the filtering process.")
         processed_data['track_id'] = np.nan
-        return processed_data, None
+        return processed_data, None, None
 
     logger.info("Tracking Step 3: Merging tracking results with original data...")
     merge_cols = ['frame', 'x_mm', 'y_mm', 'z_mm']
@@ -627,50 +743,38 @@ def run_particle_tracking(
         final_tracked_particles_df['track_id'] = final_tracked_particles_df['track_id'].astype(int)
 
     tracking_figure = _build_tracking_figure(final_tracked_particles_df)
+    tracking_xy_figure = _build_tracking_xy_figure(final_tracked_particles_df)
     logger.info(f"--- Post-S1 Tracking for {sample_id} COMPLETED ---")
-    return final_tracked_particles_df, tracking_figure
+    return final_tracked_particles_df, tracking_figure, tracking_xy_figure
 
 
 def run_stage_01_initial_detection(
     image_dir_path: str,
     output_dir_stage1: str,
     sample_id: str,
-    config: Optional[Dict[str, Any]] = None,
+    config: Dict[str, Any],
 ) -> Optional[str]:
     """Input: image dir, output dir, sample id, config. Output: Stage 1 CSV path or None."""
     logger.info(f"--- Stage 1: Initial Detection for Sample ID: {sample_id} ---")
-    config = config or get_config()
-    config_s1 = config.get('stage_01_initial_detection', {})
-    system_cfg = config.get('system', {})
-    source_image_illumination = system_cfg.get('source_image_illumination_type', 'darkfield')
-    global_threshold_config = system_cfg.get('thresholding', {})
-    if not global_threshold_config:
-        raise ConfigError("Stage 1: System-level thresholding configuration not found or empty.")
-    
-    config_black_plate_well = config_s1.get('black_plate_well_analysis', {})
-    enable_brightness_adjustment = config_black_plate_well.get('enable_brightness_adjustment', False)
-    
-    particle_analysis_subtracted_config = config_s1.get('particle_analysis', {})
-    unsubtracted_analysis_config = config_s1.get('unsubtracted_particle_analysis', {})
-    local_otsu_roi_size = unsubtracted_analysis_config.get('local_otsu_roi_size', 150)
-    particle_comparison_config = config_s1.get('particle_comparison', {})
-    bg_offset_mode = config_s1.get('BG_frame_offset_mode', 'fixed')
-    bg_offset_default = config_s1.get('bg_offset_val', 110)
+    config_s1 = config['stage_01_initial_detection']
+    system_cfg = config['system']
+    source_image_illumination = system_cfg['source_image_illumination_type']
+    global_threshold_config = system_cfg['thresholding']
+    subtracted_foreground_config = system_cfg['subtracted_foreground']
 
-    recording_fps_raw = system_cfg.get('recording_fps')
-    try:
-        recording_fps = float(recording_fps_raw)
-    except (TypeError, ValueError):
-        recording_fps = 0.0
+    config_black_plate_well = config_s1['black_plate_well_analysis']
+    enable_brightness_adjustment = config_black_plate_well['enable_brightness_adjustment']
 
-    recording_fps = max(recording_fps, 0.0)
-    min_offset_for_auto: Optional[int]
-    if recording_fps > 0:
-        min_offset_for_auto = max(int(round(recording_fps * 5)), 1)
-    else:
-        min_offset_for_auto = None
+    particle_analysis_subtracted_config = config_s1['particle_analysis']
+    unsubtracted_analysis_config = config_s1['unsubtracted_particle_analysis']
+    particle_comparison_config = config_s1['particle_comparison']
+    bg_offset_mode = config_s1['BG_frame_offset_mode']
+    bg_offset_default = config_s1['bg_offset_val']
 
-    general_well_masking_cfg = config_s1.get('well_masking', {})
+    recording_fps = float(config['acquisition']['camera']['fps'])
+    min_offset_for_auto = max(int(round(recording_fps * 5)), 1) if recording_fps > 0 else None
+
+    general_well_masking_cfg = config_s1['well_masking']
 
     images_df = _parse_image_filenames(image_dir_path)
     if images_df is None or images_df.empty: return None
@@ -689,7 +793,7 @@ def run_stage_01_initial_detection(
         "source_image_illumination": source_image_illumination,
         "particle_analysis_subtracted_config": particle_analysis_subtracted_config,
         "global_threshold_config": global_threshold_config,
-        "local_otsu_roi_size": local_otsu_roi_size,
+        "subtracted_foreground_config": subtracted_foreground_config,
         "unsubtracted_analysis_config": unsubtracted_analysis_config,
         "particle_comparison_config": particle_comparison_config,
         "sample_id": sample_id,
@@ -702,7 +806,7 @@ def run_stage_01_initial_detection(
     if bg_offset_mode == 'automatic':
         if min_offset_for_auto is None:
             logger.warning(
-                "Stage 1: Automatic background offset requested but system.recording_fps is missing or invalid; "
+                "Stage 1: Automatic background offset requested but acquisition.camera.fps is non-positive; "
                 "falling back to configured offset %d.",
                 bg_offset_default,
             )
@@ -732,7 +836,7 @@ def run_stage_01_initial_detection(
         fg_row = pairing_data.get("fg_row")
         bg_row = pairing_data.get("bg_row")
         if fg_row is None or bg_row is None:
-            logger.warning("Failed to select FG/BG pairing; skipping frame index %s.", idx_frame_list)
+            logger.warning(f"Failed to select FG/BG pairing; skipping frame index {idx_frame_list}.")
             continue
 
         logger.debug(f"Processing S1 Frame: {fg_row['filename']} (BG: {bg_row['filename']})")
@@ -759,14 +863,14 @@ def run_stage_01_initial_detection(
     final_output_filename = f"{sample_id}_stage1_tracked_particles.csv"
     final_output_path = os.path.join(output_dir_stage1, final_output_filename)
     
-    tracking_config = config_s1.get('tracking', {})
-    if tracking_config.get('enabled', False):
+    tracking_config = config_s1['tracking']
+    if tracking_config['enabled']:
         # Track fused particles and defer file I/O to the stage wrapper.
         try:
-            tracked_df, tracking_fig = run_particle_tracking(final_sample_df, sample_id, tracking_config)
+            tracked_df, tracking_fig, tracking_xy_fig = run_particle_tracking(final_sample_df, sample_id, tracking_config)
         except Exception as e:
             logger.exception(f"Particle tracking failed for sample {sample_id}: {e}")
-            tracked_df, tracking_fig = pd.DataFrame(), None
+            tracked_df, tracking_fig, tracking_xy_fig = pd.DataFrame(), None, None
 
         if tracked_df.empty and not final_sample_df.empty:
             logger.warning("Particle tracking returned no tracks; saving fused detections with empty track IDs.")
@@ -779,6 +883,11 @@ def run_stage_01_initial_detection(
             tracking_fig.savefig(figure_3d_path, dpi=150)
             plt.close(tracking_fig)
             # Tracking figure documents the trajectories visually.
+        if tracking_xy_fig is not None:
+            figure_xy_path = os.path.join(output_dir_stage1, f"{sample_id}_stage1_tracks_xy.png")
+            tracking_xy_fig.savefig(figure_xy_path, dpi=150)
+            plt.close(tracking_xy_fig)
+            # Flat XY projection makes the spatial layout directly comparable to Stage 2.
     else:
         logger.info("Particle tracking is disabled. Saving fused data as final output.")
         final_sample_df['track_id'] = np.nan

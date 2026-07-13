@@ -34,7 +34,7 @@ def generate_binary_mask_from_float_image(
         logger.debug("generate_binary_mask: Image is uniform. Returning empty mask.")
         return np.zeros_like(image_processed_float, dtype=bool)
 
-    thresholding_mode = threshold_params.get('thresholding_mode', 'otsu')
+    thresholding_mode = threshold_params["thresholding_mode"]
     final_threshold_value_float: Optional[float] = None
 
     if thresholding_mode == 'otsu':
@@ -43,7 +43,7 @@ def generate_binary_mask_from_float_image(
         except ValueError:
             logger.warning("generate_binary_mask: Skimage Otsu threshold failed. Returning empty mask.")
             return np.zeros_like(image_processed_float, dtype=bool)
-        otsu_multiplier = threshold_params.get('otsu_threshold_multiplier', 0.45)
+        otsu_multiplier = threshold_params["otsu_threshold_multiplier"]
         final_threshold_value_float = otsu_thresh_val_raw_sk * otsu_multiplier
         logger.debug(f"generate_binary_mask (Otsu): raw={otsu_thresh_val_raw_sk:.4f}, mult={otsu_multiplier}, final={final_threshold_value_float:.4f}")
     elif thresholding_mode == 'fixed':
@@ -66,6 +66,43 @@ def generate_binary_mask_from_float_image(
     return image_processed_float > final_threshold_value_float
 
 
+def assess_subtracted_foreground(
+    subtracted_img_uint8: np.ndarray,
+    foreground_diff_threshold: int,
+    max_foreground_fraction: float,
+    *,
+    area_px: Optional[int] = None,
+) -> Tuple[np.ndarray, float, bool]:
+    """Threshold a background-subtracted frame and judge whether the subtraction is usable.
+
+    Single source of truth for the FG/BG foreground gate shared by the batch (stage 1)
+    and realtime pipelines. Otsu is unstable on the near-zero subtracted image: when a
+    FG/BG pair subtracts poorly it collapses into the noise floor and floods the whole
+    well with false particles. Callers use the returned floor mask (a fixed minimum the
+    downstream Otsu may tighten but not fall below) and the failure verdict.
+
+    Args:
+        subtracted_img_uint8: Background-subtracted frame (uint8), already well-masked.
+        foreground_diff_threshold: Fixed minimum subtracted difference (0-255) to count
+            as foreground.
+        max_foreground_fraction: Fraction of ``area_px`` above which the subtraction is
+            deemed failed (illumination drift / bad BG pairing).
+        area_px: Denominator for the foreground fraction (typically the well-mask pixel
+            count). Defaults to the full image size when None.
+
+    Returns:
+        Tuple of (foreground_mask boolean array, foreground_fraction float,
+        subtraction_failed bool). ``subtraction_failed`` is True when the fraction exceeds
+        ``max_foreground_fraction`` and the frame should yield no candidates.
+    """
+    foreground_mask = subtracted_img_uint8 >= int(foreground_diff_threshold)
+    denominator = float(area_px) if area_px else float(foreground_mask.size)
+    foreground_fraction = (
+        float(np.count_nonzero(foreground_mask)) / denominator if denominator else 0.0
+    )
+    return foreground_mask, foreground_fraction, foreground_fraction > float(max_foreground_fraction)
+
+
 def segment_main_body_from_image_float(
     image_gray_float_input: np.ndarray, 
     segmentation_params: Dict[str, Any] 
@@ -81,10 +118,12 @@ def segment_main_body_from_image_float(
     else:
         image_proc_float = image_gray_float_input.copy()
 
-    source_illumination_type = segmentation_params.get('source_image_illumination_type', 'darkfield')
+    source_illumination_type = segmentation_params["source_image_illumination_type"]
     if source_illumination_type not in ['darkfield', 'collimated']:
-        logger.warning(f"Invalid source_image_illumination_type '{source_illumination_type}'. Defaulting to 'darkfield'.")
-        source_illumination_type = 'darkfield'
+        raise ConfigError(
+            f"Invalid source_image_illumination_type '{source_illumination_type}'. "
+            "Expected 'darkfield' or 'collimated'."
+        )
 
     image_for_segmentation_float = image_proc_float.copy()
     if source_illumination_type == 'collimated':
@@ -97,9 +136,9 @@ def segment_main_body_from_image_float(
         logger.debug("SegmentMainBody: Image is empty or near-empty after potential inversion. No segmentation.")
         return None, None, None
 
-    if segmentation_params.get('enable_unsharp_masking', False):
-        sigma = segmentation_params.get('unsharp_mask_sigma', 1.0)
-        amount = segmentation_params.get('unsharp_mask_amount', 1.0)
+    if segmentation_params["enable_unsharp_masking"]:
+        sigma = segmentation_params["unsharp_mask_sigma"]
+        amount = segmentation_params["unsharp_mask_amount"]
         if sigma > 0 and amount > 0:
             logger.debug(f"SegmentMainBody: Applying Unsharp Masking (sigma={sigma}, amount={amount}).")
             blurred_for_unsharp = skimage.filters.gaussian(image_for_segmentation_float, sigma=sigma, preserve_range=True, channel_axis=None)
@@ -110,83 +149,52 @@ def segment_main_body_from_image_float(
 
     # MODIFIED: Call the helper for thresholding
     # The segmentation_params already contain thresholding_mode, otsu_threshold_multiplier, fixed_threshold_value
-    main_binary_mask_initial_bool = generate_binary_mask_from_float_image(
-        image_for_segmentation_float, # This is post-inversion, post-unsharp
-        segmentation_params # Pass all params, helper will pick what it needs
+    initial_mask = generate_binary_mask_from_float_image(
+        image_for_segmentation_float,
+        segmentation_params,
     )
 
-    if main_binary_mask_initial_bool is None:
+    if initial_mask is None:
         logger.error("SegmentMainBody: Failed to generate binary mask from helper.")
         return None, None, None
 
-    main_cleaned_mask_bool = skimage.morphology.remove_small_objects(
-        main_binary_mask_initial_bool, min_size=segmentation_params.get('min_noise_size', 50)
+    cleaned_mask = skimage.morphology.remove_small_objects(
+        initial_mask, min_size=segmentation_params["min_noise_size"]
     )
 
-    selem_closing_size = segmentation_params.get('closing_selem_size', 1) # Defaulted to 1
+    selem_closing_size = segmentation_params["closing_selem_size"]
     if selem_closing_size > 0:
         selem_closing = skimage.morphology.disk(selem_closing_size)
-        raw_body_mask_bool = skimage.morphology.binary_closing(main_cleaned_mask_bool, selem_closing)
+        raw_body_mask = skimage.morphology.binary_closing(cleaned_mask, selem_closing)
     else:
-        raw_body_mask_bool = main_cleaned_mask_bool
+        raw_body_mask = cleaned_mask
 
-    filled_body_mask_bool = ndi.binary_fill_holes(raw_body_mask_bool)
-    
-    labeled_filled_mask, num_labels = skimage.measure.label(filled_body_mask_bool, return_num=True, connectivity=2)
-    
+    filled_body_mask = ndi.binary_fill_holes(raw_body_mask)
+
+    labeled_filled_mask, num_labels = skimage.measure.label(filled_body_mask, return_num=True, connectivity=2)
+
     main_props_object = None
-    raw_body_mask_bool_main_only = raw_body_mask_bool
-    filled_body_mask_bool_main_only = filled_body_mask_bool
+    raw_body_mask_main_only = raw_body_mask
+    filled_body_mask_main_only = filled_body_mask
 
     if num_labels > 0:
         props_filled_all = skimage.measure.regionprops(
             labeled_filled_mask,
-            intensity_image=image_intensity_for_props, 
-            cache=False
+            intensity_image=image_intensity_for_props,
+            cache=False,
         )
         if props_filled_all:
             main_props_object = sorted(props_filled_all, key=lambda x: x.area, reverse=True)[0]
-            
+
             temp_main_mask = np.zeros_like(labeled_filled_mask, dtype=bool)
             temp_main_mask[labeled_filled_mask == main_props_object.label] = True
-            
-            raw_body_mask_bool_main_only = raw_body_mask_bool & temp_main_mask
-            filled_body_mask_bool_main_only = filled_body_mask_bool & temp_main_mask
+
+            raw_body_mask_main_only = raw_body_mask & temp_main_mask
+            filled_body_mask_main_only = filled_body_mask & temp_main_mask
     else:
         logger.debug("SegmentMainBody: No regions found after filling holes.")
 
-    raw_mask_uint8 = raw_body_mask_bool_main_only.astype(np.uint8) * 255
-    filled_mask_uint8 = filled_body_mask_bool_main_only.astype(np.uint8) * 255
+    raw_mask_uint8 = raw_body_mask_main_only.astype(np.uint8) * 255
+    filled_mask_uint8 = filled_body_mask_main_only.astype(np.uint8) * 255
     
     return raw_mask_uint8, filled_mask_uint8, main_props_object
-
-if __name__ == '__main__':
-    logging.basicConfig(level=logging.DEBUG)
-    # Test generate_binary_mask_from_float_image
-    test_img_float_for_thresh = np.array([[0.1, 0.2, 0.6], [0.3, 0.7, 0.4], [0.8, 0.5, 0.9]], dtype=float)
-    otsu_params = {'thresholding_mode': 'otsu', 'otsu_threshold_multiplier': 1.0}
-    fixed_params = {'thresholding_mode': 'fixed', 'fixed_threshold_value': int(0.5*255)} # 127
-    
-    logger.info("--- Testing generate_binary_mask_from_float_image (Otsu) ---")
-    mask_otsu = generate_binary_mask_from_float_image(test_img_float_for_thresh.copy(), otsu_params)
-    if mask_otsu is not None: print(mask_otsu.astype(int))
-
-    logger.info("--- Testing generate_binary_mask_from_float_image (Fixed) ---")
-    mask_fixed = generate_binary_mask_from_float_image(test_img_float_for_thresh.copy(), fixed_params)
-    if mask_fixed is not None: print(mask_fixed.astype(int))
-
-    # Test segment_main_body_from_image_float (already has tests, ensure they pass)
-    test_image_orig_float = np.ones((100, 100), dtype=float) * 0.8 
-    rr, cc = skimage.draw.ellipse(50, 50, 20, 30, rotation=np.deg2rad(15))
-    test_image_orig_float[rr, cc] = 0.2 
-    test_image_orig_float[40:45, 40:45] = 0.1 
-
-    test_params_collimated_unsharp = {
-        'source_image_illumination_type': 'collimated', 'thresholding_mode': 'otsu',
-        'otsu_threshold_multiplier': 0.5, 'enable_unsharp_masking': True,
-        'unsharp_mask_sigma': 1.0, 'unsharp_mask_amount': 1.5,
-        'min_noise_size': 10, 'closing_selem_size': 2,
-    }
-    logger.info("--- Testing segment_main_body (collimated, unsharp, via helper) ---")
-    raw_m, filled_m, props = segment_main_body_from_image_float(test_image_orig_float.copy(), test_params_collimated_unsharp)
-    if raw_m is not None: logger.info(f"SegmentMainBody (collimated) Raw mask sum: {np.sum(raw_m > 0)}")

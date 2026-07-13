@@ -1,7 +1,7 @@
 """Demo utility for detect_black_mask_artifact and crop-boundary detection.
 
 Given a directory of images, this script loads the configured
-``min_area_ratio`` from ``pipeline_config.yml`` and evaluates whether each
+``min_area_ratio`` from ``config.yml`` and evaluates whether each
 image contains a black mask artifact. It also checks whether each image
 would be flagged by ``detect_cropped_particle_on_boundary``.
 The combined results are written to a CSV file within the same directory.
@@ -9,7 +9,7 @@ The combined results are written to a CSV file within the same directory.
 `scripts/detect_black_mask_demo.py` evaluates every supported image in a directory with `detect_black_mask_artifact` and `detect_cropped_particle_on_boundary` and writes `black_mask_detection_results.csv` beside the inputs. Example:
 
   ```
-  python scripts/detect_black_mask_demo.py data/sanity_checks/masks --config config/pipeline_config.yml
+  python scripts/detect_black_mask_demo.py data/sanity_checks/masks --config config/config.yml
   ```
 
 """
@@ -107,7 +107,7 @@ def run_demo(image_dir: Path, config_path: Path) -> Path:
             str(image_path),
             str(system_cfg.get("source_image_illumination_type", "darkfield")).strip().lower(),
             {
-                "thresholding_mode": threshold_cfg.get("mode", "otsu"),
+                "thresholding_mode": threshold_cfg["thresholding_mode"],
                 "otsu_threshold_multiplier": threshold_cfg.get("otsu_threshold_multiplier", 0.45),
                 "fixed_threshold_value": threshold_cfg.get("fixed_threshold_value", 70),
             },
@@ -149,8 +149,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--config",
         type=Path,
-        default=REPO_ROOT / "config" / "pipeline_config.yml",
-        help="Path to pipeline_config.yml (defaults to the repository config).",
+        default=REPO_ROOT / "config" / "config.yml",
+        help="Path to config.yml (defaults to the repository unified config).",
     )
     parser.add_argument(
         "--verbose",

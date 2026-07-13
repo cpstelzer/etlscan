@@ -22,7 +22,7 @@ data/
 
 ## 2. Configure the pipeline to recognize the EfficientNet model
 
-Ensure the Stage 3 section of `config/pipeline_config.yml` contains the `efficient_net_model` block. Example:
+Ensure the Stage 3 section of `config/config.yml` contains the `efficient_net_model` block. Example:
 
 ```yaml
 stage_03_filtering_and_classification:
@@ -40,7 +40,7 @@ From the repository root, run:
 
 ```
 python scripts/train_efficientnet_model.py \
-  --config config/pipeline_config.yml \
+  --config config/config.yml \
   --epochs 20 \
   --batch-size 32
 ```

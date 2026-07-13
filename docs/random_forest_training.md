@@ -4,7 +4,7 @@ This guide describes how to retrain the Stage 03 RandomForest classifier using
 
 ## Dataset layout
 
-Place curated crops under the shared training directory (defaults to `data/training_data/` from `config/pipeline_config.yml`). Within that root, provide two subfolders named after their class labels:
+Place curated crops under the shared training directory (defaults to `data/training_data/` from `config/config.yml`). Within that root, provide two subfolders named after their class labels:
 
 ```
 data/training_data/
@@ -21,13 +21,13 @@ Each subfolder can contain any number of PNG/JPEG crops. The script will scan bo
 Train using the default image-folder mode in a single command:
 
 ```
-python scripts/train_model.py --config config/pipeline_config.yml
+python scripts/train_model.py --config config/config.yml
 ```
 
 If your training crops live elsewhere, override the base directory:
 
 ```
-python scripts/train_model.py --config config/pipeline_config.yml \
+python scripts/train_model.py --config config/config.yml \
     --training-data-dir /path/to/my_crops
 ```
 

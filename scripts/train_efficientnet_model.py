@@ -178,7 +178,7 @@ def evaluate(model, dataloader, criterion, device: torch.device) -> Tuple[float,
 def parse_args():
     """Parse command-line arguments for EfficientNet training."""
     parser = argparse.ArgumentParser(description="Train an EfficientNet-B0 classifier with strong augmentation.")
-    parser.add_argument('--config', default='config/pipeline_config.yml', help='Path to the pipeline config file.')
+    parser.add_argument('--config', default='config/config.yml', help='Path to the unified config file.')
     parser.add_argument(
         '--dataset-dir',
         default=None,

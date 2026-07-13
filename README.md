@@ -20,29 +20,66 @@ Supporting tooling:
 
   ```
   python scripts/detect_black_mask_demo.py data/sanity_checks/masks \
-      --config config/pipeline_config.yml
+      --config config/config.yml
   ```
+
+
+## Acquisition workflows (`src/acquire`)
+
+Acquisition entrypoints are preserved while now delegating to shared workflow modules:
+
+- `scripts/run_acquire.py` → multi-well XY-stage workflow
+- `scripts/run_acquire_experiment.py` → parameter sweep workflow
+- `scripts/run_acquire_single.py` → single-sample no-stage workflow
+
+The common orchestration and helpers live in:
+
+- `src/acquire/workflows.py` (workflow orchestration)
+- `src/acquire/config.py` (plate-type normalization + merged plate settings)
+- `src/acquire/plate_layout.py` (24/96 coordinate generation)
+- `src/acquire/well_selector_gui.py` (well selector UI)
+- `src/acquire/stage_controller.py` (Zaber adapter)
+- `src/acquire/camera_capabilities.py` (Pylon capability detection)
+- `src/acquire/experiment_logging.py` (summary log helpers)
+
+For moving newly acquired runs into pipeline batch inputs, use:
+
+```
+python scripts/prepare_acquisition_batch.py <acquisition_output_dir> <batch_name> [--prefix YYYYMMDD_]
+```
+
+This copies matching run folders into `data/input/<batch_name>/...` without changing the acquisition naming contract (`YYYYMMDD_plateX_wellY`).
 
 ## Project structure
 
 ```
 well_plate_analyzer/
 ├── config/
-│   └── pipeline_config.yml       # Global runtime configuration
+│   └── config.yml                # Global runtime configuration
 ├── data/
 │   ├── input/<batch>/<sample>/   # Raw PNG sequences per sample
 │   ├── output/<batch>/<sample>/  # Pipeline outputs organized by stage
 │   └── training_data/            # Crops used by scripts/train_model.py
+├── docs/                         # Conventions, HPC runbook, ML training guides
 ├── models/                       # Trained RF model + scaler artifacts
 ├── scripts/
 │   ├── run_pipeline.py           # Batch-oriented stage runner
 │   ├── train_model.py            # Standalone RF trainer
 │   └── determine_bg_offset_demo.py
 ├── src/
-│   ├── core/                     # Feature calculators, segmentation, particle ops
-│   ├── stages/                   # Stage implementations (01–04)
-│   ├── utils/                    # Config loading, logging, path helpers, I/O
+│   ├── acquire/                  # Hardware acquisition (Pylon camera + Zaber stage)
+│   ├── core/
+│   │   ├── feature_calculators/  # morphology, quality, shape, bio-feature modules
+│   │   └── *.py                  # segmentation, masking, particle ops, I/O
+│   ├── realtime/                 # Frame-by-frame mirror of stages 1–3
+│   ├── stages/                   # Batch stage implementations (01–04)
+│   ├── utils/
+│   │   ├── constants.py          # All magic numbers and string literals
+│   │   ├── filename_helpers.py   # build_crop_filename() shared utility
+│   │   └── *.py                  # config loading, logging, path helpers, I/O
 │   └── visualization/            # Plotting/overlay helpers used by Stage 04
+├── tests/                        # pytest suite
+├── CLAUDE.md                     # Developer quick-start (AI-friendly)
 ├── requirements.txt
 └── README.md
 ```
@@ -55,9 +92,13 @@ well_plate_analyzer/
 
 ## Configuration
 
-The YAML file at `config/pipeline_config.yml` controls the entire pipeline. Key entries:
+The YAML file at `config/config.yml` controls the entire pipeline. Key entries:
 
-- `project_base_dir`: absolute path to the repository root.
+- `paths.pipeline_base`: offline-pipeline root (writes `data/output/`, hosts `models/` and `data/training_data/`). The legacy top-level `project_base_dir` key is still accepted as a fallback.
+- `paths.raw_data_root`: where acquisition writes captured frames; point `run_pipeline --input_batch_dir` at it. Injected into `acquisition.paths.output_folder_base`.
+- `acquisition.plate.type`: run-level plate selection (`24`/`96`), decoupled from the hardware profile. `acquisition.plate.definitions` holds the per-plate geometry; hardware profiles override only the rig-specific origin.
+- `imaging` (frame geometry) and `segmentation` (shared thresholding/segmentation) — the loader assembles these into the internal `system` view.
+- Hardware-specific settings (camera exposure, ROI, ETL focus, Zaber stage) live under `hardware_profiles.<name>` and are deep-merged into `acquisition` by `active_hardware_profile`.
 - Stage-specific blocks (`stage_01_initial_detection`, `stage_02_characterization`, `stage_03_filtering_and_classification`, `stage_04_biological_analysis`) that tune detection, cropping, filtering, classifier thresholds, and visualization options.
 - `stage_02_characterization.quality_features.black_mask_check` exposes `min_area_ratio`, `max_black_pixel_value`, and `min_edge_thickness_fraction`, which control how aggressively `detect_black_mask_artifact` flags dark corner occlusions.
 - Paths to the trained RF model (`models/rf_fem_classifier.joblib`), scaler, and feature-name list consumed by Stage 03. These artifacts are required so Stage 03 can populate `ml_probability`/`ml_label`, which Stage 04 refuses to run without.
@@ -75,13 +116,13 @@ The entry point is `scripts/run_pipeline.py`. It expects a batch directory conta
 python scripts/run_pipeline.py \
     --input_batch_dir data/input/batch_20240101 \
     --stages all \
-    --config config/pipeline_config.yml
+    --config config/config.yml
 ```
 
 Important CLI options:
 
 - `--input_batch_dir`: **Required.** Path to the parent directory that contains the sample folders.
-- `--config`: Optional path to a custom YAML config (defaults to `config/pipeline_config.yml`).
+- `--config`: Optional path to a custom YAML config (defaults to `config/config.yml`).
 - `--stages`: Comma-separated list from `{1,2,3,4}` or `all` to control which stage modules run. Dependencies are enforced, so Stage n requires outputs from Stage n−1. When a stage is rerun, its existing output directory is automatically deleted so the new outputs start cleanly.
 - `--resume`: Resume **full pipeline runs only** (`--stages all` or `--stages 1,2,3,4`). The pipeline writes an atomic per-sample completion marker after Stage 4 succeeds, then uses those markers to skip already-complete leading samples after an interruption (timeout, node preemption, power loss).
 
@@ -90,7 +131,7 @@ Important CLI options:
 If you run this pipeline on a cluster, review `docs/hpc_slurm_runbook.md` for a hardened Slurm template and guidance on:
 
 - keeping input, outputs, and logs on node-accessible storage,
-- setting `project_base_dir` so batch rollups and per-sample folders end up where you expect,
+- setting `paths.pipeline_base` so batch rollups and per-sample folders end up where you expect,
 - staging Stage 3 model artifacts from a separate path via symlink or copy,
 - avoiding concurrent jobs writing into the same output root.
 
@@ -103,11 +144,11 @@ Stage 03 is split into three segments: (1) deterministic quality filters, (2) 
 3. **Diagnostics** – Analysts can call `plot_probability_histogram` or `plot_roc_curve` from `src/visualization/feature_visualization.py` to summarize new runs. The helpers accept raw probability arrays / `(y_true, y_score)` pairs and emit PNGs beside other review artifacts.
 
 For classifier retraining, the RandomForest trainer now consumes class-labeled image folders by default. A single command is enoug
-h if your crops live under `data/training_data/good` and `data/training_data/bad` (or the `project_base_dir`-relative paths you s
-et in `config/pipeline_config.yml`):
+h if your crops live under `data/training_data/good` and `data/training_data/bad` (or the `paths.pipeline_base`-relative paths you s
+et in `config/config.yml`):
 
 ```
-python scripts/train_model.py --config config/pipeline_config.yml
+python scripts/train_model.py --config config/config.yml
 ```
 
 See `docs/random_forest_training.md` for details and options (including CSV-based training). To train and use the EfficientNet-B0
@@ -142,7 +183,7 @@ RF model files updated by `train_model.py` are stored under `models/` and automa
 
 ## Troubleshooting
 
-- Ensure `project_base_dir` in the config reflects the absolute repository path; many helpers derive relative locations from it.
+- Ensure `paths.pipeline_base` in the config reflects the absolute repository root; many helpers derive relative locations from it. (The legacy `project_base_dir` key is still accepted.)
 - Confirm that sample directories contain PNG frames named according to the acquisition convention expected by Stage 01.
 - If Stage 03 cannot load the classifier, rerun `scripts/train_model.py` to regenerate the `models/` artifacts.
 - Review the log output (configured via `src/utils/setup_logging`) for detailed error messages per stage.

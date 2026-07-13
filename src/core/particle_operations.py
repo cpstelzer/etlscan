@@ -1,12 +1,12 @@
 # src/core/particle_operations.py
+import logging
+import os
+from typing import Dict, Any, Optional, Tuple
+
 import cv2
 import numpy as np
-import logging
-from typing import Dict, Any, Optional, Tuple
 import pandas as pd
 import skimage.util
-import shutil
-import os
 
 from src.utils.common_exceptions import ConfigError
 from src.core.segmentation import generate_binary_mask_from_float_image
@@ -46,7 +46,7 @@ def crop_rotated(
 
 def normalized_crop_config(crop_config: Dict[str, Any]) -> Dict[str, Any]:
     """Validate and normalize crop configuration values for particle cropping."""
-    mode = crop_config.get('mode', 'rotational_rectangle')
+    mode = crop_config['mode']
     if mode not in [
         'rotational_rectangle',
         'centroid_square',
@@ -56,17 +56,26 @@ def normalized_crop_config(crop_config: Dict[str, Any]) -> Dict[str, Any]:
     ]:
         raise ConfigError(f"Invalid ParticleCropper mode: {mode}")
 
+    adaptive_padding_factor = float(crop_config['adaptive_padding_factor'])
+    if adaptive_padding_factor < 0:
+        raise ConfigError(f"adaptive_padding_factor must be >= 0, got {adaptive_padding_factor}")
+
     return {
         'mode': mode,
-        'rotational_padding': int(crop_config.get('rotational_padding', 10)),
-        'square_size': int(crop_config.get('square_size', 150)),
-        'centroid_pre_crop_padding': int(crop_config.get('centroid_pre_crop_padding', 20)),
-        'bbox_padding': int(crop_config.get('bbox_padding', 15)),
+        'adaptive_padding_factor': adaptive_padding_factor,
         'bbox_column_mapping': crop_config.get('bbox_column_mapping', {
             'x': 'bounding_x', 'y': 'bounding_y', 'w': 'bounding_w', 'h': 'bounding_h'
         }),
     }
 
+
+
+
+def compute_adaptive_padding(width: float, height: float, factor: float) -> Tuple[int, int]:
+    """Return per-axis padding derived from particle dimensions and a factor."""
+    pad_x = max(int(np.ceil(max(width, 1.0) * factor)), 1)
+    pad_y = max(int(np.ceil(max(height, 1.0) * factor)), 1)
+    return pad_x, pad_y
 
 def compute_aabb_for_rotated_rectangle(
     center: Tuple[float, float],
@@ -174,35 +183,20 @@ def crop_particle_from_arrays(
         try:
             cx, cy = int(particle_data['X']), int(particle_data['Y'])
             h_img, w_img = full_gray_image.shape
-            
-            bb_x = int(particle_data.get('bounding_x', cx - normalized['square_size'] // 2))
-            bb_y = int(particle_data.get('bounding_y', cy - normalized['square_size'] // 2))
-            bb_w = int(particle_data.get('bounding_w', normalized['square_size']))
-            bb_h = int(particle_data.get('bounding_h', normalized['square_size']))
+            bb_w = max(float(particle_data.get('bounding_w', 1.0)), 1.0)
+            bb_h = max(float(particle_data.get('bounding_h', 1.0)), 1.0)
+            pad_x, pad_y = compute_adaptive_padding(bb_w, bb_h, normalized['adaptive_padding_factor'])
+            half_size = int(np.ceil(max(bb_w + 2 * pad_x, bb_h + 2 * pad_y) / 2.0))
 
-            pad = normalized['centroid_pre_crop_padding']
-            pre_crop_x1 = max(0, bb_x - pad)
-            pre_crop_y1 = max(0, bb_y - pad)
-            pre_crop_x2 = min(w_img, bb_x + bb_w + pad)
-            pre_crop_y2 = min(h_img, bb_y + bb_h + pad)
+            x1 = max(0, cx - half_size)
+            y1 = max(0, cy - half_size)
+            x2 = min(w_img, cx + half_size)
+            y2 = min(h_img, cy + half_size)
 
-            sub_image_gray = full_gray_image[pre_crop_y1:pre_crop_y2, pre_crop_x1:pre_crop_x2]
-
-            cx_relative = cx - pre_crop_x1
-            cy_relative = cy - pre_crop_y1
-
-            h_sub, w_sub = sub_image_gray.shape
-            half_size = normalized['square_size'] // 2
-            x1 = max(0, cx_relative - half_size)
-            y1 = max(0, cy_relative - half_size)
-            x2 = min(w_sub, cx_relative + half_size)
-            y2 = min(h_sub, cy_relative + half_size)
-
-            cropped_gray = sub_image_gray[y1:y2, x1:x2]
+            cropped_gray = full_gray_image[y1:y2, x1:x2]
             metadata.update({
                 'center': (cx, cy),
-                'padding': pad,
-                'square_size': normalized['square_size'],
+                'adaptive_padding': (pad_x, pad_y),
             })
 
         except (KeyError, ValueError, TypeError) as e:
@@ -219,14 +213,15 @@ def crop_particle_from_arrays(
             if width > height:
                 width, height = height, width
                 angle += 90
-            
-            size = (int(width), int(height))
-            cropped_gray = crop_rotated(full_gray_image, center, size, angle, normalized['rotational_padding'])
+
+            pad_x, pad_y = compute_adaptive_padding(width, height, normalized['adaptive_padding_factor'])
+            padded_size = (int(width + 2 * pad_x), int(height + 2 * pad_y))
+            cropped_gray = crop_rotated(full_gray_image, center, padded_size, angle, padding=0)
             metadata.update({
                 'center': center,
-                'size': size,
+                'size': padded_size,
                 'angle': angle,
-                'padding': normalized['rotational_padding'],
+                'adaptive_padding': (pad_x, pad_y),
             })
 
         except (KeyError, ValueError, TypeError) as e:
@@ -241,16 +236,16 @@ def crop_particle_from_arrays(
             x, y = int(particle_data[x_col]), int(particle_data[y_col])
             w, h = int(particle_data[w_col]), int(particle_data[h_col])
             
-            pad = normalized['bbox_padding']
-            x1 = max(0, x - pad)
-            y1 = max(0, y - pad)
-            x2 = min(full_gray_image.shape[1], x + w + pad)
-            y2 = min(full_gray_image.shape[0], y + h + pad)
-            
+            pad_x, pad_y = compute_adaptive_padding(w, h, normalized['adaptive_padding_factor'])
+            x1 = max(0, x - pad_x)
+            y1 = max(0, y - pad_y)
+            x2 = min(full_gray_image.shape[1], x + w + pad_x)
+            y2 = min(full_gray_image.shape[0], y + h + pad_y)
+
             cropped_gray = full_gray_image[y1:y2, x1:x2]
             metadata.update({
                 'bbox': (x, y, w, h),
-                'padding': pad,
+                'adaptive_padding': (pad_x, pad_y),
             })
 
         except (KeyError, ValueError, TypeError) as e:
@@ -264,8 +259,9 @@ def crop_particle_from_arrays(
             height = float(particle_data['rot_rect_height'])
             angle = float(particle_data['rot_rect_angle'])
 
-            padded_width = width + 2 * normalized['rotational_padding']
-            padded_height = height + 2 * normalized['rotational_padding']
+            pad_x, pad_y = compute_adaptive_padding(width, height, normalized['adaptive_padding_factor'])
+            padded_width = width + 2 * pad_x
+            padded_height = height + 2 * pad_y
 
             x1, y1, x2, y2 = compute_aabb_for_rotated_rectangle(
                 center,
@@ -280,6 +276,7 @@ def crop_particle_from_arrays(
                 'center': center,
                 'angle': angle,
                 'padded_size': (padded_width, padded_height),
+                'adaptive_padding': (pad_x, pad_y),
                 'aabb': (x1, y1, x2 - x1, y2 - y1),
             })
 
@@ -294,8 +291,9 @@ def crop_particle_from_arrays(
             height = float(particle_data['rot_rect_height'])
             angle = float(particle_data['rot_rect_angle'])
 
-            padded_width = width + 2 * normalized['rotational_padding']
-            padded_height = height + 2 * normalized['rotational_padding']
+            pad_x, pad_y = compute_adaptive_padding(width, height, normalized['adaptive_padding_factor'])
+            padded_width = width + 2 * pad_x
+            padded_height = height + 2 * pad_y
 
             x1, y1, x2, y2 = compute_square_for_rotated_rectangle(
                 center,
@@ -310,6 +308,7 @@ def crop_particle_from_arrays(
                 'center': center,
                 'angle': angle,
                 'padded_size': (padded_width, padded_height),
+                'adaptive_padding': (pad_x, pad_y),
                 'square_bbox': (x1, y1, x2 - x1, y2 - y1),
             })
 
@@ -375,7 +374,12 @@ def detect_cropped_particle_on_boundary(
     illumination_mode_of_crop: str,
     threshold_params: Dict[str, Any]
 ) -> bool:
-    """Determine whether a cropped particle touches the border of its crop."""
+    """Determine whether the main segmented particle touches the crop border.
+
+    Boundary dust/scratches can produce tiny disconnected foreground blobs on the
+    crop edge. To avoid false positives, this check evaluates only the largest
+    connected foreground component (the main particle candidate).
+    """
     h, w = image_crop_gray.shape
     if h < 3 or w < 3: return True
     
@@ -391,64 +395,21 @@ def detect_cropped_particle_on_boundary(
         logger.warning(f"Boundary check failed for {crop_filename} due to mask generation error.")
         return True 
 
-    if (binary_mask[0, :].any() or binary_mask[-1, :].any() or
-        binary_mask[:, 0].any() or binary_mask[:, -1].any()):
+    binary_uint8 = binary_mask.astype(np.uint8)
+    num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(binary_uint8, connectivity=8)
+    if num_labels <= 1:
+        return False
+
+    component_areas = stats[1:, cv2.CC_STAT_AREA]
+    largest_component_label = 1 + int(np.argmax(component_areas))
+    main_particle_mask = labels == largest_component_label
+
+    if (
+        main_particle_mask[0, :].any() or
+        main_particle_mask[-1, :].any() or
+        main_particle_mask[:, 0].any() or
+        main_particle_mask[:, -1].any()
+    ):
         return True
         
     return False
-
-if __name__ == '__main__':
-    if not logging.getLogger().hasHandlers():
-        logging.basicConfig(level=logging.DEBUG)
-
-    # ... (ParticleCropper tests can remain unchanged if you wish to keep them) ...
-    # Example from ParticleCropper test:
-    main_h, main_w = 400, 500
-    main_color_img = np.random.randint(0, 256, (main_h, main_w, 3), dtype=np.uint8)
-    cv2.ellipse(main_color_img, (250, 200), (100, 50), 25, 0, 360, (255, 0, 0), -1)
-    main_gray_img = cv2.cvtColor(main_color_img, cv2.COLOR_BGR2GRAY)
-    
-    # MODIFIED: Added test data for rotational crop
-    particles = pd.DataFrame([
-        {'X': 50, 'Y': 50, 'particle_id': 1, 'bounding_x': 40, 'bounding_y': 40, 'bounding_w': 20, 'bounding_h': 20, 'rot_rect_width': 20, 'rot_rect_height': 22, 'rot_rect_angle': 15.0},
-        {'X': 250, 'Y': 200, 'particle_id': 2, 'bounding_x': 150, 'bounding_y': 150, 'bounding_w': 200, 'bounding_h': 100, 'rot_rect_width': 200, 'rot_rect_height': 100, 'rot_rect_angle': 25.0} # Wide rectangle
-    ])
-    
-    temp_crop_output_dir = "temp_particle_ops_test_rotational" 
-    os.makedirs(temp_crop_output_dir, exist_ok=True)
-
-    logger.info("\n--- Testing Rotational Crop Mode ---")
-    cropper_config_rot = {'mode': 'rotational_rectangle', 'rotational_padding': 15}
-    rot_cropper = ParticleCropper(cropper_config_rot)
-    crop_rot, path_rot = rot_cropper.crop_single_particle_from_image(main_color_img, main_gray_img, particles.iloc[1])
-    assert crop_rot is not None and path_rot is not None
-    logger.info(f"Rotational crop successful. Saved to {path_rot}")
-    # Verify the orientation (height > width)
-    assert crop_rot.shape[0] > crop_rot.shape[1], "Rotational crop orientation logic failed."
-    logger.info("Rotational crop orientation test passed.")
-
-
-    logger.info("\n--- Testing Boundary Crop Detection (Consolidated Thresholding Logic) ---")
-    
-    crop_dark_particle_bright_bg_distinct = np.full((50, 50), 250, dtype=np.uint8) 
-    cv2.rectangle(crop_dark_particle_bright_bg_distinct, (0, 10), (30, 40), 10, -1) 
-    test_path1_distinct = os.path.join(temp_crop_output_dir, "dark_particle_touching_consolidated.png")
-    cv2.imwrite(test_path1_distinct, crop_dark_particle_bright_bg_distinct)
-    
-    # Define threshold params for the test
-    otsu_thresh_params_test = {
-        'thresholding_mode':"otsu",
-        'otsu_threshold_multiplier':0.45, 
-    }
-    is_touching_consolidated_otsu = detect_cropped_particle_on_boundary(
-        crop_dark_particle_bright_bg_distinct, test_path1_distinct, 
-        illumination_mode_of_crop="collimated", 
-        threshold_params=otsu_thresh_params_test
-    )
-    assert is_touching_consolidated_otsu is True, "Boundary crop (distinct dark particle, collimated, consolidated Otsu) detection failed"
-    logger.info("Boundary crop (distinct dark particle, collimated, consolidated Otsu) detection PASSED.")
-
-
-    if os.path.exists(temp_crop_output_dir):
-        shutil.rmtree(temp_crop_output_dir)
-        logger.info(f"Cleaned up {temp_crop_output_dir}")

@@ -3,7 +3,7 @@
 """
 User-guided flat-field and dark-frame acquisition.
 
-This script loads camera settings from ws_config.yaml, guides the user through
+This script loads camera settings from config.yml, guides the user through
 capturing a flat-field image (averaged over multiple frames), then captures a
 dark frame with the shutter closed. Outputs are saved as flat.png and dark.png
 inside <output_folder_base>/1_flat_field.
@@ -25,7 +25,7 @@ from wellscanner_acquisition_module import (
 )
 
 
-DEFAULT_CONFIG_PATH = "ws_config.yaml"
+DEFAULT_CONFIG_PATH = "config/config.yml"
 
 
 def check_camera_is_color():
@@ -304,7 +304,7 @@ def main():
     parser.add_argument(
         "--config",
         default=DEFAULT_CONFIG_PATH,
-        help="Path to acquisition configuration YAML (default: ws_config.yaml)",
+        help="Path to unified configuration YAML (default: config/config.yml)",
     )
     parser.add_argument(
         "--flat-frames",

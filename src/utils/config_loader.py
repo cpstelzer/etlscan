@@ -1,11 +1,10 @@
 # src/utils/config_loader.py
+import copy
 import functools
 import os
-from typing import Any, Dict, Optional
+from typing import Any, Dict
 
 import yaml
-
-_config: Dict[str, Any] = {}
 
 
 def _resolve_config_path(config_path: str) -> str:
@@ -26,27 +25,128 @@ def _resolve_config_path(config_path: str) -> str:
     )
 
 
+def _deep_merge(base: Dict[str, Any], overlay: Dict[str, Any]) -> Dict[str, Any]:
+    """Return a new dict where values in overlay override values in base recursively."""
+    merged = copy.deepcopy(base)
+    for key, overlay_value in overlay.items():
+        base_value = merged.get(key)
+        if isinstance(base_value, dict) and isinstance(overlay_value, dict):
+            merged[key] = _deep_merge(base_value, overlay_value)
+        else:
+            merged[key] = copy.deepcopy(overlay_value)
+    return merged
+
+
+def _link_acquisition_output_root(config: Dict[str, Any]) -> None:
+    """Inject paths.raw_data_root as acquisition.paths.output_folder_base.
+
+    Keeps raw_data_root the single source of truth for where acquisition writes
+    captured frames, while the acquisition module still reads it from its own
+    subtree (which is all it receives).
+    """
+    raw_data_root = config.get("paths", {}).get("raw_data_root")
+    if raw_data_root is None:
+        return
+    acquisition = config.setdefault("acquisition", {})
+    acq_paths = acquisition.setdefault("paths", {})
+    acq_paths["output_folder_base"] = raw_data_root
+
+
+def _assemble_system_view(config: Dict[str, Any]) -> None:
+    """Assemble the internal `system` view from the `imaging` + `segmentation` sections.
+
+    The config file keeps imaging geometry and segmentation/thresholding in two
+    clearly separated sections, but a lot of pipeline code consumes a single
+    combined `config['system']` dict (image dims + source_image_illumination_type
+    + thresholding + segmentation tuning).  This reconstructs that view so the
+    split is purely a config-file concern with no behavior change.
+    """
+    imaging = config.get("imaging")
+    segmentation = config.get("segmentation")
+    if imaging is None or segmentation is None:
+        return
+    seg = dict(segmentation)
+    thresholding = seg.pop("thresholding", {})
+    # subtracted_foreground is the shared FG/BG gate for stage 1 (batch + realtime). Lift it
+    # to a top-level system key (like thresholding) so it stays out of the segmentation-tuning
+    # view consumed by get_unified_segmentation_params (stage 2/4).
+    subtracted_foreground = seg.pop("subtracted_foreground", {})
+    config["system"] = {
+        **imaging,
+        "thresholding": thresholding,
+        "subtracted_foreground": subtracted_foreground,
+        "segmentation": seg,
+    }
+
+
+def _link_imaging_dimensions_from_roi(config: Dict[str, Any]) -> None:
+    """Derive imaging.image_width_px/height_px from the active hardware profile's ROI.
+
+    The saved frame size equals the camera ROI, which is per-hardware-profile. Keeping a
+    separately hard-coded imaging dimension lets it silently drift from the real frames
+    (it did: 4504 vs the actual 4512 for S5VPJ6415). ROI is the single source of truth, so
+    this must run after _apply_hardware_profile and before _assemble_system_view.
+    """
+    roi = config.get("acquisition", {}).get("roi", {})
+    imaging = config.setdefault("imaging", {})
+    if roi.get("width") is not None:
+        imaging["image_width_px"] = int(roi["width"])
+    if roi.get("height") is not None:
+        imaging["image_height_px"] = int(roi["height"])
+
+
+def _link_stage_controller(config: Dict[str, Any]) -> None:
+    """Inject the dedicated stage_hardware_profile into acquisition.stage_controller.
+
+    The Zaber XY stage is independent of the ETL-lens hardware_profiles, so its
+    settings live in a single top-level `stage_hardware_profile` block. Injecting
+    it here keeps `acquisition.stage_controller` as the single read location for
+    all consumers (workflows, zaber_move_binary) without duplicating values.
+    """
+    stage_profile = config.get("stage_hardware_profile")
+    if stage_profile is None:
+        return
+    acquisition = config.setdefault("acquisition", {})
+    acquisition["stage_controller"] = copy.deepcopy(stage_profile)
+
+
+def _apply_hardware_profile(config: Dict[str, Any]) -> None:
+    """Deep-merge the active hardware profile into config['acquisition'] in place."""
+    profile_name = config.get("active_hardware_profile")
+    if profile_name is None:
+        return
+    profiles = config.get("hardware_profiles", {})
+    if profile_name not in profiles:
+        raise KeyError(
+            f"active_hardware_profile '{profile_name}' not found in hardware_profiles; "
+            f"available: {sorted(profiles.keys())}"
+        )
+    profile = profiles[profile_name]
+    acquisition = config.get("acquisition", {})
+    config["acquisition"] = _deep_merge(acquisition, profile)
+
+
 @functools.lru_cache(maxsize=None)
-def load_config_once(config_path: str = "config/pipeline_config.yml") -> Dict[str, Any]:
-    """Load a YAML configuration file once and return the parsed mapping."""
+def load_config_once(config_path: str = "config/config.yml") -> Dict[str, Any]:
+    """Load the merged YAML configuration file once, apply hardware profile, return dict."""
     resolved_path = _resolve_config_path(config_path)
     try:
         with open(resolved_path, "r", encoding="utf-8") as handle:
             loaded_config: Dict[str, Any] = yaml.safe_load(handle)
-        _replace_null_with_none(loaded_config)
-        return loaded_config
     except yaml.YAMLError as exc:
         print(f"Error parsing YAML configuration file: {exc}")
         raise
 
+    _replace_null_with_none(loaded_config)
+    # Order matters: resolve the active hardware profile (ROI) first, derive the imaging
+    # dimensions from it, then assemble the system view so it picks up the derived dims.
+    _apply_hardware_profile(loaded_config)
+    _link_imaging_dimensions_from_roi(loaded_config)
+    _assemble_system_view(loaded_config)
+    _link_stage_controller(loaded_config)
+    _link_acquisition_output_root(loaded_config)
+    return loaded_config
 
-def load_config(config_path: str = "config/pipeline_config.yml") -> Dict[str, Any]:
-    """Load configuration into the legacy module cache for backward compatibility."""
-    global _config
-    if not _config:
-        _config = load_config_once(config_path)
-        print(f"Configuration loaded from: {_resolve_config_path(config_path)}")
-    return _config
 
 def _replace_null_with_none(d: Dict[str, Any]):
     """Recursively replaces 'null' string values with Python None in a dictionary."""
@@ -62,103 +162,24 @@ def _replace_null_with_none(d: Dict[str, Any]):
         elif v == 'null':
             d[k] = None
 
-def get_config() -> Dict[str, Any]:
+
+def get_unified_segmentation_params(config: Dict[str, Any]) -> Dict[str, Any]:
+    """Assemble the shared segmentation parameter dictionary from the system view.
+
+    Returns thresholding + segmentation tuning + source illumination only.  Stage-4
+    egg-detection parameters are intentionally NOT merged here: only stage 4 needs
+    them, and it merges ``stage_04_biological_analysis.egg_detection`` itself.
+
+    All required keys must be present under config['system']; missing keys raise KeyError.
     """
-    Returns the loaded configuration. Loads it if not already loaded.
-    """
-    if not _config:
-        load_config() 
-    return _config
+    system_cfg = config["system"]
+    global_thresh_cfg = system_cfg["thresholding"]
+    system_segmentation = system_cfg["segmentation"]
 
-def get_unified_segmentation_params(config: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-    """
-    Assemble a segmentation parameter dictionary by combining system defaults with
-    any stage-specific overrides. The resulting mapping is used by both the
-    segmentation helpers and Stage 04 visualizations.
-    """
-    if config is None:
-        config = get_config()
-
-    system_cfg = config.get('system', {})
-    global_thresh_cfg = system_cfg.get('thresholding', {})
-
-    # Prefer the current Stage 03 configuration, but fall back to legacy keys if needed
-    s3_config = config.get('stage_03_filtering_and_classification', {})
-    if not s3_config:
-        s3_config = config.get('stage_03_ml_classification', {})
-
-    s3_feat_params_overall = s3_config.get('feature_extraction_params', {})
-    s3_main_body_seg_params = s3_feat_params_overall.get('main_body_segmentation', {})
-    s3_egg_detection_params = s3_feat_params_overall.get('egg_detection', {})
-
-    # Start with system-level segmentation defaults when provided
-    system_segmentation_defaults = system_cfg.get('segmentation', {})
-    unified_params = system_segmentation_defaults.copy()
-
-    # Apply any Stage 03 overrides from the ML feature extraction config
-    unified_params.update(s3_main_body_seg_params)
-
-    # Override/add with global system settings
-    unified_params['source_image_illumination_type'] = system_cfg.get('source_image_illumination_type', 'darkfield')
-    unified_params['thresholding_mode'] = global_thresh_cfg.get('mode', 'otsu')
-    unified_params['otsu_threshold_multiplier'] = global_thresh_cfg.get('otsu_threshold_multiplier', 0.45)
-    unified_params['fixed_threshold_value'] = global_thresh_cfg.get('fixed_threshold_value', 70)
-
-    # Ensure core main body segmentation params have defaults if somehow missing
-    unified_params.setdefault('enable_unsharp_masking', False)
-    unified_params.setdefault('unsharp_mask_sigma', 1.0)
-    unified_params.setdefault('unsharp_mask_amount', 1.0)
-    unified_params.setdefault('min_noise_size', 50)
-    unified_params.setdefault('closing_selem_size', 1)
-    unified_params.setdefault('min_significant_area', 300)  # Used by downstream ML feature extraction
-
-    # Add egg detection parameters to this dictionary as well,
-    # because extract_ml_features expects them in the single `params` dict it receives.
-    # segment_main_body_from_image_float will ignore these egg-specific keys.
-    if s3_egg_detection_params:  # Check if the dict exists
-        for key, value in s3_egg_detection_params.items():
-            unified_params[key] = value  # Add or overwrite if somehow already present
-
-    # Ensure egg params also have defaults if not in config (for robustness, though config should provide them)
-    unified_params.setdefault('gaussian_sigma', 1.0)  # For egg blur
-    unified_params.setdefault('egg_posterior_pixel_fraction', 0.45)
-    unified_params.setdefault('egg_threshold_quantile', 0.92)
-    # ... add defaults for other egg params if desired for extreme robustness
+    unified_params: Dict[str, Any] = dict(system_segmentation)
+    unified_params["source_image_illumination_type"] = system_cfg["source_image_illumination_type"]
+    unified_params["thresholding_mode"] = global_thresh_cfg["thresholding_mode"]
+    unified_params["otsu_threshold_multiplier"] = global_thresh_cfg["otsu_threshold_multiplier"]
+    unified_params["fixed_threshold_value"] = global_thresh_cfg["fixed_threshold_value"]
 
     return unified_params
-
-
-if __name__ == "__main__":
-    try:
-        config_file_path = os.path.join(os.path.dirname(__file__), '..', '..', 'config', 'pipeline_config.yml')
-        if not os.path.exists(config_file_path): 
-            config_file_path = os.path.join('..', 'config', 'pipeline_config.yml') 
-        if not os.path.exists(config_file_path):
-             config_file_path = "config/pipeline_config.yml"
-
-        main_config = load_config(config_file_path) 
-        print("Config loaded successfully.")
-        print(f"Log level: {main_config.get('logging', {}).get('level')}")
-        
-        rf_max_depth = main_config.get('stage_03_ml_classification', {})\
-                               .get('training_params', {})\
-                               .get('rf_param_grid', {})\
-                               .get('max_depth')
-        print(f"RF max_depth options: {rf_max_depth}")
-
-        print("\n--- Testing get_unified_segmentation_params (with new config structure) ---")
-        seg_params = get_unified_segmentation_params(main_config)
-        print("Unified Segmentation Parameters (should include main_body_seg and egg_detection):")
-        for key, value in seg_params.items():
-            print(f"  {key}: {value}")
-        
-        assert 'enable_unsharp_masking' in seg_params
-        assert 'min_noise_size' in seg_params
-        assert 'egg_threshold_quantile' in seg_params 
-        assert 'gaussian_sigma' in seg_params # From egg_detection params
-
-    except FileNotFoundError:
-        print("Run this from the 'utils' directory or project root, or adjust path for testing.")
-        print(f"Attempted to load config from: {config_file_path}")
-    except Exception as e:
-        print(f"An error occurred: {e}")

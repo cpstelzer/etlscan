@@ -4,7 +4,7 @@ from __future__ import annotations
 import os
 import numpy as np
 import logging
-from typing import Optional, Tuple, Dict, Any
+from typing import Optional, Tuple, Dict, Any, Union
 
 from skimage.measure import label as skimage_label, regionprops
 
@@ -27,7 +27,9 @@ def _require_cv2(function_name: str) -> None:
         )
 
 
-def _connected_components_with_stats(binary_mask: np.ndarray):
+def _connected_components_with_stats(
+    binary_mask: np.ndarray,
+) -> Tuple[int, np.ndarray, np.ndarray, Union[np.ndarray, None]]:
     """Return connected components stats using OpenCV or a numpy fallback."""
 
     binary_uint8 = binary_mask.astype(np.uint8)
@@ -142,8 +144,10 @@ def mask_well_area(
         
         radius_fraction = mask_config.get('radius_fraction')
         if radius_fraction is None:
-            logger.error("'radius_fraction' not found in mask_config for well masking. "
-                         "Ensure it's set (e.g., to 0.67 to match original behavior).")
+            logger.error(
+                "'radius_fraction' not found in mask_config for well masking. "
+                "Ensure it is set under stage_01_initial_detection.well_masking in config.yml."
+            )
             return None, None
             
         radius = int(config_radius_px * radius_fraction)
@@ -290,47 +294,3 @@ def detect_black_mask_artifact(
         return False
 
 
-if __name__ == '__main__':
-    if not logging.getLogger().hasHandlers():
-        logging.basicConfig(level=logging.DEBUG)
-
-    # Test create_circular_mask and apply_mask
-    shape = (100, 100)
-    center = (50, 50)
-    radius = 30
-    circ_mask = create_circular_mask(shape, center, radius)
-    assert circ_mask is not None and circ_mask.shape == shape, "Circular mask creation failed"
-    logger.info("Circular mask creation test passed.")
-
-    dummy_img_for_masking = np.full(shape, 128, dtype=np.uint8)
-    masked_by_circ = apply_mask(dummy_img_for_masking, circ_mask)
-    assert masked_by_circ is not None, "Apply mask failed"
-    logger.info("Apply mask test passed.")
-
-    dummy_gray_img = np.zeros((200, 250), dtype=np.uint8)
-    cv2.circle(dummy_gray_img, (125, 100), 70, 150, -1) 
-    
-    # Test with auto_center_mask = True
-    test_mask_config_auto = {'auto_center_mask': True, 'radius_px': 100, 'radius_fraction': 0.8}
-    test_system_params_auto = {} 
-    result_img_auto, binary_mask_auto = mask_well_area(dummy_gray_img, test_mask_config_auto, test_system_params_auto)
-    assert result_img_auto is not None and binary_mask_auto is not None, "mask_well_area (auto) failed"
-    logger.info("mask_well_area (auto) test passed. Masked image shape: %s, binary mask shape: %s", result_img_auto.shape, binary_mask_auto.shape)
-
-    # Test with auto_center_mask = False (manual)
-    test_mask_config_manual = {'auto_center_mask': False, 'radius_px': 60, 'radius_fraction': 1.0}
-    test_system_params_manual = {'image_width_px': 250, 'image_height_px': 200}
-    result_img_manual, binary_mask_manual = mask_well_area(dummy_gray_img, test_mask_config_manual, test_system_params_manual)
-    assert result_img_manual is not None and binary_mask_manual is not None, "mask_well_area (manual) failed"
-    logger.info("mask_well_area (manual) test passed. Masked image shape: %s, binary mask shape: %s", result_img_manual.shape, binary_mask_manual.shape)
-    
-    # Test detect_black_mask_artifact
-    black_corner_img = np.full((100, 100), 128, dtype=np.uint8)
-    black_corner_img[0:30, 0:30] = 0 
-    temp_img_path = "temp_black_corner_test.png"
-    cv2.imwrite(temp_img_path, black_corner_img)
-
-    is_artifact = detect_black_mask_artifact(temp_img_path, min_area_ratio=0.05)
-    assert is_artifact is True, "Black mask artifact detection (corner) failed"
-    logger.info("Black mask artifact detection (corner) test passed.")
-    os.remove(temp_img_path)

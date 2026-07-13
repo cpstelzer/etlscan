@@ -15,7 +15,7 @@ from PyQt6.QtGui import QImage, QPixmap
 
 # --- Analysis Logic ---
 
-def get_well_background_peak_single(image_uint8, well_mask, min_intensity=75):
+def get_well_background_peak_single(image_uint8, well_mask, min_intensity):
     """Calculates the dominant brightness peak in the masked area."""
     well_pixels = image_uint8[well_mask]
     if well_pixels.size == 0:

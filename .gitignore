@@ -51,6 +51,10 @@ venv.bak/
 logs/
 *.log
 
+# Data files
+*.csv
+data/
+
 # Temporary files
 *.tmp
 *.bak

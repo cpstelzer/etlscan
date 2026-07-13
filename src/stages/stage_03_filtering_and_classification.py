@@ -22,12 +22,11 @@ if TYPE_CHECKING:  # pragma: no cover - for type checkers only
     import torch as torch_type
 
 from src.utils import (
-    get_config,
     get_models_dir,
     load_dataframe_from_csv,
     save_dataframe_to_csv,
 )
-from src.utils.common_exceptions import ConfigError, DataValidationError, MLModelError
+from src.utils.common_exceptions import DataValidationError, MLModelError
 
 logger = logging.getLogger(__name__)
 
@@ -80,16 +79,15 @@ SIZE_DEPENDENT_RAW_FEATURE_RULES = {
 }
 
 
-def _get_lbp_feature_count_from_config(config: Optional[dict] = None) -> int:
+def _get_lbp_feature_count_from_config(config: dict) -> int:
     """Return how many LBP columns Stage 2 should have produced."""
 
     if config is None:
-        config = get_config()
-
+        return 0
     stage2_config = config.get('stage_02_characterization', {})
     shape_config = stage2_config.get('shape_descriptors', {})
-    lbp_radii = shape_config.get('lbp_radii', [1, 3]) or []
-    lbp_points = shape_config.get('lbp_points', 8)
+    lbp_radii = shape_config.get('lbp_radii') or []
+    lbp_points = shape_config.get('lbp_points')
 
     if not lbp_radii or lbp_points is None:
         return 0
@@ -97,7 +95,7 @@ def _get_lbp_feature_count_from_config(config: Optional[dict] = None) -> int:
     return len(lbp_radii) * (lbp_points + 2)
 
 
-def _get_expected_numeric_feature_columns(config: Optional[dict] = None) -> List[str]:
+def _get_expected_numeric_feature_columns(config: dict) -> List[str]:
     """Return the numeric schema, expanding LBP columns from the Stage 2 config."""
 
     lbp_feature_count = _get_lbp_feature_count_from_config(config)
@@ -180,7 +178,7 @@ def apply_size_invariant_feature_strategy(
 
 def _validate_required_feature_columns(
     df: pd.DataFrame,
-    config: Optional[dict] = None,
+    config: dict = None,
 ) -> None:
     """Ensure Stage 3 receives the expected numeric feature set."""
 
@@ -283,12 +281,12 @@ def _ensure_crop_filename_column(df: pd.DataFrame) -> pd.DataFrame:
     return result_df
 
 
-def _load_ml_artifacts(s3_config: dict, config: Optional[dict] = None) -> tuple:
+def _load_ml_artifacts(s3_config: dict, config: dict) -> tuple:
     """Input: stage 3 config + pipeline config. Output: loaded model, scaler, feature names."""
     models_dir = get_models_dir(config)
-    rf_cfg = s3_config.get('random_forest_model', s3_config)
-    model_filename = rf_cfg.get('model_filename', 'rf_fem_classifier.joblib')
-    scaler_filename = rf_cfg.get('scaler_filename', 'rf_fem_scaler.joblib')
+    rf_cfg = s3_config['random_forest_model']
+    model_filename = rf_cfg['model_filename']
+    scaler_filename = rf_cfg['scaler_filename']
     model_path = os.path.join(models_dir, model_filename)
     scaler_path = os.path.join(models_dir, scaler_filename)
     feature_names_filename = rf_cfg.get(
@@ -405,7 +403,7 @@ def _build_efficientnet_model(num_classes: int):
     return model
 
 
-def _load_efficientnet_artifacts(s3_config: dict, config: Optional[dict] = None):
+def _load_efficientnet_artifacts(s3_config: dict, config: dict):
     """Input: stage 3 config + pipeline config. Output: EfficientNet checkpoint, model, metadata."""
 
     if torch is None:
@@ -413,9 +411,9 @@ def _load_efficientnet_artifacts(s3_config: dict, config: Optional[dict] = None)
             "EfficientNet selected but torch is unavailable. Install torch/torchvision to continue."
         )
 
-    eff_config = s3_config.get('efficient_net_model', {})
+    eff_config = s3_config['efficient_net_model']
     models_dir = get_models_dir(config)
-    checkpoint_filename = eff_config.get('checkpoint_filename', 'efficientnet_b0_best.pt')
+    checkpoint_filename = eff_config['checkpoint_filename']
     checkpoint_path = os.path.join(models_dir, checkpoint_filename)
 
     if not os.path.exists(checkpoint_path):
@@ -437,8 +435,8 @@ def _load_efficientnet_artifacts(s3_config: dict, config: Optional[dict] = None)
     model.eval()
 
     checkpoint_positive_label = checkpoint.get('positive_label')
-    positive_label = eff_config.get('positive_label') or checkpoint_positive_label or 'good'
-    input_size = int(checkpoint.get('input_size', eff_config.get('input_size', 224)))
+    positive_label = eff_config['positive_label'] or checkpoint_positive_label
+    input_size = int(checkpoint.get('input_size', eff_config['input_size']))
 
     if checkpoint_positive_label and positive_label != checkpoint_positive_label:
         logger.warning(
@@ -583,7 +581,7 @@ def run_stage_03_filtering_and_classification(
     output_dir_stage3: str,
     final_particles_crops_dir: str,
     sample_id: str,
-    config: Optional[dict] = None,
+    config: dict,
 ) -> Optional[str]:
     """Apply quality flag filters to Stage 2 final particles."""
     logger.info(
@@ -591,14 +589,11 @@ def run_stage_03_filtering_and_classification(
         sample_id,
     )
 
-    config = config or get_config()
-    s3_config = config.get('stage_03_filtering_and_classification', {})
-    if not s3_config:
-        raise ConfigError("Configuration for 'stage_03_filtering_and_classification' not found.")
-    model_type = s3_config.get('model_type', 'random_forest_model')
+    s3_config = config['stage_03_filtering_and_classification']
+    model_type = s3_config['model_type']
     use_rf_model = model_type == 'random_forest_model'
     logger.info("Stage 3 model_type configured as: %s", model_type)
-    size_invariant_enabled = bool(s3_config.get('size_invariant_features', False))
+    size_invariant_enabled = bool(s3_config['size_invariant_features'])
 
     final_particles_df = load_dataframe_from_csv(input_final_particles_csv_path)
     if final_particles_df is None or final_particles_df.empty:
@@ -639,8 +634,8 @@ def run_stage_03_filtering_and_classification(
         logger.warning("No particles remain after Stage 3 quality filtering.")
 
     ml_rejected_count = 0
-    ml_filter_cfg = s3_config.get('ml_filter', {})
-    probability_threshold = float(ml_filter_cfg.get('min_probability_threshold', 0.5))
+    ml_filter_cfg = s3_config['ml_filter']
+    probability_threshold = float(ml_filter_cfg['min_probability_threshold'])
 
     ml_classified_df = quality_filtered_df.copy()
     ml_classified_df = _ensure_crop_filename_column(ml_classified_df)

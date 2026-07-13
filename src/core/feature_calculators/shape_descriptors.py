@@ -5,6 +5,7 @@ from typing import Dict, Any, List
 import logging
 from skimage.feature import local_binary_pattern
 
+
 logger = logging.getLogger(__name__)
 
 def compute_texture_descriptors(
@@ -17,8 +18,8 @@ def compute_texture_descriptors(
     Compute LBP texture features for a masked region.
     """
     features = {}
-    mask_bool = mask > 0
-    if not np.any(mask_bool):
+    mask_region = mask > 0
+    if not np.any(mask_region):
         logger.warning("Mask is empty, cannot compute texture descriptors.")
         return features
 
@@ -28,7 +29,7 @@ def compute_texture_descriptors(
         try:
             lbp = local_binary_pattern(gray_image, P=lbp_points, R=r, method='uniform')
             hist, _ = np.histogram(
-                lbp[mask_bool],
+                lbp[mask_region],
                 bins=np.arange(lbp_points + 3),
                 range=(0, lbp_points + 2),
                 density=True

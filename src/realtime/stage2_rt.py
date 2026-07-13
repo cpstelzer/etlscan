@@ -1,0 +1,118 @@
+from __future__ import annotations
+
+from dataclasses import dataclass
+import logging
+from typing import Any, Dict, List, Optional
+
+import numpy as np
+import pandas as pd
+import skimage.util
+
+from src.core.feature_calculators.morphology_calculator import calculate_detailed_body_morphology
+from src.core.feature_calculators.quality_calculator import calculate_quality_features
+from src.core.particle_operations import normalized_crop_config
+from src.stages.stage_02_characterization import crop_particles, segment_particles
+
+logger = logging.getLogger(__name__)
+
+
+@dataclass
+class Stage2Result:
+    particles_df: pd.DataFrame
+    pre_threshold_count: int = 0
+    rejected_focus_count: int = 0
+    rejected_area_count: int = 0
+    focus_min: Optional[float] = None
+    focus_max: Optional[float] = None
+
+
+def run_stage2_realtime(
+    fg_gray: np.ndarray,
+    s1_df: pd.DataFrame,
+    frame_index: int,
+    stage2_cfg: Dict[str, Any],
+) -> Stage2Result:
+    if s1_df is None or s1_df.empty:
+        return Stage2Result(particles_df=pd.DataFrame())
+
+    working = s1_df.copy()
+    working["s1_original_index"] = working.index
+
+    max_candidates = int(stage2_cfg["max_candidates_per_frame"])
+    if len(working) > max_candidates:
+        priority_col = "main_area_filled" if "main_area_filled" in working.columns else ("area" if "area" in working.columns else None)
+        if priority_col is not None:
+            working = working.sort_values(priority_col, ascending=False).head(max_candidates).copy()
+        else:
+            working = working.head(max_candidates).copy()
+        logger.warning(
+            f"Frame {frame_index}: Stage-1 yielded {len(s1_df)} detections; "
+            f"limiting Stage-2 cropping to top {max_candidates} candidates to prevent memory pressure."
+        )
+    crop_cfg = normalized_crop_config(stage2_cfg["crop_config"])
+    illumination_mode = str(stage2_cfg["source_image_illumination"]).strip().lower()
+    seg_params_raw = stage2_cfg["segmentation_params"]
+    boundary_threshold_params = {
+        "thresholding_mode": str(seg_params_raw["thresholding_mode"]),
+        "otsu_threshold_multiplier": float(seg_params_raw["otsu_threshold_multiplier"]),
+        "fixed_threshold_value": int(seg_params_raw["fixed_threshold_value"]),
+    }
+    crop_records = crop_particles(
+        main_image_color=fg_gray,
+        main_image_gray=fg_gray,
+        particles_df=working,
+        crop_config=crop_cfg,
+        sample_id="REALTIME",
+        image_filename=f"realtime_frame_{frame_index:06d}.png",
+        frame_num=frame_index,
+        illumination_mode=illumination_mode,
+        boundary_threshold_params=boundary_threshold_params,
+    )
+    crops_df = pd.DataFrame(crop_records)
+    if crops_df.empty:
+        return Stage2Result(particles_df=crops_df)
+
+    segmentation_params = dict(seg_params_raw)
+    segmentation_params["source_image_illumination_type"] = illumination_mode
+    segmented_df = segment_particles(crops_df, segmentation_params)
+    if segmented_df.empty:
+        return Stage2Result(particles_df=segmented_df)
+
+    rows: List[Dict[str, Any]] = []
+    min_focus = float(stage2_cfg["min_focus_score"])
+    min_area = float(stage2_cfg["min_particle_area"])
+    rejected_focus = 0
+    rejected_area = 0
+    focus_values: List[float] = []
+
+    for _, row in segmented_df.iterrows():
+        crop_gray = row["crop_gray"]
+        raw_mask = row["raw_mask"]
+        filled_mask = row["filled_mask"]
+
+        feature_row: Dict[str, Any] = row.to_dict()
+        quality = calculate_quality_features(crop_gray, saved_crop_path=None, config=stage2_cfg)
+        feature_row.update(quality)
+
+        intensity = skimage.util.img_as_float(crop_gray)
+        morph = calculate_detailed_body_morphology(raw_mask, filled_mask, intensity)
+        feature_row.update({k.replace("_s4", ""): v for k, v in morph.items()})
+
+        focus_score = float(feature_row.get("variance_laplacian", 0.0))
+        focus_values.append(focus_score)
+        if focus_score <= min_focus:
+            rejected_focus += 1
+            continue
+        if float(feature_row.get("main_area_filled", 0.0)) <= min_area:
+            rejected_area += 1
+            continue
+        rows.append(feature_row)
+
+    return Stage2Result(
+        particles_df=pd.DataFrame(rows),
+        pre_threshold_count=len(segmented_df),
+        rejected_focus_count=rejected_focus,
+        rejected_area_count=rejected_area,
+        focus_min=min(focus_values) if focus_values else None,
+        focus_max=max(focus_values) if focus_values else None,
+    )

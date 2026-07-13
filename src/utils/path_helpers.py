@@ -1,84 +1,89 @@
 # src/utils/path_helpers.py
 import os
 import re
-import logging  # Import logging
+import logging
 from typing import Any, Dict, Optional, Tuple, Union, List
-from .config_loader import get_config
 
-# Initialize logger for this module.
-# It will be configured by setup_logging() when the application starts.
 logger = logging.getLogger(__name__)
 
-def get_project_base_dir(config: Optional[Dict[str, Any]] = None) -> str:
-    """Input: config dict. Output: project root path without creating files."""
-    config = config or get_config()
-    configured_base_dir = str(config.get('project_base_dir', '.'))
-    expanded_base_dir = os.path.expanduser(os.path.expandvars(configured_base_dir))
+
+def get_project_base_dir(config: Dict[str, Any]) -> str:
+    """Input: config dict. Output: project root path without creating files.
+
+    Reads ``paths.pipeline_base`` and falls back to the legacy top-level
+    ``project_base_dir`` key for configs that have not been migrated.
+    """
+    paths_cfg = config.get("paths", {})
+    configured_base_dir = paths_cfg.get("pipeline_base", config.get("project_base_dir"))
+    if configured_base_dir is None:
+        raise KeyError("config must define paths.pipeline_base (or legacy project_base_dir)")
+    expanded_base_dir = os.path.expanduser(os.path.expandvars(str(configured_base_dir)))
     return expanded_base_dir
 
-def get_sample_dir(sample_subdir_name: Optional[str] = None, config: Optional[Dict[str, Any]] = None) -> str:
+
+def get_sample_dir(config: Dict[str, Any], sample_subdir_name: Optional[str] = None) -> str:
     """
     Constructs the full path to a sample directory within data/input.
     If sample_subdir_name is 'MyBatch/SampleA', it resolves to project_base_dir/data/input/MyBatch/SampleA.
     If sample_subdir_name is None, it uses the 'sample_subdir_name' from config.
     """
-    config = config or get_config()
     base_dir = get_project_base_dir(config)
     input_data_root = os.path.join(base_dir, 'data', 'input')
 
     if sample_subdir_name is None:
-        sample_subdir_name_resolved = config.get('sample_subdir_name', 'default_sample')
+        sample_subdir_name_resolved = config.get("sample_subdir_name", "")
     else:
         sample_subdir_name_resolved = sample_subdir_name
-    
+
     return os.path.join(input_data_root, sample_subdir_name_resolved)
 
 
 def get_output_dir_for_sample(
+    config: Dict[str, Any],
     sample_subdir_name: Optional[str] = None,
     batch_name: Optional[str] = None,
-    config: Optional[Dict[str, Any]] = None
 ) -> str:
     """
     Constructs the base output path for a given sample.
     If batch_name is provided, output is project_base_dir/data/output/batch_name/sample_subdir_name.
     Otherwise, output is project_base_dir/data/output/sample_subdir_name.
     """
-    config = config or get_config()
     base_dir = get_project_base_dir(config)
     output_data_root = os.path.join(base_dir, 'data', 'output')
 
     if sample_subdir_name is None:
-        sample_subdir_name_resolved = config.get('sample_subdir_name', 'default_sample')
+        sample_subdir_name_resolved = config.get("sample_subdir_name", "")
     else:
         sample_subdir_name_resolved = sample_subdir_name
 
     if batch_name:
-        # Ensure batch_name doesn't inadvertently create nested "output/output" if it's already part of path
-        if os.path.basename(output_data_root) == batch_name: # Unlikely but defensive
-            output_path_base = output_data_root 
+        if os.path.basename(output_data_root) == batch_name:
+            output_path_base = output_data_root
         else:
             output_path_base = os.path.join(output_data_root, batch_name)
         output_path = os.path.join(output_path_base, sample_subdir_name_resolved)
     else:
         output_path = os.path.join(output_data_root, sample_subdir_name_resolved)
-    
+
     os.makedirs(output_path, exist_ok=True)
     return output_path
 
-def get_models_dir(config: Optional[Dict[str, Any]] = None) -> str:
+
+def get_models_dir(config: Dict[str, Any]) -> str:
     """Input: config dict. Output: models directory path (ensures existence)."""
     base_dir = get_project_base_dir(config)
     models_path = os.path.join(base_dir, 'models')
     os.makedirs(models_path, exist_ok=True)
     return models_path
-    
-def get_training_data_dir(config: Optional[Dict[str, Any]] = None) -> str:
+
+
+def get_training_data_dir(config: Dict[str, Any]) -> str:
     """Input: config dict. Output: training data directory path (ensures existence)."""
     base_dir = get_project_base_dir(config)
     training_data_path = os.path.join(base_dir, 'data', 'training_data')
     os.makedirs(training_data_path, exist_ok=True)
     return training_data_path
+
 
 def parse_date_plate_well(directory_path_or_name: str) -> Tuple[Optional[str], Optional[str], Optional[str]]:
     """
@@ -88,9 +93,9 @@ def parse_date_plate_well(directory_path_or_name: str) -> Tuple[Optional[str], O
     dir_name = os.path.basename(os.path.normpath(directory_path_or_name))
     match = re.match(r'(\d{8})_plate(\d+)_well(\d+)', dir_name, re.IGNORECASE)
     if match:
-        return match.group(1), match.group(2), match.group(3)  # date, plate, well
-    # logger.warning(f"Could not parse date/plate/well from directory name: {dir_name}") # Too verbose for listing
+        return match.group(1), match.group(2), match.group(3)
     return None, None, None
+
 
 def get_valid_sample_subdirectories(batch_input_dir: str) -> List[str]:
     """
@@ -101,7 +106,7 @@ def get_valid_sample_subdirectories(batch_input_dir: str) -> List[str]:
     if not os.path.isdir(batch_input_dir):
         logger.error(f"Batch input directory not found: {batch_input_dir}")
         return valid_sample_dirs
-    
+
     for item_name in sorted(os.listdir(batch_input_dir)):
         item_path = os.path.join(batch_input_dir, item_name)
         if os.path.isdir(item_path):
@@ -110,7 +115,7 @@ def get_valid_sample_subdirectories(batch_input_dir: str) -> List[str]:
                 valid_sample_dirs.append(item_name)
             else:
                 logger.debug(f"Skipping '{item_name}' in batch directory: does not match sample name format.")
-    
+
     if not valid_sample_dirs:
         logger.warning(f"No valid sample subdirectories found in: {batch_input_dir}")
     else:
@@ -128,6 +133,7 @@ def extract_frame_from_filename(filename: str) -> Optional[int]:
             logger.warning(f"Could not convert extracted frame to int in {filename}")
             return None
     return None
+
 
 def parse_sharp_crop_filename(filename: str) -> Tuple[Optional[str], Optional[Union[int, str]], Optional[int], Optional[int]]:
     """
@@ -171,79 +177,3 @@ def parse_sharp_crop_filename(filename: str) -> Tuple[Optional[str], Optional[Un
     else:
         logger.debug(f"Filename '{filename}' did not match general pattern ending in _X<digits>_Y<digits>.png.")
     return None, None, None, None
-
-
-if __name__ == '__main__':
-    if not logging.getLogger().hasHandlers():
-        logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(name)s - %(message)s')
-
-    from .config_loader import load_config 
-    try:
-        config_file_path = os.path.join(os.path.dirname(__file__), '..', '..', 'config', 'pipeline_config.yml')
-        if not os.path.exists(config_file_path):
-            config_file_path = os.path.join('config', 'pipeline_config.yml')
-        
-        load_config(config_file_path) 
-        logger.info(f"Config loaded for path_helpers __main__ from: {config_file_path}")
-        
-        logger.info(f"Project Base Dir: {get_project_base_dir()}")
-        
-        # Test get_sample_dir
-        logger.info(f"Sample Dir (default config): {get_sample_dir()}")
-        logger.info(f"Sample Dir (specific): {get_sample_dir('my_sample_01')}")
-        logger.info(f"Sample Dir (nested specific): {get_sample_dir(os.path.join('MyBatch', 'my_sample_01'))}")
-
-
-        # Test get_output_dir_for_sample
-        logger.info(f"Output Dir for Sample (default config, no batch): {get_output_dir_for_sample()}")
-        logger.info(f"Output Dir for Sample (specific sample, no batch): {get_output_dir_for_sample('my_sample_01')}")
-        logger.info(f"Output Dir for Sample (specific sample, with batch): {get_output_dir_for_sample('my_sample_01', batch_name='MyBatchOutput')}")
-        logger.info(f"Output Dir for Sample (default config sample, with batch): {get_output_dir_for_sample(batch_name='MyBatchOutput')}")
-
-
-        logger.info(f"Models Dir: {get_models_dir()}")
-        logger.info(f"Training Data Dir: {get_training_data_dir()}")
-
-        date, plate, well = parse_date_plate_well("20230101_plate1_well5_extra_info")
-        logger.info(f"Parsed: Date={date}, Plate={plate}, Well={well}")
-        date, plate, well = parse_date_plate_well("/path/to/20230101_plate1_well5")
-        logger.info(f"Parsed: Date={date}, Plate={plate}, Well={well}")
-        
-        frame = extract_frame_from_filename("20230101_plate1_well1_f00023_dpt-0.2_fd0.0mm.png")
-        logger.info(f"Parsed Original Image Frame: {frame}")
-        
-        logger.info("\n--- Testing parse_sharp_crop_filename ---")
-        test_filenames = [
-            "20250410_plate4_well4_F00008_sharp_X3208_Y1564.png",
-            "intermediate_crop_idx55_X123_Y456.png"
-        ]
-        for fn in test_filenames:
-            prefix, frm, x, y = parse_sharp_crop_filename(fn)
-            logger.info(f"File: '{fn}' -> Prefix='{prefix}', Frame='{frm}', X='{x}', Y='{y}'")
-
-        logger.info("\n--- Testing get_valid_sample_subdirectories ---")
-        # Create dummy dirs for testing
-        test_batch_dir_path = os.path.join(get_project_base_dir(), "temp_test_batch_input")
-        os.makedirs(test_batch_dir_path, exist_ok=True)
-        valid_sample_names = ["20230101_plate1_well1", "20230102_plate2_well3"]
-        invalid_names = ["not_a_sample", "20230103_plate3_well"] # missing part
-        for name in valid_sample_names + invalid_names:
-            os.makedirs(os.path.join(test_batch_dir_path, name), exist_ok=True)
-        
-        # Create a file to ensure it's ignored
-        with open(os.path.join(test_batch_dir_path, "a_file.txt"), "w") as f: f.write("test")
-
-        found_samples = get_valid_sample_subdirectories(test_batch_dir_path)
-        logger.info(f"Valid samples found in '{test_batch_dir_path}': {found_samples}")
-        assert sorted(found_samples) == sorted(valid_sample_names)
-
-        # Clean up dummy dirs
-        for name in valid_sample_names + invalid_names:
-            os.rmdir(os.path.join(test_batch_dir_path, name))
-        os.remove(os.path.join(test_batch_dir_path, "a_file.txt"))
-        os.rmdir(test_batch_dir_path)
-        logger.info(f"Cleaned up {test_batch_dir_path}")
-
-    except Exception as e:
-        logger.exception(f"Error during path_helpers test: {e}")
-        logger.error("Ensure 'config/pipeline_config.yml' is accessible or mock get_config().")

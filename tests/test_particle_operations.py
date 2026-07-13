@@ -1,12 +1,13 @@
 import numpy as np
 import pandas as pd
 import pytest
+cv2 = pytest.importorskip("cv2", reason="OpenCV is required for particle cropping utilities.", exc_type=ImportError)
 
-pytest.importorskip("cv2", reason="OpenCV is required for particle cropping utilities.", exc_type=ImportError)
 
 from src.core.particle_operations import (
     compute_square_for_rotated_rectangle,
     crop_particle_from_arrays,
+    detect_cropped_particle_on_boundary,
 )
 
 
@@ -45,7 +46,7 @@ def test_compute_square_for_rotated_rectangle_builds_square_and_clips_to_image()
 
 def test_centroid_square_rr_mode_returns_square_crop():
     """centroid_square_rr mode yields a square crop and metadata entry."""
-    crop_config = {'mode': 'centroid_square_rr', 'rotational_padding': 5}
+    crop_config = {'mode': 'centroid_square_rr', 'adaptive_padding_factor': 0.2}
     full_image = np.zeros((120, 120), dtype=np.uint8)
     particle_data = pd.Series({
         'X': 60.0,
@@ -66,3 +67,41 @@ def test_centroid_square_rr_mode_returns_square_crop():
     assert crop.shape[0] == crop.shape[1]
     assert metadata.get('mode') == 'centroid_square_rr'
     assert 'square_bbox' in metadata
+
+
+def test_boundary_detection_ignores_disconnected_edge_speck():
+    """Disconnected edge specks should not flag the crop as boundary-touching."""
+    img = np.full((120, 120), 255, dtype=np.uint8)
+    cv2.ellipse(img, (60, 60), (18, 35), 0, 0, 360, 20, -1)
+    img[0:2, 5:7] = 10  # small disconnected speck on the top edge
+
+    result = detect_cropped_particle_on_boundary(
+        image_crop_gray=img,
+        crop_filename="synthetic_disconnected.png",
+        illumination_mode_of_crop="collimated",
+        threshold_params={
+            "thresholding_mode": "fixed",
+            "fixed_threshold_value": 128,
+        },
+    )
+
+    assert result is False
+
+
+def test_boundary_detection_flags_when_edge_artifact_connects_to_main_particle():
+    """If an edge artifact is connected to the main body, boundary flag should remain true."""
+    img = np.full((120, 120), 255, dtype=np.uint8)
+    cv2.ellipse(img, (60, 60), (18, 35), 0, 0, 360, 20, -1)
+    cv2.line(img, (60, 0), (60, 25), 20, 2)  # connected to the top of the main body
+
+    result = detect_cropped_particle_on_boundary(
+        image_crop_gray=img,
+        crop_filename="synthetic_connected.png",
+        illumination_mode_of_crop="collimated",
+        threshold_params={
+            "thresholding_mode": "fixed",
+            "fixed_threshold_value": 128,
+        },
+    )
+
+    assert result is True
