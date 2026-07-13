@@ -47,6 +47,9 @@ venv.bak/
 *.sln
 *.sw?
 
+# Claude Code local (personal, machine-specific) settings
+.claude/settings.local.json
+
 # Log files
 logs/
 *.log
