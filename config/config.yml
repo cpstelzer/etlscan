@@ -27,7 +27,7 @@ paths:
   raw_data_root: "C:/wellscanner/test/"
 
 # Selects which entry under `hardware_profiles:` is deep-merged into `acquisition:` at load time.
-active_hardware_profile: "S5VPJ6415"
+active_hardware_profile: "TS1_0638_70_EL"  # TS1_0638_70_EL or S5VPJ6415
 
 # -----------------------------------------------------------------------------
 # Flat-field calibration file layout
@@ -97,14 +97,14 @@ acquisition:
     experiment_summary_log_filename: "experiment_summary_log.csv"
   focusing:
     pattern: "zigzag"
-    scan_step_um: 250
+    scan_step_um: 200
     lens_settle_time_sec: 0.025
     large_jump_threshold_dpt: -3.0
     large_jump_settle_sec: 0.040
     # scan_height_mm, scan_ratio, lens_controller_port: set by hardware_profiles
   camera:
     fps: 25.0
-    video_duration_sec: 15
+    video_duration_sec: 30
     color_mode: "Ask"
     pixel_format_preference: ["BayerRG8", "BayerBG8", "BayerGB8", "BayerGR8", "Mono8", "Mono12"]
     max_num_buffer_min: 50
@@ -145,9 +145,9 @@ acquisition:
 hardware_profiles:
   TS1_0638_70_EL:
     focusing:
-      scan_height_mm: 11.2
+      scan_height_mm: 3.2  # Default: 11.2 mm
       scan_ratio: 3.36 # Optical leverage (mm/dpt) Dry:3.52 mm/dpt; Wet: 3.36 mm/dpt
-      lens_controller_port: "COM5"
+      lens_controller_port: "COM11"
     camera:
       exposure_us: 750
     roi:
@@ -218,7 +218,7 @@ realtime_mode:
     flat_field_dir: null
     # retrieve_timeout_margin_ms is shared from acquisition.camera (single source).
     etl_control_enabled: true
-    start_dpt: -1.5
+    start_dpt: -0.5
     adaptive_enabled: false
     adaptive_window_fraction: 0.1
     adaptive_min_window_points: 3
@@ -307,8 +307,8 @@ stage_01_initial_detection:
     enabled: true
     pixel_size_um: 2.74
     magnification: 0.638
-    search_range_mm: 0.55
-    memory_frames: 5
+    search_range_mm: 1.0
+    memory_frames: 10
     min_track_length: 10
 
 # -----------------------------------------------------------------------------
