@@ -1,0 +1,120 @@
+# tests/test_tracking_plot_extent.py
+"""Tests that the Stage-1/Stage-2 tracking plots span the full imaged volume.
+
+Matplotlib autoscales to the data it is given, so a well whose organisms sit in
+one corner and barely move rendered zoomed onto that corner: the particle-free
+part of the arena was cropped away and no two wells shared a scale. The plots now
+pin their axes to the scan extent derived from config instead.
+"""
+import matplotlib
+matplotlib.use('Agg')
+import matplotlib.pyplot as plt
+import pandas as pd
+import pytest
+
+from src.utils.config_loader import get_scan_extent_mm
+from src.stages.stage_01_initial_detection import (
+    _build_tracking_figure,
+    _build_tracking_xy_figure,
+)
+from src.stages.stage_02_characterization import (
+    plot_3d_reconstructed,
+    plot_xy_reconstructed,
+)
+
+# Deliberately non-square in x/y so an axis mix-up cannot pass unnoticed.
+EXTENT_MM = (15.0, 12.0, 3.2)
+
+
+@pytest.fixture
+def corner_tracks_df():
+    """Two barely-moving tracks parked in one corner of a much larger arena."""
+    rows = []
+    for track_id, (center_x, center_y) in enumerate([(3.1, 8.2), (3.2, 8.3)]):
+        for frame in range(12):
+            rows.append({
+                'track_id': track_id,
+                'frame': frame,
+                'x_mm': center_x + frame * 0.001,
+                'y_mm': center_y + frame * 0.001,
+                'z_mm': 1.5 + frame * 0.001,
+            })
+    return pd.DataFrame(rows)
+
+
+def _limits_at_draw(ax):
+    """Read axis limits after a draw, since set_aspect only resolves then."""
+    ax.figure.canvas.draw()
+    return ax.get_xlim(), ax.get_ylim()
+
+
+def test_scan_extent_derived_from_roi_optics_and_sweep():
+    config = {
+        'system': {'image_width_px': 1000, 'image_height_px': 500},
+        'stage_01_initial_detection': {
+            'tracking': {'pixel_size_um': 2.0, 'magnification': 0.5}
+        },
+        'acquisition': {'focusing': {'scan_height_mm': 3.2}},
+    }
+
+    # 2.0 um at 0.5x = 4 um = 0.004 mm per pixel, over a 1000x500 px ROI.
+    assert get_scan_extent_mm(config) == pytest.approx((4.0, 2.0, 3.2))
+
+
+def test_stage1_3d_figure_spans_full_extent(corner_tracks_df):
+    fig = _build_tracking_figure(corner_tracks_df, EXTENT_MM)
+    ax = fig.axes[0]
+
+    xlim, ylim = _limits_at_draw(ax)
+    assert xlim == pytest.approx((0.0, 15.0))
+    assert ylim == pytest.approx((0.0, 12.0))
+    assert ax.get_zlim() == pytest.approx((0.0, 3.2))
+    plt.close(fig)
+
+
+def test_stage1_xy_figure_spans_full_extent(corner_tracks_df):
+    fig = _build_tracking_xy_figure(corner_tracks_df, EXTENT_MM)
+    ax = fig.axes[0]
+
+    # Equal aspect must not claw back the fixed limits: adjustable='datalim'
+    # would rescale them at draw time to fill the (non-square) axes box.
+    xlim, ylim = _limits_at_draw(ax)
+    assert xlim == pytest.approx((0.0, 15.0))
+    assert ylim == pytest.approx((0.0, 12.0))
+    plt.close(fig)
+
+
+@pytest.fixture
+def drawn_limits(monkeypatch):
+    """Capture the drawn axis limits of Stage-2 plots, which save and close internally."""
+    captured = []
+
+    def spy_savefig(*args, **kwargs):
+        ax = plt.gcf().axes[0]
+        ax.figure.canvas.draw()
+        captured.append((ax.get_xlim(), ax.get_ylim()))
+
+    monkeypatch.setattr(plt, 'savefig', spy_savefig)
+    return captured
+
+
+def test_stage2_3d_reconstructed_spans_full_extent(corner_tracks_df, drawn_limits, tmp_path):
+    plot_3d_reconstructed(
+        corner_tracks_df, corner_tracks_df, 'track_id', 'frame', 'z_mm',
+        str(tmp_path / 'tracks_3d.png'), None, 0.5, 5, EXTENT_MM
+    )
+
+    xlim, ylim = drawn_limits[0]
+    assert xlim == pytest.approx((0.0, 15.0))
+    assert ylim == pytest.approx((0.0, 12.0))
+
+
+def test_stage2_xy_reconstructed_spans_full_extent(corner_tracks_df, drawn_limits, tmp_path):
+    plot_xy_reconstructed(
+        corner_tracks_df, corner_tracks_df, 'track_id', 'frame',
+        str(tmp_path / 'tracks_xy.png'), None, EXTENT_MM
+    )
+
+    xlim, ylim = drawn_limits[0]
+    assert xlim == pytest.approx((0.0, 15.0))
+    assert ylim == pytest.approx((0.0, 12.0))

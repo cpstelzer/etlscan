@@ -21,7 +21,7 @@ from scipy.interpolate import UnivariateSpline
 from src.utils import (
     load_dataframe_from_csv, save_dataframe_to_csv, build_crop_filename
 )
-from src.utils.config_loader import get_unified_segmentation_params
+from src.utils.config_loader import get_scan_extent_mm, get_unified_segmentation_params
 from src.utils.path_helpers import extract_frame_from_filename
 from src.utils.common_exceptions import ConfigError
 from src.core.image_io_operations import load_image, convert_to_grayscale
@@ -171,6 +171,7 @@ def run_stage_02_characterization(
         normalized_cropping,
         image_dir_path,
         focus_cfg,
+        get_scan_extent_mm(config),
         bool(cropping_config['save_all_particle_crops']),
     )
 
@@ -378,6 +379,7 @@ def emit_focus_artifacts(
     diagnostics_df: Optional[pd.DataFrame],
     comprehensive_df: pd.DataFrame,
     focus_cfg: Dict[str, Any],
+    extent_mm: Tuple[float, float, float],
     crops_dir: Optional[str],
     sample_id: str,
     output_dir_stage2: str
@@ -417,7 +419,8 @@ def emit_focus_artifacts(
             os.path.join(focus_plots_dir, 'reconstructed_trajectories_3d.png'),
             max_tracks,
             focus_cfg.get('trajectory_smoothing_factor', 0.5),
-            focus_cfg.get('min_points_for_spline', 5)
+            focus_cfg.get('min_points_for_spline', 5),
+            extent_mm
         )
 
         plot_xy_reconstructed(
@@ -426,7 +429,8 @@ def emit_focus_artifacts(
             focus_cfg.get('track_column', 'track_id'),
             focus_cfg.get('frame_column', 'frame'),
             os.path.join(focus_plots_dir, 'reconstructed_trajectories_xy.png'),
-            max_tracks
+            max_tracks,
+            extent_mm
         )
 
         plot_diagnostics_summary(
@@ -480,6 +484,7 @@ def emit_stage2_artifacts(
     crop_config: Dict[str, Any],
     image_dir_path: str,
     focus_cfg: Dict[str, Any],
+    extent_mm: Tuple[float, float, float],
     save_all_particle_crops_flag: bool
 ) -> Optional[str]:
     """Persist Stage 2 outputs, including crops, focus artifacts, and summary CSVs."""
@@ -492,7 +497,10 @@ def emit_stage2_artifacts(
         crops_dir = os.path.join(output_dir_stage2, "stage2_all_particle_crops")
         save_all_particle_crops(crops_df, crops_dir)
 
-    emit_focus_artifacts(filtered_df, diagnostics_df, comprehensive_df, focus_cfg, crops_dir, sample_id, output_dir_stage2)
+    emit_focus_artifacts(
+        filtered_df, diagnostics_df, comprehensive_df, focus_cfg, extent_mm,
+        crops_dir, sample_id, output_dir_stage2
+    )
     emit_final_particle_crops(final_particles_df, image_dir_path, crop_config, sample_id, output_dir_stage2)
 
     return saved_csv_path
@@ -891,7 +899,8 @@ def plot_3d_reconstructed(
     outpath: str,
     n_tracks: Optional[int],
     smoothing_factor: float,
-    min_points_for_spline: int
+    min_points_for_spline: int,
+    extent_mm: Tuple[float, float, float]
 ) -> Optional[str]:
     """Render 3D trajectories with a spline-reconstructed depth profile per track.
 
@@ -901,6 +910,10 @@ def plot_3d_reconstructed(
     :func:`reconstruct_track_depth`. In-focus points are scattered at their
     measured depth. ``smoothing_factor`` and ``min_points_for_spline`` control
     the fallback reconstruction.
+
+    Axes are pinned to ``extent_mm`` (the full imaged volume) rather than
+    autoscaled to the tracks, so the plot always shows the whole field of view
+    and Z sweep and stays comparable across samples.
     """
     x_mm_col = FOCUS_X_MM_COLUMN
     y_mm_col = FOCUS_Y_MM_COLUMN
@@ -966,6 +979,10 @@ def plot_3d_reconstructed(
         plt.close(fig)
         return None
 
+    x_max_mm, y_max_mm, z_max_mm = extent_mm
+    ax.set_xlim(0, x_max_mm)
+    ax.set_ylim(0, y_max_mm)
+    ax.set_zlim(0, z_max_mm)
     ax.set_xlabel('x [mm]', fontsize=20, labelpad=18)
     ax.set_ylabel('y [mm]', fontsize=20, labelpad=18)
     ax.set_zlabel('z [mm]', fontsize=20, labelpad=18)
@@ -986,16 +1003,20 @@ def plot_xy_reconstructed(
     track_col: str,
     frame_col: str,
     outpath: str,
-    n_tracks: Optional[int]
+    n_tracks: Optional[int],
+    extent_mm: Tuple[float, float, float]
 ) -> Optional[str]:
     """Render the flat XY projection of the reconstructed trajectories.
 
     Companion to :func:`plot_3d_reconstructed`, plotting the exact same tracks
     and in-focus selections on the true XY plane. The 3D view is subject to
-    perspective distortion (a point's screen position depends on its Z and on
-    auto-scaled axis limits), which can make the XY layout look shifted versus
-    Stage 1; this projection removes that ambiguity so the two stages can be
-    compared point-for-point.
+    perspective distortion (a point's screen position depends on its Z), which
+    can make the XY layout look shifted versus Stage 1; this projection removes
+    that ambiguity so the two stages can be compared point-for-point.
+
+    Axes are pinned to the full field of view from ``extent_mm``; the aspect is
+    adjusted via the axes box because the ``datalim`` alternative would stretch
+    those fixed limits back out to fill the box.
     """
     x_mm_col = FOCUS_X_MM_COLUMN
     y_mm_col = FOCUS_Y_MM_COLUMN
@@ -1046,10 +1067,13 @@ def plot_xy_reconstructed(
         plt.close(fig)
         return None
 
+    x_max_mm, y_max_mm, _ = extent_mm
+    ax.set_xlim(0, x_max_mm)
+    ax.set_ylim(0, y_max_mm)
     ax.set_xlabel('x [mm]', fontsize=20, labelpad=10)
     ax.set_ylabel('y [mm]', fontsize=20, labelpad=10)
     ax.tick_params(axis='both', which='major', labelsize=14)
-    ax.set_aspect('equal', adjustable='datalim')
+    ax.set_aspect('equal', adjustable='box')
     ax.set_title(f'Reconstructed XY trajectories of {plotted} tracks', fontsize=22)
     plt.tight_layout()
     try:

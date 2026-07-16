@@ -207,6 +207,7 @@ both image and ML errors).
 | `float01_to_uint8` | `src/core/image_enhancement.py` | Clip-and-scale float [0,1] → uint8 [0,255] |
 | `calculate_posterior_attributes` | `src/core/feature_calculators/bio_features_calculator.py` | Annotate RegionProperties with posterior axis vector (used by Stage 4 + visualisation) |
 | `load_config_once` | `src/utils/config_loader.py` | Load and cache the YAML config |
+| `get_scan_extent_mm` | `src/utils/config_loader.py` | Full (x, y, z) mm extent of the imaged volume — the fixed axis range for the Stage-1/Stage-2 tracking plots |
 
 ---
 

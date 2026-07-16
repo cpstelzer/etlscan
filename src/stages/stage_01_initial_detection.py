@@ -18,6 +18,7 @@ from src.utils import (
     parse_date_plate_well, extract_frame_from_filename
 )
 from src.utils.common_exceptions import ProcessingError, ConfigError, DataValidationError
+from src.utils.config_loader import get_pixel_to_mm_factor, get_scan_extent_mm
 from src.core.image_io_operations import (
     load_image,
     load_flat_field_assets,
@@ -587,14 +588,13 @@ def _compare_and_fuse_particle_dfs(df_ref: pd.DataFrame, df_query: pd.DataFrame,
     logger.info(f"Fused {len(final_matched_df)} particles.")
     return final_matched_df
 
-def _process_particle_coordinates_for_tracking_df(input_df: pd.DataFrame, pixel_size_um, magnification):
+def _process_particle_coordinates_for_tracking_df(input_df: pd.DataFrame, pixel_to_mm_factor: float):
     """Convert fused particle coordinates to millimeters and extract tracking metadata."""
     logger.info("Tracking Step 1: Loading and processing fused particle data for tracking.")
     df = input_df.copy()
     if df.empty:
         logger.warning("Input DataFrame for tracking is empty. No particles to process.")
         return pd.DataFrame()
-    pixel_to_mm_factor = pixel_size_um / (magnification * 1000)
     logger.info(f"   - Using Pixel-to-MM factor: {pixel_to_mm_factor:.6f}")
     df['x_mm'] = df['X'] * pixel_to_mm_factor
     df['y_mm'] = df['Y'] * pixel_to_mm_factor
@@ -651,10 +651,19 @@ def _track_particles_3d(processed_df, search_range_mm, memory_frames, min_track_
     filtered_trajectories = filtered_trajectories.reset_index(drop=True)
     return filtered_trajectories
 
-def _build_tracking_figure(tracked_df: pd.DataFrame) -> Optional[plt.Figure]:
-    """Create a 3D matplotlib figure summarizing all tracked particle paths."""
+def _build_tracking_figure(
+    tracked_df: pd.DataFrame,
+    extent_mm: Tuple[float, float, float]
+) -> Optional[plt.Figure]:
+    """Create a 3D matplotlib figure summarizing all tracked particle paths.
+
+    Axes are pinned to ``extent_mm`` (the full imaged volume) rather than
+    autoscaled to the tracks, so the plot always shows the whole field of view
+    and Z sweep and stays comparable across samples.
+    """
     if tracked_df.empty:
         return None
+    x_max_mm, y_max_mm, z_max_mm = extent_mm
     fig = plt.figure(figsize=(10, 8))
     ax = fig.add_subplot(111, projection='3d')
     ax.set_title("3D Particle Tracks")
@@ -663,11 +672,17 @@ def _build_tracking_figure(tracked_df: pd.DataFrame) -> Optional[plt.Figure]:
     ax.set_zlabel("Z (mm)")
     for _, track in tracked_df.groupby('track_id'):
         ax.plot(track['x_mm'], track['y_mm'], track['z_mm'], linewidth=1)
+    ax.set_xlim(0, x_max_mm)
+    ax.set_ylim(0, y_max_mm)
+    ax.set_zlim(0, z_max_mm)
     plt.tight_layout()
     return fig
 
 
-def _build_tracking_xy_figure(tracked_df: pd.DataFrame) -> Optional[plt.Figure]:
+def _build_tracking_xy_figure(
+    tracked_df: pd.DataFrame,
+    extent_mm: Tuple[float, float, float]
+) -> Optional[plt.Figure]:
     """Create a 2D XY-projection figure of all tracked particle paths.
 
     Companion to :func:`_build_tracking_figure`. The 3D view is subject to
@@ -675,9 +690,14 @@ def _build_tracking_xy_figure(tracked_df: pd.DataFrame) -> Optional[plt.Figure]:
     can make the XY layout look different from how it really is. This flat
     projection plots the same trajectories on the true XY plane so the spatial
     layout can be read and compared against Stage 2 without that distortion.
+
+    Axes are pinned to the full field of view from ``extent_mm``; the aspect is
+    adjusted via the axes box because the ``datalim`` alternative would stretch
+    those fixed limits back out to fill the box.
     """
     if tracked_df.empty:
         return None
+    x_max_mm, y_max_mm, _ = extent_mm
     fig = plt.figure(figsize=(8, 8))
     ax = fig.add_subplot(111)
     ax.set_title("2D XY Projection of Particle Tracks")
@@ -685,7 +705,9 @@ def _build_tracking_xy_figure(tracked_df: pd.DataFrame) -> Optional[plt.Figure]:
     ax.set_ylabel("Y (mm)")
     for _, track in tracked_df.groupby('track_id'):
         ax.plot(track['x_mm'], track['y_mm'], linewidth=1)
-    ax.set_aspect('equal', adjustable='datalim')
+    ax.set_xlim(0, x_max_mm)
+    ax.set_ylim(0, y_max_mm)
+    ax.set_aspect('equal', adjustable='box')
     plt.tight_layout()
     return fig
 
@@ -693,12 +715,14 @@ def _build_tracking_xy_figure(tracked_df: pd.DataFrame) -> Optional[plt.Figure]:
 def run_particle_tracking(
     fused_df: pd.DataFrame,
     sample_id: str,
-    tracking_config: Dict[str, Any]
+    tracking_config: Dict[str, Any],
+    extent_mm: Tuple[float, float, float]
 ) -> Tuple[pd.DataFrame, Optional[plt.Figure], Optional[plt.Figure]]:
     """Perform particle tracking on fused detections and return data instead of writing files.
 
     Returns the tracked dataframe plus two companion figures: the 3D track plot
     and its 2D XY projection (both ``None`` when there is nothing to plot).
+    ``extent_mm`` fixes the axis ranges of those figures to the imaged volume.
     """
     logger.info(f"--- Post-S1 Tracking initiated for: {sample_id} ---")
     pixel_size_um = tracking_config.get('pixel_size_um')
@@ -709,7 +733,9 @@ def run_particle_tracking(
     if not all([pixel_size_um, magnification, search_range_mm, memory_frames, min_track_length]):
         raise ConfigError("One or more required tracking parameters are missing from the configuration.")
 
-    processed_data = _process_particle_coordinates_for_tracking_df(fused_df, pixel_size_um, magnification)
+    processed_data = _process_particle_coordinates_for_tracking_df(
+        fused_df, get_pixel_to_mm_factor(tracking_config)
+    )
     if processed_data.empty:
         logger.warning("Tracking workflow stopped: No data after initial processing.")
         return processed_data, None, None
@@ -742,8 +768,8 @@ def run_particle_tracking(
     if not final_tracked_particles_df.empty:
         final_tracked_particles_df['track_id'] = final_tracked_particles_df['track_id'].astype(int)
 
-    tracking_figure = _build_tracking_figure(final_tracked_particles_df)
-    tracking_xy_figure = _build_tracking_xy_figure(final_tracked_particles_df)
+    tracking_figure = _build_tracking_figure(final_tracked_particles_df, extent_mm)
+    tracking_xy_figure = _build_tracking_xy_figure(final_tracked_particles_df, extent_mm)
     logger.info(f"--- Post-S1 Tracking for {sample_id} COMPLETED ---")
     return final_tracked_particles_df, tracking_figure, tracking_xy_figure
 
@@ -867,7 +893,9 @@ def run_stage_01_initial_detection(
     if tracking_config['enabled']:
         # Track fused particles and defer file I/O to the stage wrapper.
         try:
-            tracked_df, tracking_fig, tracking_xy_fig = run_particle_tracking(final_sample_df, sample_id, tracking_config)
+            tracked_df, tracking_fig, tracking_xy_fig = run_particle_tracking(
+                final_sample_df, sample_id, tracking_config, get_scan_extent_mm(config)
+            )
         except Exception as e:
             logger.exception(f"Particle tracking failed for sample {sample_id}: {e}")
             tracked_df, tracking_fig, tracking_xy_fig = pd.DataFrame(), None, None
