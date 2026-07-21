@@ -24,7 +24,7 @@ paths:
   pipeline_base: "C:/sandbox"
   # Raw captured-frame root. Acquisition writes here; this is injected into
   # acquisition.paths.output_folder_base so it stays the single source of truth.
-  raw_data_root: "C:/wellscanner/test/"
+  raw_data_root: "C:/wellscanner/stentor/"
 
 # Selects which entry under `hardware_profiles:` is deep-merged into `acquisition:` at load time.
 active_hardware_profile: "TS1_0638_70_EL"  # TS1_0638_70_EL or S5VPJ6415
@@ -151,8 +151,8 @@ hardware_profiles:
     camera:
       exposure_us: 750
     roi:
-      width: 3600
-      height: 3600
+      width: 4512
+      height: 4512
     plate:
       definitions:
         "24":
@@ -249,7 +249,7 @@ stage_01_initial_detection:
   BG_frame_offset_mode: "automatic"
   bg_offset_val: 180
   well_masking:
-    create_mask: true
+    create_mask: false
     auto_center_mask: true
     radius_px: 2000
     radius_fraction: 0.75
@@ -307,7 +307,7 @@ stage_01_initial_detection:
     enabled: true
     pixel_size_um: 2.74
     magnification: 0.638
-    search_range_mm: 1.0
+    search_range_mm: 0.6
     memory_frames: 10
     min_track_length: 10
 
@@ -335,7 +335,7 @@ stage_02_characterization:
     min_sharpness_fraction: 0.15      # was 0.3: dropped genuine short peaks on fast (S5VPJ6415) sweeps
     min_prominence_fraction: 0.05
     smooth_window: 1                  # was 3: smoothing filled inter-peak valleys, collapsing prominence
-    sharpness_min_threshold: 90       # was 110: retune to this rig's variance_laplacian magnitudes
+    sharpness_min_threshold: 100       # was 110: retune to this rig's variance_laplacian magnitudes
     min_peak_distance_frames: 2       # min frames between adjacent peaks (scipy find_peaks distance)
     max_tracks_to_plot: 15
     trajectory_smoothing_factor: 0.5   # 3D depth spline: 0 interpolates, larger smooths more (unitless)
