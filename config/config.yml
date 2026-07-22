@@ -7,8 +7,8 @@
 # DISTINCT minimum-area knobs. They govern different stages/inputs and are NOT
 # duplicates -- do not consolidate them:
 #   - segmentation.min_significant_area (300)                                    : smallest region kept during segmentation
-#   - stage_01_initial_detection.particle_analysis.min_microorganism_area (500) : background-subtracted detection
-#   - stage_01_initial_detection.unsubtracted_particle_analysis.min_particle_area (1000) : unsubtracted-frame detection
+#   - stage_01_initial_detection.particle_analysis.min_microorganism_area (300) : background-subtracted detection
+#   - stage_01_initial_detection.unsubtracted_particle_analysis.min_particle_area (600) : unsubtracted-frame detection
 #   - stage_01_initial_detection.particle_comparison.default_particle_area (2000): fallback area used in track matching
 #   - realtime_mode.stage2.min_particle_area (5000)                             : realtime stage-2 candidate filtering
 
@@ -282,12 +282,12 @@ stage_01_initial_detection:
       - [0, -1, 10, -1,  0]
       - [0, -1, -1, -1,  0]
       - [0,  0,  0,  0,  0]
-    min_microorganism_area: 500
+    min_microorganism_area: 300   # was 500: recover fainter/smaller detections of the new organism
     microorganism_blur_kernel: 5
     # Background-subtracted foreground gate lives centrally under
     # segmentation.subtracted_foreground (shared with the realtime pipeline).
   unsubtracted_particle_analysis:
-    min_particle_area: 1000
+    min_particle_area: 600   # was 1000: smaller/elongated organism; recover marginal detections
     adaptive_padding_factor: 0.2
     # Local background suppression for the unsubtracted local-Otsu refinement.
     # The Otsu multiplier (segmentation.thresholding.otsu_threshold_multiplier) is <1
@@ -307,9 +307,15 @@ stage_01_initial_detection:
     enabled: true
     pixel_size_um: 2.74
     magnification: 0.638
-    search_range_mm: 0.6
+    # Link in the XY plane only. On these focus-sweep scans z is the ETL focal depth
+    # (identical for every particle in a frame, stepping ~0.2 mm/frame), so it cannot
+    # separate particles yet eats the search budget and throttles memory. 3D (false)
+    # is the legacy default; true suits fast / elongated swimmers whose 3D tracks
+    # otherwise fragment. See _track_particles_3d.
+    track_in_2d: true
+    search_range_mm: 1.0    # was 0.6: headroom for faster xy motion (FOV is ~15.5 mm)
     memory_frames: 10
-    min_track_length: 10
+    min_track_length: 5     # was 10: fast movers cross the focal window in fewer frames
 
 # -----------------------------------------------------------------------------
 # Stage 2: Universal Characterization

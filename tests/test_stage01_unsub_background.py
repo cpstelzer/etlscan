@@ -14,8 +14,13 @@ import numpy as np
 import pytest
 
 # trackpy is only used by the tracking step (not the detection helpers under test)
-# and is absent from the lightweight test env; stub it so the module imports.
-sys.modules.setdefault("trackpy", types.ModuleType("trackpy"))
+# and is absent from the lightweight test env. Use the real module when installed;
+# only stub it when missing, so we never shadow a real install for tests that do
+# exercise tracking (test isolation).
+try:
+    import trackpy  # noqa: F401,E402
+except ImportError:
+    sys.modules.setdefault("trackpy", types.ModuleType("trackpy"))
 
 from src.stages.stage_01_initial_detection import (  # noqa: E402
     _analyze_unsubtracted_locally,
