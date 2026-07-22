@@ -622,16 +622,28 @@ def _process_particle_coordinates_for_tracking_df(input_df: pd.DataFrame, pixel_
     df = df[key_cols + other_cols]
     return df
 
-def _track_particles_3d(processed_df, search_range_mm, memory_frames, min_track_length): # Unchanged
-    """Run trackpy to build 3D trajectories from processed particle coordinates."""
+def _track_particles_3d(processed_df, search_range_mm, memory_frames, min_track_length, track_in_2d=False):
+    """Run trackpy to build particle trajectories from processed coordinates.
+
+    Links in 3D ``(x, y, z)`` by default. When ``track_in_2d`` is True, links in
+    the ``(x, y)`` plane only. On focus-sweep acquisitions ``z`` is the ETL focal
+    depth: it is identical for every particle within a frame and steps ~0.2 mm per
+    frame, so it carries no particle-discriminating information yet consumes the
+    ``search_range`` budget and throttles ``memory`` (a gap of *k* frames drifts z
+    by ~0.2*k mm, breaking the link once that reaches ``search_range``). Dropping z
+    from the link metric fixes both. ``z`` is always retained in the returned frame
+    for the downstream depth merge and reconstruction, regardless of this flag.
+    """
     if processed_df.empty:
         logger.warning("Input DataFrame for tracking is empty. Skipping tracking.")
         return pd.DataFrame()
-    logger.info("Tracking Step 2: Performing 3D tracking with trackpy...")
+    pos_cols = ['x', 'y'] if track_in_2d else ['x', 'y', 'z']
+    logger.info(f"Tracking Step 2: Performing {'2D' if track_in_2d else '3D'} ({', '.join(pos_cols)}) tracking with trackpy...")
     tp_df = processed_df.rename(columns={'x_mm': 'x', 'y_mm': 'y', 'z_mm': 'z'})
     tp_df['frame'] = tp_df['frame'].astype(int)
-    pos_cols = ['x', 'y', 'z']
-    for col in pos_cols:
+    # z is always coerced and retained (the downstream merge reconstructs depth from
+    # it) even when it is excluded from the link metric in 2D mode.
+    for col in ('x', 'y', 'z'):
         tp_df[col] = pd.to_numeric(tp_df[col], errors='coerce')
     tp_df.dropna(subset=pos_cols, inplace=True)
     trajectories = tp.link(
@@ -732,6 +744,9 @@ def run_particle_tracking(
     min_track_length = tracking_config.get('min_track_length')
     if not all([pixel_size_um, magnification, search_range_mm, memory_frames, min_track_length]):
         raise ConfigError("One or more required tracking parameters are missing from the configuration.")
+    # Link in the XY plane only when requested. A plain .get default (not part of the
+    # all() check above) because False is a valid, intended value; absent key -> 3D.
+    track_in_2d = bool(tracking_config.get('track_in_2d', False))
 
     processed_data = _process_particle_coordinates_for_tracking_df(
         fused_df, get_pixel_to_mm_factor(tracking_config)
@@ -740,7 +755,9 @@ def run_particle_tracking(
         logger.warning("Tracking workflow stopped: No data after initial processing.")
         return processed_data, None, None
 
-    tracked_data = _track_particles_3d(processed_data, search_range_mm, memory_frames, min_track_length)
+    tracked_data = _track_particles_3d(
+        processed_data, search_range_mm, memory_frames, min_track_length, track_in_2d=track_in_2d
+    )
     if tracked_data.empty:
         logger.warning("Tracking workflow stopped: No tracks survived the filtering process.")
         processed_data['track_id'] = np.nan
