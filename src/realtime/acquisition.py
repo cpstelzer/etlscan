@@ -11,6 +11,7 @@ from typing import Iterator, Optional, Tuple
 import numpy as np
 
 from src.core.image_io_operations import load_image
+from src.acquire.focus_pattern import build_focus_cycle_from_up_values, build_focus_cycle_pattern
 from src.acquire.roi import set_centered_roi
 
 logger = logging.getLogger(__name__)
@@ -75,37 +76,6 @@ def _parse_etl_from_filename(path: str) -> Tuple[Optional[float], Optional[float
         return float(m.group("dpt")), float(m.group("fd_mm"))
     except ValueError:
         return None, None
-
-
-def build_focus_cycle_from_up_values(pattern: str, diopter_values_up: list[float]) -> list[float]:
-    normalized_pattern = pattern.strip().lower()
-    if normalized_pattern == "sawtooth":
-        return diopter_values_up
-    if normalized_pattern != "zigzag":
-        logger.warning("Unknown focus pattern '%s'. Defaulting to 'zigzag'.", pattern)
-    diopter_values_down: list[float] = []
-    if len(diopter_values_up) > 1:
-        diopter_values_down = diopter_values_up[-2:0:-1]
-    return diopter_values_up + diopter_values_down
-
-
-def build_focus_cycle_pattern(
-    start_dpt: float,
-    pattern: str,
-    scan_height_mm: float,
-    scan_step_um: float,
-    scan_ratio: float,
-) -> list[float]:
-    end_dpt = start_dpt + scan_height_mm / scan_ratio
-    step_dpt = (scan_step_um / 1000.0) / scan_ratio
-    if abs(step_dpt) < 1e-9:
-        return [round(start_dpt, 3)]
-
-    diopter_values_up = np.arange(start_dpt, end_dpt + (step_dpt / 2.0), step_dpt)
-    if diopter_values_up.size == 0:
-        diopter_values_up = np.array([start_dpt])
-    diopter_values_up = diopter_values_up.round(3).tolist()
-    return build_focus_cycle_from_up_values(pattern, diopter_values_up)
 
 
 def build_unique_diopter_steps(focus_cycle: list[float]) -> list[float]:

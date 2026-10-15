@@ -12,7 +12,9 @@ import pandas as pd
 
 from src.core.image_io_operations import FlatFieldCorrectionAssets, load_flat_field_assets, load_image, save_image
 
-from .acquisition import AcquisitionControl, FramePacket, build_focus_cycle_pattern, build_frame_source
+from src.acquire.focus_pattern import build_focus_cycle_pattern
+
+from .acquisition import AcquisitionControl, FramePacket, build_frame_source
 from .config import RealtimeConfig
 from .monitoring import RuntimeMonitor
 from .persistence import save_accepted_crops

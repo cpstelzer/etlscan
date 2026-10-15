@@ -48,11 +48,13 @@ well_plate_analyzer/
 │   ├── run_acquire.py          # Multi-well acquisition entry point
 │   ├── run_acquire_single.py   # Single-well acquisition entry point
 │   ├── run_acquire_experiment.py # Experiment-sweep acquisition entry point
+│   ├── run_acquire_single_sweep.py # Experiment sweep on one well (no XY stage)
 │   ├── train_model.py          # Random-Forest retraining
 │   └── train_efficientnet_model.py
 ├── src/
 │   ├── acquire/                # Hardware acquisition (Pylon + Zaber)
 │   │   ├── workflows.py        # Multi-well, experiment-sweep, single workflows
+│   │   ├── focus_pattern.py    # ETL focus cycle (shared with realtime) + plane-visit frame count
 │   │   ├── config.py           # Plate-type normalisation and settings merge
 │   │   ├── plate_layout.py     # 24/96-well coordinate generation
 │   │   ├── stage_controller.py # Zaber XY-stage abstraction
@@ -130,6 +132,7 @@ which applies these transforms at load time:
 | `stage_hardware_profile` | Dedicated Zaber XY-stage profile, independent of the ETL-lens profiles. **Injected** into `acquisition.stage_controller` (single source — not duplicated per lens profile). |
 | `acquisition.plate.type` | Run-level plate selection (`24`/`96`), **decoupled** from the hardware profile. `acquisition.plate.definitions` holds geometry; profiles override only `origin_x`/`origin_y`. Read via `get_plate_settings(acq_conf)`. |
 | Particle-area thresholds | The five `min_*_area` knobs are intentionally distinct (see the note atop `config.yml`) — do not consolidate. |
+| `acquisition.experiment_sweep` | Scan-step × pattern grid for both sweep scripts, plus `variable_recording_duration` / `plane_revisit_times` (run length = max(`camera.video_duration_sec`, time for every plane to get k visits)). |
 | Egg detection | `stage_04_biological_analysis.egg_detection` is only consumed by stage 4; it is **not** merged into `get_unified_segmentation_params`. |
 
 ---

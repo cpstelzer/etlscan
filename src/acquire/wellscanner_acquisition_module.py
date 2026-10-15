@@ -37,6 +37,7 @@ import numpy as np
 from pypylon import pylon
 import optoICC
 
+from .focus_pattern import build_focus_cycle_pattern
 from .roi import reset_roi_to_full, set_centered_roi
 
 # --- Global Mappings ---
@@ -426,38 +427,12 @@ def run_acquisition(PLATE_ID, WELL_ID, START_DPT, config, process_as_color=False
         scan_height_mm = config['focusing']['scan_height_mm']
         scan_step_um = config['focusing']['scan_step_um']
         scan_ratio = config['focusing']['scan_ratio']
-        if abs(scan_ratio) < 1e-9: raise ValueError("Scan ratio cannot be zero.")
-        end_dpt = START_DPT + scan_height_mm / scan_ratio
-        
-        step_dpt = (scan_step_um / 1000.0) / scan_ratio
-        if end_dpt < START_DPT: step_dpt = -abs(step_dpt)
-        else: step_dpt = abs(step_dpt)
-            
-        if abs(step_dpt) < 1e-9:
-             raise ValueError("Calculated diopter step is zero, cannot generate a pattern.")
+        single_cycle_pattern = build_focus_cycle_pattern(
+            START_DPT, focus_mode, scan_height_mm, scan_step_um, scan_ratio,
+        )
+        print(f"  Using '{focus_mode}' focusing pattern: {len(set(single_cycle_pattern))} planes, "
+              f"{len(single_cycle_pattern)} frames per cycle.")
 
-        diopter_values_up = np.arange(START_DPT, end_dpt + (step_dpt / 2.0), step_dpt)
-        
-        if diopter_values_up.size == 0: diopter_values_up = np.array([START_DPT])
-        diopter_values_up = diopter_values_up.round(3).tolist()
-
-        single_cycle_pattern = []
-        if focus_mode.lower() == 'sawtooth':
-            print("  Using 'sawtooth' focusing pattern.")
-            single_cycle_pattern = diopter_values_up
-            print(f"  Calculated {len(diopter_values_up)} steps for one upward ramp.")
-        else:
-            if focus_mode.lower() != 'zigzag':
-                print(f"  Warning: Unknown focus pattern '{focus_mode}'. Defaulting to 'zigzag'.")
-            print("  Using 'zigzag' focusing pattern.")
-            diopter_values_down = []
-            if len(diopter_values_up) > 1:
-                diopter_values_down = diopter_values_up[-2:0:-1]
-            single_cycle_pattern = diopter_values_up + diopter_values_down
-            print(f"  Calculated {len(diopter_values_up)} steps upward and {len(diopter_values_down)} steps downward.")
-
-        if not single_cycle_pattern: single_cycle_pattern = [START_DPT]
-        
         print(f"\n--- Pre-focusing lens to starting position: {START_DPT:.3f} dpt ---")
         try:
             lens.StaticInput.SetAsInput()
