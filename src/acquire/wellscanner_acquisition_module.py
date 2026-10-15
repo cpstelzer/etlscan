@@ -152,8 +152,9 @@ def acquire_and_save_frames(camera, lens, full_focus_pattern,
 
     last_pylon_frame_id = None
     frames_processed_count = 0
-    start_acquisition_time = time.perf_counter()
-    previous_diopter = START_DPT 
+    start_acquisition_time = time.perf_counter()  # monotonic, for elapsed-time/FPS only
+    start_acquisition_datetime = datetime.now()  # wall clock, for the log header
+    previous_diopter = START_DPT
 
     with ThreadPoolExecutor(max_workers=os.cpu_count() or 4) as executor:
         futures = {}
@@ -346,7 +347,7 @@ def acquire_and_save_frames(camera, lens, full_focus_pattern,
         os.makedirs(os.path.dirname(log_file_path), exist_ok=True)
         with open(log_file_path, mode="w", newline="", encoding="utf-8") as csvfile:
             csvfile.write("# === Acquisition Run Metadata ===\n")
-            csvfile.write(f"# Timestamp (Start): {datetime.fromtimestamp(start_acquisition_time).isoformat()}\n")
+            csvfile.write(f"# Timestamp (Start): {start_acquisition_datetime.isoformat()}\n")
             csvfile.write(f"# Plate ID: {PLATE_ID}\n")
             csvfile.write(f"# Well ID: {WELL_ID}\n")
             csvfile.write(f"# Start Diopter (dpt): {START_DPT:.3f}\n")

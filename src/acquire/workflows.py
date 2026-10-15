@@ -243,7 +243,7 @@ def rename_files_after_run(run_folder_path, string_to_remove, config):
         return
 
     print(f"  Post-processing: Renaming files in {os.path.basename(run_folder_path)}...")
-    renamed_count = 0
+    renamed_filenames = {}
     image_formats = {'.png', '.bmp', '.jpg', '.jpeg', '.tiff'}
 
     try:
@@ -260,23 +260,30 @@ def rename_files_after_run(run_folder_path, string_to_remove, config):
                 new_filename = name.replace(string_to_remove, "") + ext
                 new_path = os.path.join(run_folder_path, new_filename)
                 os.rename(old_path, new_path)
-                renamed_count += 1
+                renamed_filenames[filename] = new_filename
             except Exception as e:
                 print(f"    Error renaming {filename}: {e}")
 
-    print(f"  Renamed {renamed_count} image files.")
+    print(f"  Renamed {len(renamed_filenames)} image files.")
     metadata_log_path = os.path.join(run_folder_path, config['paths']['log_filename'])
     if os.path.exists(metadata_log_path):
         print(f"  Updating '{config['paths']['log_filename']}' with new filenames...")
         try:
-            with open(metadata_log_path, 'r', encoding='utf-8') as f:
+            with open(metadata_log_path, 'r', encoding='utf-8', newline='') as f:
                 lines = f.readlines()
-            with open(metadata_log_path, 'w', encoding='utf-8') as f:
-                for line in lines:
-                    if line.strip().startswith('#') or 'timestamp,frame_count' in line:
-                        f.write(line)
-                    else:
-                        f.write(line.replace(string_to_remove, ""))
+            num_comment_lines = next((i for i, line in enumerate(lines) if not line.startswith('#')), len(lines))
+            frame_rows = list(csv.reader(lines[num_comment_lines:]))
+            # Only the file-name part of output_filename changes: the run folder
+            # keeps its parameter suffix, so the folder part must stay as written.
+            filename_col = frame_rows[0].index('output_filename')
+            for row in frame_rows[1:]:
+                logged_path = row[filename_col]
+                logged_name = os.path.basename(logged_path)
+                if logged_name in renamed_filenames:
+                    row[filename_col] = logged_path[:-len(logged_name)] + renamed_filenames[logged_name]
+            with open(metadata_log_path, 'w', encoding='utf-8', newline='') as f:
+                f.writelines(lines[:num_comment_lines])
+                csv.writer(f).writerows(frame_rows)
             print("  Log file updated successfully.")
         except Exception as e:
             print(f"  ERROR updating {metadata_log_path}: {e}")
