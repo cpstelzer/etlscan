@@ -42,14 +42,16 @@ def _run_conf(acq_conf, step_um, pattern):
     return run_conf
 
 
-def test_repo_config_sweep_defaults():
+def test_repo_config_sweep_settings_are_valid():
+    # The sweep grid and duration switch are lab run parameters that change
+    # between experiments, so only check that the repo config passes validation
+    # and that every run can resolve a duration -- not the concrete values.
     acq = load_config_once("config/config.yml")["acquisition"]
     sweep_conf = validate_experiment_sweep_settings(acq)
-    assert sweep_conf["scan_steps_um_options"] == SCAN_STEPS
-    assert sweep_conf["focusing_pattern_options"] == PATTERNS
-    assert sweep_conf["variable_recording_duration"] is False
-    assert sweep_conf["plane_revisit_times"] == 5
-    assert acq["camera"]["video_duration_sec"] == 15
+    for step_um in sweep_conf["scan_steps_um_options"]:
+        for pattern in sweep_conf["focusing_pattern_options"]:
+            duration_sec = resolve_video_duration_sec(_run_conf(acq, step_um, pattern), 0.0)
+            assert duration_sec >= acq["camera"]["video_duration_sec"]
 
 
 @pytest.mark.parametrize(
