@@ -18,7 +18,12 @@ thin CLI entry points in ``scripts/run_acquire*.py``:
     focus offset or illumination settings) and logs each condition to an
     experiment summary CSV.
 
-All three functions delegate hardware interaction to :class:`StageController`,
+``run_single_well_sweep_workflow``
+    The same parameter sweep on one well without the XY stage. Both sweep
+    workflows share ``_run_parameter_sweep`` and read their grid and the
+    optional variable recording duration from ``acquisition.experiment_sweep``.
+
+All of these functions delegate hardware interaction to :class:`StageController`,
 imaging to ``wellscanner_acquisition_module``, and coordinate arithmetic to
 :mod:`src.acquire.plate_layout`.
 """
@@ -26,6 +31,7 @@ from __future__ import annotations
 
 import copy
 import csv
+import math
 import os
 import random
 import shutil
@@ -44,8 +50,10 @@ except Exception:  # pragma: no cover - hardware dependency unavailable in test 
 from .camera_capabilities import check_camera_is_color
 from .config import get_plate_settings
 from .experiment_logging import append_to_experiment_log, initialize_experiment_log
+from .focus_pattern import build_focus_cycle_pattern, count_frames_for_plane_visits
 from .stage_controller import StageController
 from .well_selector_gui import well_selection_gui
+from src.utils.common_exceptions import ConfigError
 
 
 def _get_acquisition_api():
@@ -235,7 +243,7 @@ def rename_files_after_run(run_folder_path, string_to_remove, config):
         return
 
     print(f"  Post-processing: Renaming files in {os.path.basename(run_folder_path)}...")
-    renamed_count = 0
+    renamed_filenames = {}
     image_formats = {'.png', '.bmp', '.jpg', '.jpeg', '.tiff'}
 
     try:
@@ -252,23 +260,30 @@ def rename_files_after_run(run_folder_path, string_to_remove, config):
                 new_filename = name.replace(string_to_remove, "") + ext
                 new_path = os.path.join(run_folder_path, new_filename)
                 os.rename(old_path, new_path)
-                renamed_count += 1
+                renamed_filenames[filename] = new_filename
             except Exception as e:
                 print(f"    Error renaming {filename}: {e}")
 
-    print(f"  Renamed {renamed_count} image files.")
+    print(f"  Renamed {len(renamed_filenames)} image files.")
     metadata_log_path = os.path.join(run_folder_path, config['paths']['log_filename'])
     if os.path.exists(metadata_log_path):
         print(f"  Updating '{config['paths']['log_filename']}' with new filenames...")
         try:
-            with open(metadata_log_path, 'r', encoding='utf-8') as f:
+            with open(metadata_log_path, 'r', encoding='utf-8', newline='') as f:
                 lines = f.readlines()
-            with open(metadata_log_path, 'w', encoding='utf-8') as f:
-                for line in lines:
-                    if line.strip().startswith('#') or 'timestamp,frame_count' in line:
-                        f.write(line)
-                    else:
-                        f.write(line.replace(string_to_remove, ""))
+            num_comment_lines = next((i for i, line in enumerate(lines) if not line.startswith('#')), len(lines))
+            frame_rows = list(csv.reader(lines[num_comment_lines:]))
+            # Only the file-name part of output_filename changes: the run folder
+            # keeps its parameter suffix, so the folder part must stay as written.
+            filename_col = frame_rows[0].index('output_filename')
+            for row in frame_rows[1:]:
+                logged_path = row[filename_col]
+                logged_name = os.path.basename(logged_path)
+                if logged_name in renamed_filenames:
+                    row[filename_col] = logged_path[:-len(logged_name)] + renamed_filenames[logged_name]
+            with open(metadata_log_path, 'w', encoding='utf-8', newline='') as f:
+                f.writelines(lines[:num_comment_lines])
+                csv.writer(f).writerows(frame_rows)
             print("  Log file updated successfully.")
         except Exception as e:
             print(f"  ERROR updating {metadata_log_path}: {e}")
@@ -422,8 +437,168 @@ def run_multiwell_workflow(*, acquisition_config_path, csv_filename):
         finalize_stage_cleanup(initialization_successful, zab_port, zab_device_x, zab_device_y, stage_controller)
 
 
-def run_experiment_sweep_workflow(*, acquisition_config_path, csv_filename,
-                                  scan_steps_um_options, focusing_pattern_options):
+_SWEEP_LOG_HEADERS = [
+    "date", "time", "plate_id", "well_id", "well_name",
+    "scan_step_um", "focus_pattern",
+    "start_dpt", "exposure_time_us", "final_acquisition_fps",
+    "any_frames_skipped", "acquisition_status", "run_folder",
+]
+_SWEEP_FOCUS_PATTERNS = ('zigzag', 'sawtooth')
+
+
+def validate_experiment_sweep_settings(acq_conf: dict) -> dict:
+    """Return ``acq_conf['experiment_sweep']`` after checking every key the sweep reads.
+
+    Raises:
+        ConfigError: if a key is missing or holds an unusable value.
+    """
+    required_keys = ('scan_steps_um_options', 'focusing_pattern_options',
+                     'variable_recording_duration', 'plane_revisit_times')
+    sweep_conf = acq_conf.get('experiment_sweep')
+    if not isinstance(sweep_conf, dict):
+        raise ConfigError("acquisition.experiment_sweep is missing from the config.")
+    missing_keys = [key for key in required_keys if key not in sweep_conf]
+    if missing_keys:
+        raise ConfigError(f"acquisition.experiment_sweep is missing required keys: {missing_keys}")
+
+    scan_steps = sweep_conf['scan_steps_um_options']
+    if (not isinstance(scan_steps, list) or not scan_steps
+            or not all(isinstance(s, (int, float)) and not isinstance(s, bool) and s > 0 for s in scan_steps)):
+        raise ConfigError(f"experiment_sweep.scan_steps_um_options must be a non-empty list of positive numbers, got {scan_steps!r}")
+    patterns = sweep_conf['focusing_pattern_options']
+    if not isinstance(patterns, list) or not patterns or not all(p in _SWEEP_FOCUS_PATTERNS for p in patterns):
+        raise ConfigError(f"experiment_sweep.focusing_pattern_options must be a non-empty list drawn from {_SWEEP_FOCUS_PATTERNS}, got {patterns!r}")
+    if not isinstance(sweep_conf['variable_recording_duration'], bool):
+        raise ConfigError(f"experiment_sweep.variable_recording_duration must be true or false, got {sweep_conf['variable_recording_duration']!r}")
+    plane_revisit_times = sweep_conf['plane_revisit_times']
+    if not isinstance(plane_revisit_times, int) or isinstance(plane_revisit_times, bool) or plane_revisit_times < 1:
+        raise ConfigError(f"experiment_sweep.plane_revisit_times must be an integer >= 1, got {plane_revisit_times!r}")
+    return sweep_conf
+
+
+def resolve_video_duration_sec(acq_conf: dict, start_dpt: float) -> float:
+    """Return the recording duration for one sweep run.
+
+    ``acq_conf`` must already carry the run's ``focusing.scan_step_um`` and
+    ``focusing.pattern``. With ``experiment_sweep.variable_recording_duration``
+    off this is ``camera.video_duration_sec``; with it on, it is the longer of
+    that and the time (at ``camera.fps``) until every focal plane of the run's
+    focus cycle was visited ``experiment_sweep.plane_revisit_times`` times.
+    """
+    camera_conf = acq_conf['camera']
+    sweep_conf = acq_conf['experiment_sweep']
+    min_duration_sec = camera_conf['video_duration_sec']
+    if not sweep_conf['variable_recording_duration']:
+        return min_duration_sec
+
+    focusing_conf = acq_conf['focusing']
+    focus_cycle = build_focus_cycle_pattern(
+        start_dpt, focusing_conf['pattern'], focusing_conf['scan_height_mm'],
+        focusing_conf['scan_step_um'], focusing_conf['scan_ratio'],
+    )
+    fps = camera_conf['fps']
+    required_frames = count_frames_for_plane_visits(focus_cycle, sweep_conf['plane_revisit_times'])
+    required_sec = required_frames / fps
+    # run_acquisition records int(duration * fps) frames; step past any float round-down.
+    while int(required_sec * fps) < required_frames:
+        required_sec = math.nextafter(required_sec, math.inf)
+    duration_sec = max(min_duration_sec, required_sec)
+    print(f"  Variable duration: {len(set(focus_cycle))} planes, {required_frames} frames "
+          f"({required_sec:.2f} s at {fps:.2f} fps) for {sweep_conf['plane_revisit_times']} visits "
+          f"per plane -> recording {duration_sec:.2f} s (minimum {min_duration_sec} s).")
+    return duration_sec
+
+
+def _init_sweep_summary_log(acq_conf):
+    base_out_dir = acq_conf['paths']['output_folder_base']
+    os.makedirs(base_out_dir, exist_ok=True)
+    exp_summary_log_pth = os.path.join(base_out_dir, acq_conf['paths']['experiment_summary_log_filename'])
+    initialize_experiment_log(exp_summary_log_pth, _SWEEP_LOG_HEADERS)
+    return base_out_dir, exp_summary_log_pth
+
+
+def _existing_sweep_run_dirs(base_out_dir, date_str, plate_num, well_num, sweep_conf):
+    existing_dirs = []
+    for step_um, pattern in product(sweep_conf['scan_steps_um_options'], sweep_conf['focusing_pattern_options']):
+        dir_to_check = os.path.join(base_out_dir, f"{date_str}_plate{plate_num}_well{well_num}_{step_um}um_{pattern}")
+        if os.path.isdir(dir_to_check):
+            existing_dirs.append(dir_to_check)
+    return existing_dirs
+
+
+def _preflight_sweep_dirs(existing_dirs):
+    preflight_delete_or_exit(
+        {
+            'dirs': existing_dirs,
+            'description_lines': [
+                "The following output directories for today's date, plate, and parameters already exist:",
+            ],
+            'option_1': "  1) PROCEED: Delete the contents of these specific directories and start the new acquisition.",
+            'none_message': "No existing directories found for this plate, date, and parameters. Proceeding.",
+            'fatal_suffix': None,
+        },
+        "Step 3: Checking for existing output directories for all parameter combinations...",
+    )
+
+
+def _run_parameter_sweep(*, acq_conf, plate_num, well_num, wellname, start_dpt_val,
+                         process_images_in_color, base_out_dir, exp_summary_log_pth):
+    """Record one well once per (scan step, focus pattern) combination, in shuffled order."""
+    sweep_conf = acq_conf['experiment_sweep']
+    parameter_combinations = list(product(sweep_conf['scan_steps_um_options'], sweep_conf['focusing_pattern_options']))
+    random.shuffle(parameter_combinations)
+    print(f"  Randomized parameter order for this well: {parameter_combinations}")
+
+    for current_step_um, current_pattern in parameter_combinations:
+        print(f"\n  -> Starting acquisition for {wellname} with Step: {current_step_um}um, Pattern: {current_pattern}")
+
+        parameter_identifier_str = f"_{current_step_um}um_{current_pattern}"
+        unique_well_id_str = f"{well_num}{parameter_identifier_str}"
+
+        modified_acq_conf = copy.deepcopy(acq_conf)
+        modified_acq_conf['focusing']['scan_step_um'] = current_step_um
+        modified_acq_conf['focusing']['pattern'] = current_pattern
+        modified_acq_conf['camera']['video_duration_sec'] = resolve_video_duration_sec(modified_acq_conf, start_dpt_val)
+
+        _, run_acquisition = _get_acquisition_api()
+        well_acq_results = run_acquisition(
+            plate_num,
+            unique_well_id_str,
+            start_dpt_val,
+            modified_acq_conf,
+            process_as_color=process_images_in_color,
+        )
+
+        date_fldr_str = datetime.now().strftime("%Y%m%d")
+        run_fldr_name = f"{date_fldr_str}_plate{plate_num}_well{unique_well_id_str}"
+        unique_run_folder_path = os.path.join(base_out_dir, run_fldr_name)
+
+        if well_acq_results.get('status') == 'success':
+            rename_files_after_run(unique_run_folder_path, parameter_identifier_str, modified_acq_conf)
+
+        append_to_experiment_log(
+            exp_summary_log_pth,
+            lambda now, _r=well_acq_results, _s=current_step_um, _p=current_pattern: [
+                now.strftime("%Y-%m-%d"), now.strftime("%H:%M:%S"), plate_num, well_num, wellname,
+                _s, _p, f"{start_dpt_val:.2f}", _r.get('actual_exposure_us', 'N/A'), f"{_r.get('final_fps', 0.0):.2f}",
+                _r.get('any_frames_skipped', True), _r.get('status', 'failed'), unique_run_folder_path,
+            ],
+        )
+
+        if well_acq_results.get('status') == 'success':
+            print(f"  Acquisition and renaming for {wellname} ({current_step_um}um, {current_pattern}) successful.")
+            final_fps = well_acq_results.get('final_fps', 0.0)
+            configured_fps = modified_acq_conf['camera']['fps']
+            if sweep_conf['variable_recording_duration'] and final_fps < configured_fps - 0.1:
+                print(f"  WARNING: camera ran at {final_fps:.2f} fps instead of {configured_fps:.2f} fps; "
+                      f"fewer frames were recorded, so the plane-visit target may not be met.")
+        else:
+            print(f"  Acquisition for {wellname} ({current_step_um}um, {current_pattern}) FAILED.")
+
+        time.sleep(2)
+
+
+def run_experiment_sweep_workflow(*, acquisition_config_path, csv_filename):
     try:
         acq_conf = load_acquisition_config(acquisition_config_path)
     except SystemExit:
@@ -431,6 +606,7 @@ def run_experiment_sweep_workflow(*, acquisition_config_path, csv_filename,
     except Exception as e:
         print(f"Unexpected error loading configuration: {e}. Exiting.")
         return
+    sweep_conf = validate_experiment_sweep_settings(acq_conf)
 
     print("Step 1: Well Selection")
     if not select_wells(acq_conf, csv_filename):
@@ -440,19 +616,7 @@ def run_experiment_sweep_workflow(*, acquisition_config_path, csv_filename,
 
     process_images_in_color = decide_color_mode(acq_conf)
 
-    summary_log_fn = acq_conf.get('paths', {}).get('experiment_summary_log_filename', 'experiment_summary_log.csv')
-    base_out_dir = acq_conf.get('paths', {}).get('output_folder_base', '.')
-    os.makedirs(base_out_dir, exist_ok=True)
-    exp_summary_log_pth = os.path.join(base_out_dir, summary_log_fn)
-    initialize_experiment_log(
-        exp_summary_log_pth,
-        [
-            "date", "time", "plate_id", "well_id", "well_name",
-            "scan_step_um", "focus_pattern",
-            "start_dpt", "exposure_time_us", "final_acquisition_fps",
-            "any_frames_skipped", "acquisition_status", "run_folder",
-        ],
-    )
+    base_out_dir, exp_summary_log_pth = _init_sweep_summary_log(acq_conf)
 
     plate_num, start_dpt_val = prompt_plate_and_dpt()
 
@@ -465,27 +629,13 @@ def run_experiment_sweep_workflow(*, acquisition_config_path, csv_filename,
         for well_row in all_wells_data_for_check:
             try:
                 well_num = int(well_row['wellnr'])
-                for step_um in scan_steps_um_options:
-                    for pattern in focusing_pattern_options:
-                        unique_well_id_str = f"{well_num}_{step_um}um_{pattern}"
-                        dir_to_check = os.path.join(base_out_dir, f"{date_str}_plate{plate_num}_well{unique_well_id_str}")
-                        if os.path.isdir(dir_to_check):
-                            existing_combination_dirs.append(dir_to_check)
             except (ValueError, KeyError):
                 continue
+            existing_combination_dirs.extend(
+                _existing_sweep_run_dirs(base_out_dir, date_str, plate_num, well_num, sweep_conf)
+            )
 
-        preflight_delete_or_exit(
-            {
-                'dirs': existing_combination_dirs,
-                'description_lines': [
-                    "The following output directories for today's date, plate, and parameters already exist:",
-                ],
-                'option_1': "  1) PROCEED: Delete the contents of these specific directories and start the new acquisition.",
-                'none_message': "No existing directories found for this plate, date, and parameters. Proceeding.",
-                'fatal_suffix': None,
-            },
-            "Step 3: Checking for existing output directories for all parameter combinations...",
-        )
+        _preflight_sweep_dirs(existing_combination_dirs)
 
     except FileNotFoundError:
         print(f"ERROR: Cannot perform directory check because '{csv_filename}' was not found.")
@@ -515,7 +665,7 @@ def run_experiment_sweep_workflow(*, acquisition_config_path, csv_filename,
                     well_num = int(well_row['wellnr'])
                 except (ValueError, KeyError) as err:
                     print(f"Skipping row {well_row} due to error: {err}")
-                    for step_um, pattern in product(scan_steps_um_options, focusing_pattern_options):
+                    for step_um, pattern in product(sweep_conf['scan_steps_um_options'], sweep_conf['focusing_pattern_options']):
                         unique_well_id_str = f"{well_row.get('wellnr', 'err')}_{step_um}um_{pattern}"
                         run_fldr = f"plate{plate_num}_well{unique_well_id_str}_data_error"
                         append_to_experiment_log(
@@ -533,51 +683,16 @@ def run_experiment_sweep_workflow(*, acquisition_config_path, csv_filename,
                     x_mm, y_mm, current_x_pos, current_y_pos, zab_device_x, zab_device_y, zab_port,
                 )
 
-                parameter_combinations = list(product(scan_steps_um_options, focusing_pattern_options))
-                random.shuffle(parameter_combinations)
-                print(f"  Randomized parameter order for this well: {parameter_combinations}")
-
-                for current_step_um, current_pattern in parameter_combinations:
-                    print(f"\n  -> Starting acquisition for {wellname} with Step: {current_step_um}um, Pattern: {current_pattern}")
-
-                    parameter_identifier_str = f"_{current_step_um}um_{current_pattern}"
-                    unique_well_id_str = f"{well_num}{parameter_identifier_str}"
-
-                    modified_acq_conf = copy.deepcopy(acq_conf)
-                    modified_acq_conf['focusing']['scan_step_um'] = current_step_um
-                    modified_acq_conf['focusing']['pattern'] = current_pattern
-
-                    _, run_acquisition = _get_acquisition_api()
-                    well_acq_results = run_acquisition(
-                        plate_num,
-                        unique_well_id_str,
-                        start_dpt_val,
-                        modified_acq_conf,
-                        process_as_color=process_images_in_color,
-                    )
-
-                    date_fldr_str = datetime.now().strftime("%Y%m%d")
-                    run_fldr_name = f"{date_fldr_str}_plate{plate_num}_well{unique_well_id_str}"
-                    unique_run_folder_path = os.path.join(base_out_dir, run_fldr_name)
-
-                    if well_acq_results.get('status') == 'success':
-                        rename_files_after_run(unique_run_folder_path, parameter_identifier_str, modified_acq_conf)
-
-                    append_to_experiment_log(
-                        exp_summary_log_pth,
-                        lambda now, _r=well_acq_results, _s=current_step_um, _p=current_pattern: [
-                            now.strftime("%Y-%m-%d"), now.strftime("%H:%M:%S"), plate_num, well_num, wellname,
-                            _s, _p, f"{start_dpt_val:.2f}", _r.get('actual_exposure_us', 'N/A'), f"{_r.get('final_fps', 0.0):.2f}",
-                            _r.get('any_frames_skipped', True), _r.get('status', 'failed'), unique_run_folder_path,
-                        ],
-                    )
-
-                    if well_acq_results.get('status') == 'success':
-                        print(f"  Acquisition and renaming for {wellname} ({current_step_um}um, {current_pattern}) successful.")
-                    else:
-                        print(f"  Acquisition for {wellname} ({current_step_um}um, {current_pattern}) FAILED.")
-
-                    time.sleep(2)
+                _run_parameter_sweep(
+                    acq_conf=acq_conf,
+                    plate_num=plate_num,
+                    well_num=well_num,
+                    wellname=wellname,
+                    start_dpt_val=start_dpt_val,
+                    process_images_in_color=process_images_in_color,
+                    base_out_dir=base_out_dir,
+                    exp_summary_log_pth=exp_summary_log_pth,
+                )
 
                 if idx < len(all_wells_data) - 1:
                     print("\nWaiting before next well...")
@@ -594,6 +709,36 @@ def run_experiment_sweep_workflow(*, acquisition_config_path, csv_filename,
         traceback.print_exc()
     finally:
         finalize_stage_cleanup(initialization_successful, zab_port, zab_device_x, zab_device_y, stage_controller)
+
+
+def run_single_well_sweep_workflow(*, acquisition_config_path, plate_no, well_no, start_dpt):
+    """Parameter sweep (acquisition.experiment_sweep) on one well, without the XY stage."""
+    acq_conf = load_acquisition_config(acquisition_config_path)
+    validate_experiment_sweep_settings(acq_conf)
+
+    process_images_in_color = decide_color_mode(acq_conf)
+
+    base_out_dir, exp_summary_log_pth = _init_sweep_summary_log(acq_conf)
+
+    date_str = datetime.now().strftime("%Y%m%d")
+    _preflight_sweep_dirs(
+        _existing_sweep_run_dirs(base_out_dir, date_str, plate_no, well_no, acq_conf['experiment_sweep'])
+    )
+
+    input("Ensure:\n1) Lid\n2) Light source\n3) Devices connected\n(Enter to start)\n")
+
+    print(f"\n--- Sweeping Plate {plate_no}, Well {well_no}, Start DPT {start_dpt:.2f} ---")
+    _run_parameter_sweep(
+        acq_conf=acq_conf,
+        plate_num=plate_no,
+        well_num=well_no,
+        wellname='N/A',
+        start_dpt_val=start_dpt,
+        process_images_in_color=process_images_in_color,
+        base_out_dir=base_out_dir,
+        exp_summary_log_pth=exp_summary_log_pth,
+    )
+    print("\nAll parameter combinations processed.")
 
 
 def run_single_well_workflow(*, acquisition_config_path, plate_no, well_no, start_dpt):

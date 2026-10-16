@@ -22,16 +22,14 @@ CSV_FILENAME = "wellscanner_coords.csv"
 ACQUISITION_CONFIG_PATH = os.path.join(
     os.path.dirname(__file__), "..", "config", "config.yml"
 )
-SCAN_STEPS_UM_OPTIONS = [100, 200, 300, 400, 500, 600, 700]
-FOCUSING_PATTERN_OPTIONS = ['zigzag', 'sawtooth']
+# The parameter grid (scan steps x focusing patterns) and the optional variable
+# recording duration live in acquisition.experiment_sweep in the config.
 
 
 def main():
     run_experiment_sweep_workflow(
         acquisition_config_path=ACQUISITION_CONFIG_PATH,
         csv_filename=CSV_FILENAME,
-        scan_steps_um_options=SCAN_STEPS_UM_OPTIONS,
-        focusing_pattern_options=FOCUSING_PATTERN_OPTIONS,
     )
 
 
