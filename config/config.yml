@@ -24,7 +24,7 @@ paths:
   pipeline_base: "C:/sandbox"
   # Raw captured-frame root. Acquisition writes here; this is injected into
   # acquisition.paths.output_folder_base so it stays the single source of truth.
-  raw_data_root: "C:/wellscanner/stentor/"
+  raw_data_root: "C:/wellscanner/test/"
 
 # Selects which entry under `hardware_profiles:` is deep-merged into `acquisition:` at load time.
 active_hardware_profile: "TS1_0638_70_EL"  # TS1_0638_70_EL or S5VPJ6415
@@ -107,14 +107,14 @@ acquisition:
     # run_acquire_single_sweep.py (single well): every combination of step size
     # and pattern is recorded once per well, in shuffled order. Each combination
     # overrides focusing.scan_step_um / focusing.pattern for its run only.
-    scan_steps_um_options: [100, 200, 300, 400, 500, 600, 700]
-    focusing_pattern_options: ["zigzag", "sawtooth"]
+    scan_steps_um_options: [150, 250, 350, 450, 550]
+    focusing_pattern_options: ["zigzag"] # zigzag and/or sawtooth
     # false: every run records camera.video_duration_sec.
     # true: every run records max(camera.video_duration_sec, time needed until
     #   every focal plane -- including the two end planes -- was visited at
     #   least plane_revisit_times times at camera.fps). Frames needed for N
     #   planes and k visits: sawtooth k*N, zigzag (2k-1)*(N-1)+1.
-    variable_recording_duration: false
+    variable_recording_duration: true
     plane_revisit_times: 5
   camera:
     fps: 25.0
@@ -159,7 +159,7 @@ acquisition:
 hardware_profiles:
   TS1_0638_70_EL:
     focusing:
-      scan_height_mm: 3.2  # Default: 11.2 mm
+      scan_height_mm: 14  # Default: 11.2 mm
       scan_ratio: 3.36 # Optical leverage (mm/dpt) Dry:3.52 mm/dpt; Wet: 3.36 mm/dpt
       lens_controller_port: "COM11"
     camera:
@@ -174,7 +174,7 @@ hardware_profiles:
           origin_y: 17.963
   S5VPJ6415:
     focusing:
-      scan_height_mm: 3
+      scan_height_mm: 14
       scan_ratio: 4.89 # Optical leverage (mm/dpt) Dry:3.56 mm/dpt; Wet: 4.89 mm/dpt
       lens_controller_port: "COM10"
     camera:
@@ -260,8 +260,45 @@ realtime_mode:
 # Stage 1: Detection & Pre-Filtering
 # -----------------------------------------------------------------------------
 stage_01_initial_detection:
+  # Time-shift background (run_pipeline default, --background_source time_shift): BG = a later
+  # frame of the same recording, so only moving specimens survive the subtraction.
   BG_frame_offset_mode: "automatic"
   bg_offset_val: 180
+  # External background (--background_source external): BG = the same frame of a separate
+  # specimen-free recording of the well, so non-moving (e.g. fixated) specimens are found too.
+  # --input_batch_dir is the experiment root holding <fg_subdir>/ and <bg_subdir>/ with
+  # identically named sample folders. Pairs match by frame index + focal plane (strict) and
+  # the two runs' image-defining metadata must agree. Because the runs lie minutes apart,
+  # each BG frame first gets the FG's low-frequency illumination and the well rim is excluded;
+  # everything else (segmentation.subtracted_foreground gate, detection, tracking) is shared
+  # with the time-shift mode. Read only in external mode.
+  external_background:
+    fg_subdir: "fg"
+    bg_subdir: "bg"
+    # FG-BG difference is median-filtered on a frame shrunk by this factor ...
+    illumination_match_downsample: 8
+    # ... with this odd kernel (downsampled px; 31 x 8 = 248 px full-res, >> organism size).
+    illumination_match_median_kernel_px: 31
+    # Inset (px) of the BG well mask: drops the slightly shifted well rim / meniscus edge.
+    rim_exclusion_px: 60
+    # A sample fails when more of its frames than this trip the subtracted-foreground guard
+    # (the BG run does not show the same scene, e.g. a moved dish).
+    max_failed_frame_fraction: 0.2
+    # Specimens here are static, and many are detectable only while the sweep passes their
+    # focal plane, so tracking bridges one full focus-sweep period (derived per sample from
+    # its fd == 0 frames) instead of tracking.memory_frames; requires tracking.track_in_2d.
+    # With that long memory, tracking.search_range_mm (sized for moving specimens) lets a
+    # waiting track absorb a neighbouring object, so static objects link within this radius
+    # (covers centroid jitter, typically 20-30 px = 0.09-0.13 mm).
+    static_search_range_mm: 0.25
+    # Lint rejection, per tracked object (after tracking, before Stage 2): an object is dropped
+    # only when at least fibre_min_detection_share of its detections are fibre-shaped
+    # (s1_aspect_ratio >= fibre_min_aspect_ratio AND s1_solidity <= fibre_max_solidity).
+    # Lint looks thin only in focus, so a per-detection rule would catch little. Deliberately
+    # conservative: compact dust is left to Stage 3 rather than risk rejecting animals.
+    fibre_min_aspect_ratio: 4.0
+    fibre_max_solidity: 0.5
+    fibre_min_detection_share: 0.10
   well_masking:
     create_mask: false
     auto_center_mask: true

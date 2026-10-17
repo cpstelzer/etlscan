@@ -7,7 +7,7 @@ import time
 import shutil
 import json
 from dataclasses import dataclass
-from typing import Dict, Optional, List, Union
+from typing import Any, Dict, Optional, List, Tuple, Union
 import pandas as pd
 
 current_dir = os.path.dirname(os.path.abspath(__file__))
@@ -22,6 +22,11 @@ from src.utils import (
 # --- MODIFIED: Added MLModelError to the import list ---
 from src.utils.common_exceptions import ConfigError, ProcessingError, DataValidationError, MLModelError
 from src.utils.path_helpers import get_valid_sample_subdirectories
+from src.utils.acquisition_metadata import (
+    validate_background_compatibility,
+    load_experiment_design,
+    resolve_sample_design_values,
+)
 
 # Import stage modules
 from src.stages.stage_01_initial_detection import run_stage_01_initial_detection
@@ -31,15 +36,26 @@ from src.stages.stage_04_biological_analysis import run_stage_04_biological_anal
 
 logger = logging.getLogger(__name__)
 
+# Stage-1 background sources (--background_source). time_shift: BG frames come from the
+# same recording a few seconds later (only moving specimens survive the subtraction).
+# external: BG frames come from a separate specimen-free recording of the same well; the
+# batch dir is then the experiment root holding the FG and BG sample-folder trees.
+BACKGROUND_SOURCE_TIME_SHIFT = "time_shift"
+BACKGROUND_SOURCE_EXTERNAL = "external"
+
 
 @dataclass(frozen=True)
 class SamplePaths:
-    """Structured collection of input/output paths for a single sample run."""
+    """Structured collection of input/output paths for a single sample run.
+
+    ``sample_bg_dir`` is the external-background sample folder, None for time-shift runs.
+    """
     sample_id: str
     batch_dir: str
     batch_dir_name: str
     batch_output_parent_dir: str
     sample_input_dir: str
+    sample_bg_dir: Optional[str]
     sample_output_base_dir: str
     stage_dirs: Dict[str, str]
     stage_outputs: Dict[str, str]
@@ -87,16 +103,30 @@ def _find_resume_start_index(
     valid_sample_ids: List[str],
     config: dict,
     input_batch_dir: str,
+    background_source: str,
 ) -> int:
     """Input: sample list. Output: index of first sample without a completion marker."""
     for idx, sample_id in enumerate(valid_sample_ids):
-        sample_paths = prepare_sample_paths(config, input_batch_dir, sample_id)
+        sample_paths = prepare_sample_paths(config, input_batch_dir, sample_id, background_source)
         if not _has_completion_marker(sample_paths):
             return idx
     return len(valid_sample_ids)
 
 
-def prepare_sample_paths(config: dict, batch_dir: str, sample_id: str) -> SamplePaths:
+def get_sample_root_dirs(config: dict, batch_dir: str, background_source: str) -> Tuple[str, Optional[str]]:
+    """Input: batch dir + background source. Output: (FG sample root, BG sample root or None).
+
+    For an external background the batch dir is the experiment root; the FG and BG
+    sample folders live in the subfolders named in
+    ``stage_01_initial_detection.external_background``.
+    """
+    if background_source == BACKGROUND_SOURCE_EXTERNAL:
+        layout = config["stage_01_initial_detection"]["external_background"]
+        return os.path.join(batch_dir, layout["fg_subdir"]), os.path.join(batch_dir, layout["bg_subdir"])
+    return batch_dir, None
+
+
+def prepare_sample_paths(config: dict, batch_dir: str, sample_id: str, background_source: str) -> SamplePaths:
     """Input: config dict and sample identifiers. Output: structured sample paths without I/O."""
     batch_dir_name = os.path.basename(os.path.normpath(batch_dir))
     if not batch_dir_name:
@@ -105,7 +135,9 @@ def prepare_sample_paths(config: dict, batch_dir: str, sample_id: str) -> Sample
 
     project_base_dir = get_project_base_dir(config)
     batch_output_parent_dir = os.path.join(project_base_dir, "data", "output", batch_dir_name)
-    sample_input_dir = os.path.join(batch_dir, sample_id)
+    sample_root_dir, bg_sample_root_dir = get_sample_root_dirs(config, batch_dir, background_source)
+    sample_input_dir = os.path.join(sample_root_dir, sample_id)
+    sample_bg_dir = os.path.join(bg_sample_root_dir, sample_id) if bg_sample_root_dir is not None else None
     sample_output_base_dir = os.path.join(batch_output_parent_dir, sample_id)
 
     stage_dirs = {
@@ -138,6 +170,7 @@ def prepare_sample_paths(config: dict, batch_dir: str, sample_id: str) -> Sample
         batch_dir_name=batch_dir_name,
         batch_output_parent_dir=batch_output_parent_dir,
         sample_input_dir=sample_input_dir,
+        sample_bg_dir=sample_bg_dir,
         sample_output_base_dir=sample_output_base_dir,
         stage_dirs=stage_dirs,
         stage_outputs=stage_outputs,
@@ -214,6 +247,67 @@ def write_batch_rollups(
             logger.info("Batch-level %s updated at %s.", label, saved_path)
 
 
+def validate_sample_inputs(
+    config: dict,
+    batch_dir: str,
+    sample_ids: List[str],
+    background_source: str,
+    experiment_design_path: Optional[str],
+) -> Dict[str, Dict[str, Any]]:
+    """Input: samples to run. Output: experiment-design values per sample (empty without a design).
+
+    Cross-checks every sample before any image is processed, so a mis-assembled batch fails
+    at once instead of after hours of processing: an external-background sample needs its
+    BG folder and a BG run recorded with the same image-defining settings; with an
+    experiment design, each sample needs a design row whose scan step matches its metadata.
+    All problems are collected and raised together as one DataValidationError.
+    """
+    log_filename = config["acquisition"]["paths"]["log_filename"]
+    design_df = load_experiment_design(experiment_design_path) if experiment_design_path else None
+    design_values_by_sample: Dict[str, Dict[str, Any]] = {}
+    problems: List[str] = []
+    for sample_id in sample_ids:
+        sample_paths = prepare_sample_paths(config, batch_dir, sample_id, background_source)
+        metadata_log_paths = [os.path.join(sample_paths.sample_input_dir, log_filename)]
+        try:
+            if sample_paths.sample_bg_dir is not None:
+                if not os.path.isdir(sample_paths.sample_bg_dir):
+                    raise DataValidationError(f"background folder missing: {sample_paths.sample_bg_dir}")
+                bg_metadata_log_path = os.path.join(sample_paths.sample_bg_dir, log_filename)
+                validate_background_compatibility(metadata_log_paths[0], bg_metadata_log_path)
+                metadata_log_paths.append(bg_metadata_log_path)
+            if design_df is not None:
+                design_values_by_sample[sample_id] = resolve_sample_design_values(
+                    design_df, sample_id, metadata_log_paths
+                )
+        except (DataValidationError, FileNotFoundError) as e:
+            problems.append(f"{sample_id}: {e}")
+    if problems:
+        raise DataValidationError(
+            f"Input validation failed for {len(problems)} sample(s):\n  " + "\n  ".join(problems)
+        )
+    return design_values_by_sample
+
+
+def annotate_sample_outputs(csv_paths: List[str], design_values: Dict[str, Any]) -> None:
+    """Input: per-sample output CSVs + design values. Output: CSVs rewritten with design columns first.
+
+    Runs before the batch rollups read these CSVs, so the rollups carry the columns too.
+    Re-annotating replaces existing design columns.
+    """
+    for csv_path in csv_paths:
+        if not os.path.exists(csv_path):
+            continue
+        output_df = load_dataframe_from_csv(csv_path)
+        if output_df is None:
+            logger.error(f"Could not add experiment-design columns to {csv_path} (unreadable CSV).")
+            continue
+        output_df = output_df.drop(columns=[column for column in design_values if column in output_df.columns])
+        for position, (column, value) in enumerate(design_values.items()):
+            output_df.insert(position, column, value)
+        save_dataframe_to_csv(output_df, os.path.dirname(csv_path), os.path.basename(csv_path))
+
+
 def run_stage(stage_id: str, sample_paths: SamplePaths, config: dict) -> Optional[str]:
     """Input: stage id, paths, config. Output: path to stage CSV (if produced)."""
     stage_outputs = sample_paths.stage_outputs
@@ -228,6 +322,7 @@ def run_stage(stage_id: str, sample_paths: SamplePaths, config: dict) -> Optiona
             output_dir_stage1=stage_dirs["1"],
             sample_id=sample_id,
             config=config,
+            bg_image_dir_path=sample_paths.sample_bg_dir,
         )
         if not result_path:
             raise ProcessingError(f"Stage 1 failed for {sample_id}, cannot proceed.")
@@ -336,6 +431,28 @@ def main():
         help="Comma-separated list of stages to run (e.g., '1,2,3,4' or 'all')."
     )
     parser.add_argument(
+        "--background_source",
+        choices=[BACKGROUND_SOURCE_TIME_SHIFT, BACKGROUND_SOURCE_EXTERNAL],
+        default=BACKGROUND_SOURCE_TIME_SHIFT,
+        help=(
+            "Where Stage 1 takes background frames from. 'time_shift' (default): later frames of the "
+            "same recording, so only moving specimens are detected. 'external': the same frames of a "
+            "separate specimen-free recording, so non-moving specimens are detected too; "
+            "--input_batch_dir is then the experiment root holding the FG and BG sample folders "
+            "(subfolder names: stage_01_initial_detection.external_background)."
+        ),
+    )
+    parser.add_argument(
+        "--experiment_design",
+        type=str,
+        default=None,
+        help=(
+            "Optional experiment-design CSV with columns date, plate, well, scan_step_um and any "
+            "factor columns. Every sample must have a row whose scan_step_um matches its acquisition "
+            "metadata; the non-key columns are added to the per-sample outputs and batch rollups."
+        ),
+    )
+    parser.add_argument(
         "--resume",
         action="store_true",
         help=(
@@ -379,12 +496,30 @@ def main():
         sys.exit(2)
 
     # Identify samples and derive batch-level paths
-    valid_sample_ids = get_valid_sample_subdirectories(args.input_batch_dir)
+    sample_root_dir, bg_sample_root_dir = get_sample_root_dirs(config, args.input_batch_dir, args.background_source)
+    for required_dir in (sample_root_dir, bg_sample_root_dir):
+        if required_dir is not None and not os.path.isdir(required_dir):
+            logger.error(f"Input folder not found for --background_source {args.background_source}: '{required_dir}'. Aborting.")
+            sys.exit(1)
+    logger.info(f"Background source: {args.background_source} (FG samples: {sample_root_dir}, BG samples: {bg_sample_root_dir})")
+    valid_sample_ids = get_valid_sample_subdirectories(sample_root_dir)
     if not valid_sample_ids:
-        logger.error(f"No valid sample subdirectories found in '{args.input_batch_dir}'. Aborting.")
+        logger.error(f"No valid sample subdirectories found in '{sample_root_dir}'. Aborting.")
         sys.exit(1)
 
-    sample_paths_template = prepare_sample_paths(config, args.input_batch_dir, valid_sample_ids[0])
+    try:
+        design_values_by_sample = validate_sample_inputs(
+            config, args.input_batch_dir, valid_sample_ids, args.background_source, args.experiment_design
+        )
+    except (DataValidationError, FileNotFoundError) as e:
+        logger.error(f"{e}\nAborting before any sample is processed.")
+        sys.exit(1)
+    if args.experiment_design:
+        logger.info(f"Experiment design {args.experiment_design} validated for all {len(valid_sample_ids)} samples.")
+
+    sample_paths_template = prepare_sample_paths(
+        config, args.input_batch_dir, valid_sample_ids[0], args.background_source
+    )
     project_base_dir = get_project_base_dir(config)
     batch_output_csv_dir = project_base_dir
     batch_output_parent_dir = sample_paths_template.batch_output_parent_dir
@@ -416,6 +551,7 @@ def main():
             valid_sample_ids=valid_sample_ids,
             config=config,
             input_batch_dir=args.input_batch_dir,
+            background_source=args.background_source,
         )
         skipped_completed_count = resume_start_idx
         resume_skipped_samples = skipped_completed_count
@@ -458,7 +594,7 @@ def main():
         sample_specific_start_time = time.time()
 
         # Prepare paths and directories
-        sample_paths = prepare_sample_paths(config, args.input_batch_dir, current_sample_id)
+        sample_paths = prepare_sample_paths(config, args.input_batch_dir, current_sample_id, args.background_source)
         os.makedirs(sample_paths.sample_output_base_dir, exist_ok=True)
         if is_full_pipeline_run:
             _remove_completion_marker(sample_paths)
@@ -527,6 +663,12 @@ def main():
                     "label": "Stage 4 final analysis records",
                 },
             ]
+
+            if design_values_by_sample:
+                annotate_sample_outputs(
+                    [job["csv_path"] for job in aggregation_jobs],
+                    design_values_by_sample[current_sample_id],
+                )
 
             for job in aggregation_jobs:
                 aggregated_df = accumulate_stage_outputs(

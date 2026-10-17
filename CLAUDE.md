@@ -85,6 +85,7 @@ well_plate_analyzer/
 │   │   ├── stage_03_filtering_and_classification.py
 │   │   └── stage_04_biological_analysis.py
 │   ├── utils/
+│   │   ├── acquisition_metadata.py # metadata_log header reader; FG/BG run + experiment-design checks
 │   │   ├── filename_helpers.py # build_crop_filename()
 │   │   ├── common_exceptions.py
 │   │   ├── config_loader.py
@@ -115,6 +116,27 @@ python scripts/run_pipeline.py \
     --config config/config.yml
 ```
 
+**Stage-1 background source** (`--background_source`, the only difference between the
+two modes; every step after FG/BG pairing is shared):
+- `time_shift` (default): BG = a later frame of the same recording (offset via
+  `BG_frame_offset_mode`), so only *moving* specimens survive the subtraction.
+- `external`: BG = the same frame of a separate specimen-free recording of the well, so
+  *non-moving* (e.g. fixated) specimens are found too. `--input_batch_dir` is the
+  experiment root holding `fg/` and `bg/` with identically named sample folders. Pairs
+  match by frame index + focal plane (strict; filename plate/well tokens are not
+  trusted). Each BG frame first gets the FG's low-frequency illumination and the well rim
+  is excluded; a sample fails if too many frames trip the subtracted-foreground guard.
+  Static specimens visible only near their focal plane reappear once per sweep pass, so
+  tracking bridges one focus-sweep period (derived per sample from its fd == 0 frames;
+  requires `track_in_2d`) and links within `static_search_range_mm`, instead of the movers' `memory_frames`/`search_range_mm`. After tracking, objects whose
+  detections are often fibre-shaped (lint) are dropped (conservative, per object).
+  Audits per sample: `<sample>_stage1_bg_pairing.csv`, `<sample>_stage1_rejected_fibre_objects.csv`.
+
+`--experiment_design <csv>` (either mode, optional): one row per sample (`date`, `plate`,
+`well`, `scan_step_um`, factor columns). Validated against each sample's `metadata_log.csv`
+before processing; the non-key columns are prepended to the per-sample rolled-up CSVs and
+thus to the batch rollups.
+
 ---
 
 ## Config organization (`config/config.yml`)
@@ -134,6 +156,7 @@ which applies these transforms at load time:
 | Particle-area thresholds | The five `min_*_area` knobs are intentionally distinct (see the note atop `config.yml`) — do not consolidate. |
 | `acquisition.experiment_sweep` | Scan-step × pattern grid for both sweep scripts, plus `variable_recording_duration` / `plane_revisit_times` (run length = max(`camera.video_duration_sec`, time for every plane to get k visits)). |
 | Egg detection | `stage_04_biological_analysis.egg_detection` is only consumed by stage 4; it is **not** merged into `get_unified_segmentation_params`. |
+| `stage_01_initial_detection.external_background` | Read only with `run_pipeline --background_source external`: `fg/`/`bg/` subfolder names, low-frequency illumination match (downsample, median kernel), `rim_exclusion_px`, `max_failed_frame_fraction`, lint-fibre object rule (`fibre_min_aspect_ratio`, `fibre_max_solidity`, `fibre_min_detection_share`). Tracking in this mode uses a one-sweep-period memory (derived, not configured) and the static-object linking radius `static_search_range_mm`; the subtracted-foreground gate and all other detection/tracking params are shared with time-shift mode. |
 
 ---
 
@@ -211,6 +234,8 @@ both image and ML errors).
 | `calculate_posterior_attributes` | `src/core/feature_calculators/bio_features_calculator.py` | Annotate RegionProperties with posterior axis vector (used by Stage 4 + visualisation) |
 | `load_config_once` | `src/utils/config_loader.py` | Load and cache the YAML config |
 | `get_scan_extent_mm` | `src/utils/config_loader.py` | Full (x, y, z) mm extent of the imaged volume — the fixed axis range for the Stage-1/Stage-2 tracking plots |
+| `create_well_mask_with_fallback` | `src/core/well_analysis.py` | Well mask with the full-frame bright-mask fallback (brightness matching + external-BG rim exclusion) |
+| `read_acquisition_metadata_header` | `src/utils/acquisition_metadata.py` | Parse the `# Key: value` header of a run's `metadata_log.csv` |
 
 ---
 
