@@ -1037,39 +1037,21 @@ def run_particle_tracking(
     return final_tracked_particles_df
 
 
-def _reject_fibre_objects(
-    tracked_df: pd.DataFrame,
-    fibre_min_aspect_ratio: float,
-    fibre_max_solidity: float,
-    fibre_min_detection_share: float,
+def _drop_lint_detections(
+    fused_df: pd.DataFrame,
+    lint_max_solidity: float,
 ) -> Tuple[pd.DataFrame, pd.DataFrame]:
-    """Drop tracked objects that are lint fibres; return (kept detections, rejected-object summary).
+    """Drop lint-shaped detections before tracking; return (kept detections, dropped detections).
 
-    A detection is fibre-shaped when ``s1_aspect_ratio >= fibre_min_aspect_ratio`` and
-    ``s1_solidity <= fibre_max_solidity``. Lint looks thin only while in focus (compact
-    when blurred), so the decision is per object (track): it is rejected when at least
-    ``fibre_min_detection_share`` of its detections are fibre-shaped. Deliberately
-    conservative -- compact dust is left to Stage 3 rather than risk rejecting animals.
-    Detections without a track are kept.
+    A detection is lint-shaped when ``s1_solidity <= lint_max_solidity``: thin, curled or
+    branched lint fills little of its convex hull, but only while it is in focus. Dropping
+    exactly those detections removes the sharp frames of an isolated lint object, so its
+    remaining (blurred) track has no sharpness peak in Stage 2. Animals keep their compact
+    shape, so at most a stray frame of theirs goes, which the sweep-period tracking memory
+    bridges. Detections without a solidity value are kept.
     """
-    is_fibre = (
-        (tracked_df['s1_aspect_ratio'] >= fibre_min_aspect_ratio)
-        & (tracked_df['s1_solidity'] <= fibre_max_solidity)
-    )
-    fibre_share = is_fibre.groupby(tracked_df['track_id']).mean()
-    rejected_track_ids = fibre_share.index[fibre_share >= fibre_min_detection_share]
-    rejected_mask = tracked_df['track_id'].isin(rejected_track_ids)
-
-    rejected_summary_df = (
-        tracked_df.loc[rejected_mask]
-        .assign(is_fibre=is_fibre[rejected_mask])
-        .groupby('track_id')
-        .agg(detections=('frame', 'size'), fibre_detections=('is_fibre', 'sum'),
-             X=('X', 'median'), Y=('Y', 'median'), first_frame=('frame', 'min'), last_frame=('frame', 'max'))
-        .reset_index()
-    )
-    rejected_summary_df['fibre_share'] = rejected_summary_df['fibre_detections'] / rejected_summary_df['detections']
-    return tracked_df.loc[~rejected_mask].copy(), rejected_summary_df
+    lint_mask = fused_df['s1_solidity'] <= lint_max_solidity
+    return fused_df.loc[~lint_mask].reset_index(drop=True), fused_df.loc[lint_mask].reset_index(drop=True)
 
 
 def run_stage_01_initial_detection(
@@ -1110,7 +1092,7 @@ def run_stage_01_initial_detection(
         external_background_config = None
         sweep_period_frames = None
         static_search_range_mm = None
-        fibre_rule = None
+        lint_max_solidity = None
         images_df_filtered = _filter_image_df(images_df.copy(), trim_to_last_fd0=True)
         if images_df_filtered.empty: return None
         frame_pairs = _build_time_shift_pairs(
@@ -1147,11 +1129,7 @@ def run_stage_01_initial_detection(
             f"Stage 1: External background: tracking memory = one focus-sweep period = {sweep_period_frames} frames."
         )
         static_search_range_mm = float(external_background_config['static_search_range_mm'])
-        fibre_rule = (
-            float(external_background_config['fibre_min_aspect_ratio']),
-            float(external_background_config['fibre_max_solidity']),
-            float(external_background_config['fibre_min_detection_share']),
-        )
+        lint_max_solidity = float(external_background_config['lint_max_solidity'])
 
     # Load flat/dark calibration once per sample directory and reuse it for all frames.
     # Reuse keeps the correction consistent and avoids repeated disk reads.
@@ -1208,6 +1186,14 @@ def run_stage_01_initial_detection(
     
     logger.info(f"Total fused particles for sample {sample_id}: {len(final_sample_df)}")
 
+    if lint_max_solidity is not None and not final_sample_df.empty:
+        final_sample_df, lint_detections_df = _drop_lint_detections(final_sample_df, lint_max_solidity)
+        save_dataframe_to_csv(lint_detections_df, output_dir_stage1, f"{sample_id}_stage1_rejected_lint_detections.csv")
+        logger.info(
+            f"Stage 1: Dropped {len(lint_detections_df)} lint-shaped detections (solidity <= {lint_max_solidity}) "
+            f"before tracking for {sample_id}; {len(final_sample_df)} remain."
+        )
+
     final_output_filename = f"{sample_id}_stage1_tracked_particles.csv"
     final_output_path = os.path.join(output_dir_stage1, final_output_filename)
     
@@ -1233,13 +1219,6 @@ def run_stage_01_initial_detection(
             final_sample_df['track_id'] = np.nan
             save_dataframe_to_csv(final_sample_df, output_dir_stage1, final_output_filename)
         else:
-            if fibre_rule is not None and not tracked_df.empty:
-                tracked_df, rejected_fibres_df = _reject_fibre_objects(tracked_df, *fibre_rule)
-                save_dataframe_to_csv(rejected_fibres_df, output_dir_stage1, f"{sample_id}_stage1_rejected_fibre_objects.csv")
-                logger.info(
-                    f"Stage 1: Rejected {len(rejected_fibres_df)} lint-fibre objects "
-                    f"({int(rejected_fibres_df['detections'].sum())} detections) for {sample_id}."
-                )
             save_dataframe_to_csv(tracked_df, output_dir_stage1, final_output_filename)
 
         tracks_for_figures_df = (

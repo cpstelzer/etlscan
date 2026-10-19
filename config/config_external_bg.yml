@@ -1,0 +1,15 @@
+# config/config_external_bg.yml
+# Variant of config.yml for external-background runs, to compare Stage-2 sharpness peaks:
+#   python scripts/run_pipeline.py --config config/config_external_bg.yml \
+#       --background_source external --input_batch_dir <experiment_root> --stages all
+# Everything comes from config.yml (base_config); only the values below differ.
+base_config: "config.yml"
+
+stage_02_characterization:
+  focussed_particles:
+    # variance_laplacian scales with local image brightness (vignetting; r = 0.99 across the
+    # animals of 20261016_plate10_well1), so a fixed floor misses animals in the darker edge
+    # and sits at the blurred-animal baseline in the bright centre. Disable the floor and let
+    # a peak qualify by its prominence relative to the track's own maximum instead.
+    sharpness_min_threshold: 0
+    min_prominence_fraction: 0.2

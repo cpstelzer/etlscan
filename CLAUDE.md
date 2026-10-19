@@ -30,7 +30,8 @@ and start coding:
 ```
 well_plate_analyzer/
 ├── config/
-│   └── config.yml              # Single YAML config for the entire pipeline
+│   ├── config.yml              # Single YAML config for the entire pipeline
+│   └── config_external_bg.yml  # Variant (base_config: config.yml): Stage-2 peak gating for external-BG runs
 ├── data/
 │   ├── input/<batch>/<sample>/ # Raw PNG sequences (one dir per sample)
 │   ├── output/<batch>/         # Stage outputs, organised per sample
@@ -128,9 +129,11 @@ two modes; every step after FG/BG pairing is shared):
   is excluded; a sample fails if too many frames trip the subtracted-foreground guard.
   Static specimens visible only near their focal plane reappear once per sweep pass, so
   tracking bridges one focus-sweep period (derived per sample from its fd == 0 frames;
-  requires `track_in_2d`) and links within `static_search_range_mm`, instead of the movers' `memory_frames`/`search_range_mm`. After tracking, objects whose
-  detections are often fibre-shaped (lint) are dropped (conservative, per object).
-  Audits per sample: `<sample>_stage1_bg_pairing.csv`, `<sample>_stage1_rejected_fibre_objects.csv`.
+  requires `track_in_2d`) and links within `static_search_range_mm`, instead of the movers'
+  `memory_frames`/`search_range_mm`. Lint-shaped detections (`s1_solidity <= lint_max_solidity`)
+  are dropped **before** tracking, so an isolated lint object loses its sharp frames and its
+  blurred remainder yields no Stage-2 sharpness peak.
+  Audits per sample: `<sample>_stage1_bg_pairing.csv`, `<sample>_stage1_rejected_lint_detections.csv`.
 
 `--experiment_design <csv>` (either mode, optional): one row per sample (`date`, `plate`,
 `well`, `scan_step_um`, factor columns). Validated against each sample's `metadata_log.csv`
@@ -146,6 +149,7 @@ which applies these transforms at load time:
 
 | Section | Notes |
 |---------|-------|
+| `base_config` (variants) | A config with a top-level `base_config: "<file>"` (relative to itself) is a **variant**: it holds only the values it changes and is deep-merged over that base before the transforms below. Use variants instead of copying `config.yml`, so they cannot drift. `config_external_bg.yml` is one (Stage-2 `sharpness_min_threshold: 0`, `min_prominence_fraction: 0.2`). |
 | `paths.pipeline_base` | Offline-pipeline root (output, models, training data). Legacy `project_base_dir` still accepted as a fallback in `get_project_base_dir`. |
 | `paths.raw_data_root` | Acquisition output root; **injected** into `acquisition.paths.output_folder_base` (single source of truth). Point `run_pipeline --input_batch_dir` here. |
 | `imaging` + `segmentation` | Split for clarity; the loader **assembles** them into the internal `config['system']` view that pipeline code consumes. Don't read `imaging`/`segmentation` directly in stage code — read `system`. |
@@ -156,7 +160,7 @@ which applies these transforms at load time:
 | Particle-area thresholds | The five `min_*_area` knobs are intentionally distinct (see the note atop `config.yml`) — do not consolidate. |
 | `acquisition.experiment_sweep` | Scan-step × pattern grid for both sweep scripts, plus `variable_recording_duration` / `plane_revisit_times` (run length = max(`camera.video_duration_sec`, time for every plane to get k visits)). |
 | Egg detection | `stage_04_biological_analysis.egg_detection` is only consumed by stage 4; it is **not** merged into `get_unified_segmentation_params`. |
-| `stage_01_initial_detection.external_background` | Read only with `run_pipeline --background_source external`: `fg/`/`bg/` subfolder names, low-frequency illumination match (downsample, median kernel), `rim_exclusion_px`, `max_failed_frame_fraction`, lint-fibre object rule (`fibre_min_aspect_ratio`, `fibre_max_solidity`, `fibre_min_detection_share`). Tracking in this mode uses a one-sweep-period memory (derived, not configured) and the static-object linking radius `static_search_range_mm`; the subtracted-foreground gate and all other detection/tracking params are shared with time-shift mode. |
+| `stage_01_initial_detection.external_background` | Read only with `run_pipeline --background_source external`: `fg/`/`bg/` subfolder names, low-frequency illumination match (downsample, median kernel), `rim_exclusion_px`, `max_failed_frame_fraction`, per-detection lint filter `lint_max_solidity`. Tracking in this mode uses a one-sweep-period memory (derived, not configured) and the static-object linking radius `static_search_range_mm`; the subtracted-foreground gate and all other detection/tracking params are shared with time-shift mode. |
 
 ---
 

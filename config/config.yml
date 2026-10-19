@@ -291,14 +291,11 @@ stage_01_initial_detection:
     # waiting track absorb a neighbouring object, so static objects link within this radius
     # (covers centroid jitter, typically 20-30 px = 0.09-0.13 mm).
     static_search_range_mm: 0.25
-    # Lint rejection, per tracked object (after tracking, before Stage 2): an object is dropped
-    # only when at least fibre_min_detection_share of its detections are fibre-shaped
-    # (s1_aspect_ratio >= fibre_min_aspect_ratio AND s1_solidity <= fibre_max_solidity).
-    # Lint looks thin only in focus, so a per-detection rule would catch little. Deliberately
-    # conservative: compact dust is left to Stage 3 rather than risk rejecting animals.
-    fibre_min_aspect_ratio: 4.0
-    fibre_max_solidity: 0.5
-    fibre_min_detection_share: 0.10
+    # Lint rejection per detection, before tracking: detections with s1_solidity <= this are
+    # dropped. Curled/branched lint fills little of its convex hull while in focus, so its
+    # sharp frames go and the remaining blurred lint track has no Stage-2 sharpness peak;
+    # compact animals keep their detections (validated: 0 animal focus peaks lost).
+    lint_max_solidity: 0.5
   well_masking:
     create_mask: false
     auto_center_mask: true

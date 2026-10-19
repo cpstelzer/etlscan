@@ -29,8 +29,8 @@ from src.stages.stage_01_initial_detection import (  # noqa: E402
     _build_time_shift_pairs,
     _filter_image_df,
     _parse_image_filenames,
+    _drop_lint_detections,
     _prepare_external_background,
-    _reject_fibre_objects,
     _sweep_period_frames,
     run_stage_01_initial_detection,
     select_background_frame,
@@ -114,7 +114,7 @@ def test_time_shift_pairs_unchanged(tmp_path):
     ]
 
 
-# --- sweep period (tracking memory) and lint-fibre objects -----------------------
+# --- sweep period (tracking memory) and lint-shaped detections -------------------
 
 def test_sweep_period_is_spacing_of_fd0_frames(tmp_path):
     images_df = _touch_frames(tmp_path / "fg", "20261016_plate3_well7", range(0, 20))  # fd == 0 at 0, 8, 16
@@ -132,24 +132,21 @@ def test_sweep_period_without_fd0_frame_raises(tmp_path):
         _sweep_period_frames(images_df)
 
 
-def _tracked(track_id, n_detections, n_fibre_like, x):
-    rows = [{"track_id": track_id, "frame": f, "X": x, "Y": 100.0,
-             "s1_aspect_ratio": 1.8, "s1_solidity": 0.85} for f in range(n_detections - n_fibre_like)]
-    rows += [{"track_id": track_id, "frame": f, "X": x, "Y": 100.0,
-              "s1_aspect_ratio": 6.0, "s1_solidity": 0.3} for f in range(n_detections - n_fibre_like, n_detections)]
-    return rows
+def test_drop_lint_detections_by_solidity_only():
+    # Curled lint in focus (low solidity, any aspect ratio) goes; compact detections stay,
+    # including an elongated but convex one and one whose solidity could not be measured.
+    fused_df = pd.DataFrame([
+        {"X": 100.0, "s1_aspect_ratio": 1.8, "s1_solidity": 0.85},    # animal
+        {"X": 200.0, "s1_aspect_ratio": 4.5, "s1_solidity": 0.90},    # elongated, convex
+        {"X": 300.0, "s1_aspect_ratio": 1.3, "s1_solidity": 0.35},    # curled lint (low AR)
+        {"X": 400.0, "s1_aspect_ratio": 6.0, "s1_solidity": 0.50},    # thin lint, at the limit
+        {"X": 500.0, "s1_aspect_ratio": 2.0, "s1_solidity": np.nan},  # unmeasured
+    ])
 
+    kept_df, dropped_df = _drop_lint_detections(fused_df, 0.5)
 
-def test_reject_fibre_objects_is_per_object_and_conservative():
-    # Animal: 3 of 100 detections momentarily fibre-like (3%). Lint: in focus (fibre-like) in 20 of 100.
-    tracked_df = pd.DataFrame(_tracked(1, 100, 3, x=100.0) + _tracked(2, 100, 20, x=900.0))
-
-    kept_df, rejected_df = _reject_fibre_objects(tracked_df, 4.0, 0.5, 0.10)
-
-    assert set(kept_df["track_id"]) == {1} and len(kept_df) == 100
-    assert rejected_df["track_id"].tolist() == [2]
-    assert rejected_df.loc[0, "fibre_share"] == pytest.approx(0.20)
-    assert rejected_df.loc[0, "X"] == pytest.approx(900.0)
+    assert kept_df["X"].tolist() == [100.0, 200.0, 500.0]
+    assert dropped_df["X"].tolist() == [300.0, 400.0]
 
 
 # --- BG adaptation --------------------------------------------------------------
@@ -286,8 +283,10 @@ def test_external_background_bridges_sweep_passes_and_rejects_lint(tmp_path, rep
     assert tracked["track_id"].nunique() == 1
     assert sorted(tracked["frame"].unique()) == [3, 4, 5, 19, 20, 21]
     assert tracked["X"].between(170, 230).all()
-    rejected = pd.read_csv(os.path.join(output_dir, "20261016_plate14_well2_stage1_rejected_fibre_objects.csv"))
-    assert len(rejected) == 1 and rejected.loc[0, "X"] > 330
+    # The curled fibre is dropped detection by detection before tracking (all 33 frames).
+    dropped = pd.read_csv(os.path.join(output_dir, "20261016_plate14_well2_stage1_rejected_lint_detections.csv"))
+    assert len(dropped) == 33
+    assert (dropped["X"] > 330).all() and (dropped["s1_solidity"] <= 0.5).all()
 
 
 def test_external_background_requires_2d_tracking(tmp_path, repo_config):
