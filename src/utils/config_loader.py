@@ -6,6 +6,8 @@ from typing import Any, Dict, Tuple
 
 import yaml
 
+from src.utils.common_exceptions import ConfigError
+
 
 def _resolve_config_path(config_path: str) -> str:
     """Resolve a config path relative to the project root when needed."""
@@ -35,6 +37,28 @@ def _deep_merge(base: Dict[str, Any], overlay: Dict[str, Any]) -> Dict[str, Any]
         else:
             merged[key] = copy.deepcopy(overlay_value)
     return merged
+
+
+def _read_yaml_config(config_path: str, overlaid_by: Tuple[str, ...] = ()) -> Dict[str, Any]:
+    """Read a YAML config file, resolving its optional ``base_config`` chain.
+
+    A variant config names the config it builds on in a top-level ``base_config`` (path
+    relative to the variant file) and holds only the values it changes, which are
+    deep-merged over the base. A variant thus cannot drift from the config it extends.
+
+    Raises:
+        ConfigError: the ``base_config`` chain is circular.
+    """
+    resolved_path = os.path.abspath(_resolve_config_path(config_path))
+    if resolved_path in overlaid_by:
+        raise ConfigError(f"Circular base_config chain: {' -> '.join(overlaid_by + (resolved_path,))}")
+    with open(resolved_path, "r", encoding="utf-8") as handle:
+        loaded_config: Dict[str, Any] = yaml.safe_load(handle)
+    base_config = loaded_config.pop("base_config", None)
+    if base_config is None:
+        return loaded_config
+    base_path = os.path.join(os.path.dirname(resolved_path), base_config)
+    return _deep_merge(_read_yaml_config(base_path, overlaid_by + (resolved_path,)), loaded_config)
 
 
 def _link_acquisition_output_root(config: Dict[str, Any]) -> None:
@@ -128,11 +152,13 @@ def _apply_hardware_profile(config: Dict[str, Any]) -> None:
 
 @functools.lru_cache(maxsize=None)
 def load_config_once(config_path: str = "config/config.yml") -> Dict[str, Any]:
-    """Load the merged YAML configuration file once, apply hardware profile, return dict."""
-    resolved_path = _resolve_config_path(config_path)
+    """Load the merged YAML configuration file once, apply hardware profile, return dict.
+
+    A config with a top-level ``base_config`` is a variant: it is deep-merged over the
+    config it names before any of the load-time transforms below run.
+    """
     try:
-        with open(resolved_path, "r", encoding="utf-8") as handle:
-            loaded_config: Dict[str, Any] = yaml.safe_load(handle)
+        loaded_config = _read_yaml_config(config_path)
     except yaml.YAMLError as exc:
         print(f"Error parsing YAML configuration file: {exc}")
         raise

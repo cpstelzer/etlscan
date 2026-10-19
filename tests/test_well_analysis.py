@@ -9,10 +9,13 @@ cv2 = pytest.importorskip("cv2", reason="OpenCV required.", exc_type=ImportError
 
 from src.core.well_analysis import (
     create_well_mask_black_plate,
+    create_well_mask_with_fallback,
     create_full_frame_bright_mask,
     calculate_well_brightness_peak,
+    match_low_frequency_illumination,
     match_well_brightness,
 )
+from src.utils.common_exceptions import ImageProcessingError
 
 
 @pytest.fixture()
@@ -186,3 +189,55 @@ def test_match_well_brightness_fallback_can_be_disabled(
     # Fallback disabled -> original images returned unchanged.
     assert np.array_equal(adj_fg, full_frame_fg)
     assert np.array_equal(adj_bg, full_frame_bg_brighter)
+
+
+# --- Shared well mask with fallback ---------------------------------------------
+
+def test_create_well_mask_with_fallback_prefers_detected_well(fg_image, well_config):
+    expected_mask, _ = create_well_mask_black_plate(fg_image, well_config)
+    assert np.array_equal(create_well_mask_with_fallback(fg_image, well_config), expected_mask)
+
+
+def test_create_well_mask_with_fallback_uses_full_frame_mask(full_frame_fg, full_analysis_config):
+    well_identification = full_analysis_config["well_identification"]
+    mask = create_well_mask_with_fallback(full_frame_fg, well_identification)
+    assert np.array_equal(mask, create_full_frame_bright_mask(full_frame_fg, well_identification["low_threshold_value"]))
+
+
+def test_create_well_mask_with_fallback_disabled_returns_none(full_frame_fg, full_analysis_config):
+    well_identification = dict(full_analysis_config["well_identification"], fallback_full_frame_on_failure=False)
+    assert create_well_mask_with_fallback(full_frame_fg, well_identification) is None
+
+
+# --- Low-frequency illumination match (external background) --------------------
+
+def _gradient_pair_with_blob():
+    """BG flat at 180; FG darkened by a 0..25 vertical gradient plus one small dark organism."""
+    bg = np.full((400, 400), 180, dtype=np.uint8)
+    gradient = np.linspace(0, 25, 400, dtype=np.float32)[:, None]
+    fg = np.clip(bg.astype(np.float32) - gradient, 0, 255).astype(np.uint8)
+    cv2.circle(fg, (200, 200), 8, 60, -1)
+    return fg, bg
+
+
+def test_match_low_frequency_illumination_removes_gradient_keeps_organism():
+    fg, bg = _gradient_pair_with_blob()
+    # Collimated subtraction (inverted FG minus inverted BG) == BG - FG, clipped at 0.
+    raw_residual = cv2.subtract(bg, fg)
+    assert (raw_residual >= 10).mean() > 0.4  # the gradient alone would flood a >=10 gate
+
+    adjusted_bg = match_low_frequency_illumination(fg, bg, downsample_factor=4, median_kernel_px=15)
+    residual = cv2.subtract(adjusted_bg, fg)
+
+    away_from_organism = np.ones_like(residual, dtype=bool)
+    away_from_organism[180:221, 180:221] = False
+    assert residual[away_from_organism].max() < 10
+    assert residual[200, 200] > 80
+
+
+def test_match_low_frequency_illumination_rejects_invalid_input():
+    fg, bg = _gradient_pair_with_blob()
+    with pytest.raises(ImageProcessingError):
+        match_low_frequency_illumination(fg, bg[:-1], downsample_factor=4, median_kernel_px=15)
+    with pytest.raises(ImageProcessingError):
+        match_low_frequency_illumination(fg, bg, downsample_factor=4, median_kernel_px=14)

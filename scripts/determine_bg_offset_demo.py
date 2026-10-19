@@ -56,7 +56,7 @@ def _load_image_dataframe(image_dir: Path) -> pd.DataFrame:
             "No matching images were found in the directory after parsing."
         )
 
-    return _filter_image_df(parsed_df)
+    return _filter_image_df(parsed_df, trim_to_last_fd0=True)
 
 
 def determine_offset(

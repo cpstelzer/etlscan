@@ -59,3 +59,18 @@ Before `sbatch`:
 3. Stage 3 model artifacts exist under `<paths.pipeline_base>/models` (or symlink resolves).
 4. Conda env includes optional dependencies if using EfficientNet (`torch`, `torchvision`, `Pillow`).
 5. Job log paths are configured via `#SBATCH --output/--error`.
+
+## 6) External-background datasets
+
+For non-moving (e.g. fixated) specimens, each well is also recorded without specimens under identical settings, and Stage 1 subtracts that recording instead of a time-shifted frame:
+
+```bash
+python scripts/run_pipeline.py --input_batch_dir <experiment_root> --background_source external \
+    [--experiment_design <experiment_root>/exp_design.csv] --stages all
+```
+
+- `<experiment_root>` holds `fg/` and `bg/` (names from `stage_01_initial_detection.external_background`) with identically named sample folders, each with its `metadata_log.csv`. Outputs and rollups are named after `<experiment_root>`.
+- Before any processing, every sample is checked: BG folder present, BG run recorded with the same image-defining settings (exposure, ROI, scan step/pattern/height, start diopter, ...), and, with `--experiment_design`, a design row whose `scan_step_um` matches the metadata. Any problem aborts the run with the full list.
+- Flat-field calibration is looked up in `fg/<sample>/1_flat_field` or `fg/1_flat_field` and applied to FG and BG frames alike.
+- To compare Stage-2 sharpness peaks with brightness-independent gating, run with `--config config/config_external_bg.yml` (a `base_config` variant of `config.yml` that only sets `sharpness_min_threshold: 0` and `min_prominence_fraction: 0.2`).
+- `distribute_parts.sh` does not know this layout: split `fg/` and `bg/` into parts with identical sample sets (each part an experiment root with its own `fg/` and `bg/`).

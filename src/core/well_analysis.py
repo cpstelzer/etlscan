@@ -8,8 +8,12 @@ from skimage.exposure import rescale_intensity
 
 from src.utils.common_exceptions import ImageProcessingError, ConfigError, DataValidationError
 from src.core.region_props_calculator import find_contours
+from src.core.image_enhancement import apply_blur
 
 logger = logging.getLogger(__name__)
+
+# Mid-point of uint8, used to store a signed difference image in uint8 for filtering.
+_SIGNED_UINT8_OFFSET = 128
 
 def create_well_mask_black_plate(
     image_gray_uint8: np.ndarray,
@@ -138,6 +142,87 @@ def create_full_frame_bright_mask(
     return bright_mask.astype(np.uint8)
 
 
+def create_well_mask_with_fallback(
+    image_gray_uint8: np.ndarray,
+    config_well_identification: Dict[str, Any],
+) -> Optional[np.ndarray]:
+    """Well mask from ``create_well_mask_black_plate``, else the full-frame bright mask.
+
+    Falls back to ``create_full_frame_bright_mask`` when no discrete circular well is
+    found (e.g. no multi-well plate; the well fills or exceeds the frame), so callers
+    keep a usable well area. Controlled by ``fallback_full_frame_on_failure``. Returns
+    None when no mask could be built. Shared by brightness matching and the external-
+    background rim exclusion (Stage 1).
+    """
+    well_mask, _ = create_well_mask_black_plate(image_gray_uint8, config_well_identification)
+    if well_mask is not None:
+        return well_mask
+    if not config_well_identification.get('fallback_full_frame_on_failure', True):
+        return None
+    bright_mask = create_full_frame_bright_mask(
+        image_gray_uint8, config_well_identification.get('low_threshold_value', 5)
+    )
+    if bright_mask is not None:
+        logger.info("create_well_mask_with_fallback: No discrete well found; using full-frame bright-pixel fallback mask.")
+    return bright_mask
+
+
+def match_low_frequency_illumination(
+    fg_img_uint8: np.ndarray,
+    bg_img_uint8: np.ndarray,
+    downsample_factor: int,
+    median_kernel_px: int,
+) -> np.ndarray:
+    """Give the BG frame the FG frame's low-frequency (large-scale) illumination.
+
+    A BG recorded separately from its FG (minutes to an hour apart) differs from it by
+    a smooth spatial illumination gradient that a global brightness shift cannot remove
+    and that floods a background subtraction. The FG-BG difference is downsampled,
+    median-filtered with a kernel much larger than an organism (so sparse specimens do
+    not bias it) and upsampled again; adding it to the BG removes the gradient while
+    keeping every structure smaller than the kernel.
+
+    Args:
+        fg_img_uint8: Foreground frame (grayscale uint8).
+        bg_img_uint8: Background frame of the same shape.
+        downsample_factor: Integer factor the difference image is shrunk by before filtering.
+        median_kernel_px: Odd median kernel size in downsampled pixels.
+
+    Returns:
+        The adjusted BG frame (uint8).
+
+    Raises:
+        ImageProcessingError: on mismatched shapes or invalid filter parameters.
+    """
+    if fg_img_uint8.shape != bg_img_uint8.shape or fg_img_uint8.ndim != 2:
+        raise ImageProcessingError(
+            f"match_low_frequency_illumination needs equal 2D frames; got {fg_img_uint8.shape} and {bg_img_uint8.shape}."
+        )
+    if downsample_factor < 1:
+        raise ImageProcessingError(f"downsample_factor must be >= 1; got {downsample_factor}.")
+
+    image_h, image_w = fg_img_uint8.shape
+    difference_float = fg_img_uint8.astype(np.float32) - bg_img_uint8.astype(np.float32)
+    difference_small_float = cv2.resize(
+        difference_float,
+        (max(image_w // downsample_factor, 1), max(image_h // downsample_factor, 1)),
+        interpolation=cv2.INTER_AREA,
+    )
+    # cv2.medianBlur only supports large kernels on uint8, so the signed difference is
+    # stored around the uint8 mid-point for filtering.
+    difference_small_uint8 = np.clip(np.round(difference_small_float) + _SIGNED_UINT8_OFFSET, 0, 255).astype(np.uint8)
+    low_frequency_small_uint8 = apply_blur(difference_small_uint8, median_kernel_px, "median")
+    if low_frequency_small_uint8 is None:
+        raise ImageProcessingError(f"Median filtering with kernel {median_kernel_px} failed (must be a positive odd integer).")
+    low_frequency_float = cv2.resize(
+        low_frequency_small_uint8.astype(np.float32) - _SIGNED_UINT8_OFFSET,
+        (image_w, image_h),
+        interpolation=cv2.INTER_LINEAR,
+    )
+    adjusted_bg_float = bg_img_uint8.astype(np.float32) + low_frequency_float
+    return np.clip(np.round(adjusted_bg_float), 0, 255).astype(np.uint8)
+
+
 def calculate_well_brightness_peak(
     image_gray_uint8: np.ndarray,
     well_mask_uint8: np.ndarray,
@@ -211,27 +296,11 @@ def match_well_brightness(
         logger.error("match_well_brightness: Missing required configuration sections. Returning original images.")
         return fg_img_uint8, bg_img_uint8
 
-    fg_mask, _ = create_well_mask_black_plate(fg_img_uint8, cfg_well_id)
-    bg_mask, _ = create_well_mask_black_plate(bg_img_uint8, cfg_well_id)
-
+    fg_mask = create_well_mask_with_fallback(fg_img_uint8, cfg_well_id)
+    bg_mask = create_well_mask_with_fallback(bg_img_uint8, cfg_well_id)
     if fg_mask is None or bg_mask is None:
-        # Fall back to a full-frame bright-pixel mask when no discrete well is
-        # found (e.g. no multi-well plate; sample fills/exceeds the frame). This
-        # keeps brightness normalization working instead of returning the raw
-        # images. Controlled by 'fallback_full_frame_on_failure' (default on).
-        if cfg_well_id.get('fallback_full_frame_on_failure', True):
-            low_thresh = cfg_well_id.get('low_threshold_value', 5)
-            if fg_mask is None:
-                fg_mask = create_full_frame_bright_mask(fg_img_uint8, low_thresh)
-            if bg_mask is None:
-                bg_mask = create_full_frame_bright_mask(bg_img_uint8, low_thresh)
-            if fg_mask is None or bg_mask is None:
-                logger.warning("match_well_brightness: Full-frame fallback mask failed. Returning original images.")
-                return fg_img_uint8, bg_img_uint8
-            logger.info("match_well_brightness: No discrete well found; using full-frame bright-pixel fallback mask for brightness normalization.")
-        else:
-            logger.warning("match_well_brightness: Could not create well masks for FG or BG. Returning original images.")
-            return fg_img_uint8, bg_img_uint8
+        logger.warning("match_well_brightness: Could not create well masks for FG or BG. Returning original images.")
+        return fg_img_uint8, bg_img_uint8
 
     fg_peak = calculate_well_brightness_peak(
         fg_img_uint8, fg_mask,

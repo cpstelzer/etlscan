@@ -1,0 +1,197 @@
+# src/utils/acquisition_metadata.py
+"""Read and cross-check the acquisition metadata of pipeline input samples.
+
+The acquisition writes a ``# Key: value`` header at the top of each run's
+``metadata_log.csv`` (see ``src/acquire/wellscanner_acquisition_module.py``). The
+pipeline uses it to verify, before any image is processed, that an external
+background run was recorded with the same image-defining settings as its foreground
+run, and that each sample matches its row in an optional experiment-design table.
+"""
+import logging
+import os
+import re
+from typing import Any, Dict, List
+
+import numpy as np
+import pandas as pd
+
+from src.utils.common_exceptions import DataValidationError
+from src.utils.path_helpers import parse_date_plate_well
+
+logger = logging.getLogger(__name__)
+
+_FRAME_DATA_SECTION = "Frame Data"
+_SECTION_BANNER = re.compile(r"(?:===|---)\s*(.+?)\s*(?:===|---)")
+
+# Header fields that determine what each frame shows. A FG run and its external BG run
+# must agree on all of them: camera settings set the image formation, and the ETL scan
+# fields plus the start diopter set the focal plane of every frame index. Run identity
+# (timestamp, plate/well id, output folder), measured frame rates and the config path
+# legitimately differ between the two runs and are not compared.
+_IMAGE_DEFINING_HEADER_FIELDS = (
+    ("Acquisition Run Metadata", "Start Diopter (dpt)"),
+    ("Configuration", "Processed as Color"),
+    ("Configuration", "Actual Exposure (us)"),
+    ("Configuration", "Actual ROI (WxH)"),
+    ("Configuration", "Pixel Format"),
+    ("Configuration", "Image Format"),
+    ("Configuration", "Focusing Pattern"),
+    ("Configuration", "Lens Settle Time (s)"),
+    ("Configuration", "Scan Height (mm)"),
+    ("Configuration", "Scan Step (um)"),
+    ("Configuration", "Scan Ratio (mm/dpt)"),
+)
+_SCAN_STEP_FIELD = ("Configuration", "Scan Step (um)")
+
+# Experiment-design table: one row per sample, keyed like the sample folder name
+# (YYYYMMDD_plateX_wellY). scan_step_um is cross-checked against the acquisition
+# metadata; every other non-key column is an experimental factor carried into outputs.
+DESIGN_KEY_COLUMNS = ("date", "plate", "well")
+DESIGN_SCAN_STEP_COLUMN = "scan_step_um"
+
+
+def read_acquisition_metadata_header(metadata_log_path: str) -> Dict[str, Dict[str, str]]:
+    """Parse the comment header of an acquisition ``metadata_log.csv``.
+
+    Returns ``{section: {key: value}}`` for the sections announced by banner lines
+    (``# === Acquisition Run Metadata ===``, ``# --- Configuration ---``), with values
+    kept as written. Parsing stops at the ``Frame Data`` banner.
+
+    Raises:
+        FileNotFoundError: the log file does not exist.
+        DataValidationError: no header section, or a line outside the ``# Key: value`` form.
+    """
+    if not os.path.isfile(metadata_log_path):
+        raise FileNotFoundError(f"Acquisition metadata log not found: {metadata_log_path}")
+
+    sections: Dict[str, Dict[str, str]] = {}
+    current_section = None
+    with open(metadata_log_path, "r", encoding="utf-8") as log_file:
+        for line in log_file:
+            if not line.startswith("#"):
+                break
+            content = line[1:].strip()
+            banner = _SECTION_BANNER.fullmatch(content)
+            if banner:
+                current_section = banner.group(1)
+                if current_section == _FRAME_DATA_SECTION:
+                    break
+                sections[current_section] = {}
+                continue
+            key, separator, value = content.partition(":")
+            if current_section is None or not separator:
+                raise DataValidationError(
+                    f"Malformed metadata header line in {metadata_log_path!r}: {line.rstrip()!r}"
+                )
+            sections[current_section][key.strip()] = value.strip()
+
+    if not sections:
+        raise DataValidationError(f"No metadata header found in {metadata_log_path!r}")
+    return sections
+
+
+def _get_header_field(header: Dict[str, Dict[str, str]], field: tuple, log_path: str) -> str:
+    """Return one header value, raising when the section or key is absent."""
+    section, key = field
+    if section not in header or key not in header[section]:
+        raise DataValidationError(f"Metadata header of {log_path!r} has no '{key}' in section '{section}'.")
+    return header[section][key]
+
+
+def validate_background_compatibility(fg_metadata_log_path: str, bg_metadata_log_path: str) -> None:
+    """Check that an external BG run used the same image-defining settings as its FG run.
+
+    Raises:
+        DataValidationError: listing every image-defining header field that differs.
+    """
+    fg_header = read_acquisition_metadata_header(fg_metadata_log_path)
+    bg_header = read_acquisition_metadata_header(bg_metadata_log_path)
+    mismatches: List[str] = []
+    for field in _IMAGE_DEFINING_HEADER_FIELDS:
+        fg_value = _get_header_field(fg_header, field, fg_metadata_log_path)
+        bg_value = _get_header_field(bg_header, field, bg_metadata_log_path)
+        if fg_value != bg_value:
+            mismatches.append(f"'{field[1]}' FG={fg_value!r} BG={bg_value!r}")
+    if mismatches:
+        raise DataValidationError(
+            f"Background run is not compatible with its foreground run "
+            f"({bg_metadata_log_path!r} vs {fg_metadata_log_path!r}): {'; '.join(mismatches)}"
+        )
+
+
+def load_experiment_design(design_csv_path: str) -> pd.DataFrame:
+    """Load an experiment-design CSV keyed by date, plate and well.
+
+    Raises:
+        FileNotFoundError: the file does not exist.
+        DataValidationError: required columns are missing, keys are empty or duplicated.
+    """
+    if not os.path.isfile(design_csv_path):
+        raise FileNotFoundError(f"Experiment design file not found: {design_csv_path}")
+    design_df = pd.read_csv(design_csv_path)
+
+    required_columns = (*DESIGN_KEY_COLUMNS, DESIGN_SCAN_STEP_COLUMN)
+    missing_columns = [column for column in required_columns if column not in design_df.columns]
+    if missing_columns:
+        raise DataValidationError(f"Experiment design {design_csv_path!r} lacks columns: {missing_columns}")
+    if design_df[list(required_columns)].isna().any().any():
+        raise DataValidationError(f"Experiment design {design_csv_path!r} has empty key or scan-step cells.")
+
+    design_df["date"] = design_df["date"].astype(str)
+    design_df["plate"] = design_df["plate"].astype(int)
+    design_df["well"] = design_df["well"].astype(int)
+    duplicated = design_df.duplicated(subset=list(DESIGN_KEY_COLUMNS), keep=False)
+    if duplicated.any():
+        duplicate_keys = design_df.loc[duplicated, list(DESIGN_KEY_COLUMNS)].drop_duplicates()
+        raise DataValidationError(
+            f"Experiment design {design_csv_path!r} has duplicate rows for: "
+            f"{duplicate_keys.to_dict('records')}"
+        )
+    return design_df
+
+
+def resolve_sample_design_values(
+    design_df: pd.DataFrame,
+    sample_id: str,
+    metadata_log_paths: List[str],
+) -> Dict[str, Any]:
+    """Return a sample's experimental-factor values after checking it against its metadata.
+
+    The design row is looked up from the date/plate/well in ``sample_id``; its
+    ``scan_step_um`` must equal the scan step logged in every given metadata log (FG,
+    and BG in external-background mode). This catches samples whose folders were
+    mis-renamed by hand.
+
+    Returns:
+        ``{column: value}`` for every design column except the key columns.
+
+    Raises:
+        DataValidationError: no design row, or a scan step that disagrees with the metadata.
+    """
+    date, plate, well = parse_date_plate_well(sample_id)
+    if date is None:
+        raise DataValidationError(f"Sample folder name {sample_id!r} is not YYYYMMDD_plateX_wellY.")
+    rows = design_df[
+        (design_df["date"] == date) & (design_df["plate"] == int(plate)) & (design_df["well"] == int(well))
+    ]
+    if rows.empty:
+        raise DataValidationError(
+            f"No experiment-design row for sample {sample_id} (date={date}, plate={plate}, well={well})."
+        )
+    design_row = rows.iloc[0]
+
+    design_scan_step = float(design_row[DESIGN_SCAN_STEP_COLUMN])
+    for log_path in metadata_log_paths:
+        header = read_acquisition_metadata_header(log_path)
+        logged_scan_step = float(_get_header_field(header, _SCAN_STEP_FIELD, log_path))
+        if not np.isclose(logged_scan_step, design_scan_step):
+            raise DataValidationError(
+                f"Sample {sample_id}: experiment design says {DESIGN_SCAN_STEP_COLUMN}={design_scan_step:g} "
+                f"but {log_path!r} logged a scan step of {logged_scan_step:g} um."
+            )
+
+    return {
+        column: design_row[column].item() if hasattr(design_row[column], "item") else design_row[column]
+        for column in design_df.columns
+        if column not in DESIGN_KEY_COLUMNS
+    }

@@ -17,7 +17,7 @@ from src.utils import (
     load_dataframe_from_csv, save_dataframe_to_csv,
     parse_date_plate_well, extract_frame_from_filename
 )
-from src.utils.common_exceptions import ProcessingError, ConfigError, DataValidationError
+from src.utils.common_exceptions import ProcessingError, ImageProcessingError, ConfigError, DataValidationError
 from src.utils.config_loader import get_pixel_to_mm_factor, get_scan_extent_mm
 from src.core.image_io_operations import (
     load_image,
@@ -30,10 +30,17 @@ from src.core.region_props_calculator import find_contours, calculate_contour_me
 from src.core.segmentation import generate_binary_mask_from_float_image, assess_subtracted_foreground
 from src.core.well_analysis import (
     create_well_mask_black_plate,
+    create_well_mask_with_fallback,
+    match_low_frequency_illumination,
     match_well_brightness
 )
 
 logger = logging.getLogger(__name__)
+
+# Two frames show the same focal plane when their dpt / fd_mm (parsed from the same
+# filename tokens) agree within this tolerance. Shared by both FG/BG pairing strategies:
+# the time-shift offset search and the external-background frame matching.
+_FOCAL_PLANE_TOLERANCE = 1e-6
 
 
 def select_background_frame(images_df: pd.DataFrame, fg_index: int, bg_offset: int) -> Dict[str, Any]:
@@ -116,13 +123,15 @@ def analyze_subtracted_image(
     applies a fixed foreground floor and a max-foreground-fraction guard via
     :func:`assess_subtracted_foreground`. This is the single place where both the batch and
     realtime pipelines evaluate that gate. On a failed subtraction the result carries
-    ``subtraction_failed=True`` and no candidates.
+    ``subtraction_failed=True`` and no candidates. ``foreground_fraction`` reports the gate's
+    measured fraction (None when the gate is not configured).
     """
     empty_result = {
         "particles": [],
         "particles_df": pd.DataFrame(),
         "binary_mask": None,
         "masked_subtracted_image": None,
+        "foreground_fraction": None,
         "subtraction_failed": False,
     }
     if subtracted_img_uint8 is None:
@@ -137,6 +146,7 @@ def analyze_subtracted_image(
     # Shared FG/BG foreground gate: a fixed floor Otsu may tighten but not fall below, plus a
     # guard that rejects the whole frame when the subtraction failed (flood of false positives).
     foreground_floor_mask = None
+    foreground_fraction = None
     if subtracted_foreground_config:
         well_area_px = (
             int(np.count_nonzero(well_mask_uint8)) if well_mask_uint8 is not None
@@ -158,6 +168,7 @@ def analyze_subtracted_image(
                 **empty_result,
                 "binary_mask": foreground_floor_mask.astype(np.uint8) * 255,
                 "masked_subtracted_image": masked_subtracted_img_uint8,
+                "foreground_fraction": foreground_fraction,
                 "subtraction_failed": True,
             }
 
@@ -177,6 +188,7 @@ def analyze_subtracted_image(
         "particles_df": df_subtracted_particles,
         "binary_mask": binary_mask_display_uint8,
         "masked_subtracted_image": masked_subtracted_img_uint8,
+        "foreground_fraction": foreground_fraction,
         "subtraction_failed": False,
     }
 
@@ -212,22 +224,65 @@ def refine_with_local_otsu(
     }
 
 
+def _prepare_external_background(
+    fg_img_uint8: np.ndarray,
+    bg_img_uint8: np.ndarray,
+    external_background_config: Dict[str, Any],
+    well_identification_config: Dict[str, Any],
+) -> Tuple[np.ndarray, np.ndarray]:
+    """Adapt an external (separately recorded, specimen-free) BG frame to its FG frame.
+
+    External BG runs are recorded minutes to an hour apart from the FG run, so the
+    illumination drifts as a smooth spatial gradient and the well rim / meniscus edge
+    shifts slightly; both would flood the shared subtracted-foreground gate. Returns
+    the BG with the FG's low-frequency illumination, and the BG well mask (shared
+    well-mask helper, built on the specimen-free BG) inset by ``rim_exclusion_px``.
+    Time-shift pairs come from the same recording and never take this step.
+    """
+    well_mask_uint8 = create_well_mask_with_fallback(bg_img_uint8, well_identification_config)
+    if well_mask_uint8 is None:
+        raise ImageProcessingError(
+            "External background: no well mask could be built from the BG frame "
+            "(well detection failed and the full-frame fallback is disabled)."
+        )
+    # A distance transform is an erosion by a Euclidean disk; on full-resolution frames it is
+    # ~14x faster than an elliptical erosion kernel of this size.
+    distance_to_edge_float = cv2.distanceTransform((well_mask_uint8 > 0).astype(np.uint8), cv2.DIST_L2, 5)
+    rim_excluded_mask_uint8 = np.where(
+        distance_to_edge_float > float(external_background_config['rim_exclusion_px']), 255, 0
+    ).astype(np.uint8)
+    bg_matched_uint8 = match_low_frequency_illumination(
+        fg_img_uint8,
+        bg_img_uint8,
+        int(external_background_config['illumination_match_downsample']),
+        int(external_background_config['illumination_match_median_kernel_px']),
+    )
+    return bg_matched_uint8, rim_excluded_mask_uint8
+
+
 def process_frame_pair(
     fg_row: pd.Series,
     bg_row: pd.Series,
     config: Dict[str, Any],
     ffc_assets: Optional[Any],
     masks: Optional[Dict[str, Any]] = None
-) -> pd.DataFrame:
-    """Process a FG/BG pair and return fused particle detections."""
+) -> Tuple[pd.DataFrame, Optional[Dict[str, Any]]]:
+    """Process a FG/BG pair and return fused particle detections plus pair diagnostics.
+
+    The diagnostics (None when an image could not be loaded) record the FG/BG files and
+    the shared foreground gate's verdict for the per-sample pairing audit. With
+    ``config['external_background_config']`` set, the BG is first adapted by
+    :func:`_prepare_external_background` and the subtracted analysis is restricted to
+    its rim-excluded well mask.
+    """
     masks = masks or {}
-    fg_filepath = fg_row.get('full_path')
-    bg_filepath = bg_row.get('full_path')
+    fg_filepath = fg_row['full_path']
+    bg_filepath = bg_row['full_path']
     fg_img = load_image(fg_filepath, mode='gray')
     bg_img = load_image(bg_filepath, mode='gray')
     if fg_img is None or bg_img is None:
         logger.warning(f"Could not load FG ({fg_filepath}) or BG ({bg_filepath}). Skipping pair.")
-        return pd.DataFrame()
+        return pd.DataFrame(), None
 
     if ffc_assets is not None:
         fg_img_ffc = np.round(apply_flat_field_correction(fg_img, ffc_assets) * 255.0).astype(np.uint8)
@@ -236,30 +291,46 @@ def process_frame_pair(
         fg_img_ffc = fg_img
         bg_img_ffc = bg_img
 
+    rim_excluded_mask_uint8 = None
+    external_background_config = config['external_background_config']
+    if external_background_config is not None:
+        bg_img_ffc, rim_excluded_mask_uint8 = _prepare_external_background(
+            fg_img_ffc,
+            bg_img_ffc,
+            external_background_config,
+            config['config_black_plate_well']['well_identification'],
+        )
+
     prep_data = prepare_masked_foreground(
         fg_img_ffc,
         bg_img_ffc,
-        enable_brightness_adjustment=config.get('enable_brightness_adjustment', False),
-        brightness_config=config.get('config_black_plate_well', {}),
-        well_masking_cfg=config.get('well_masking', {}),
-        system_cfg=config.get('system_cfg', {}),
-        source_illumination=config.get('source_image_illumination', 'darkfield')
+        enable_brightness_adjustment=config['enable_brightness_adjustment'],
+        brightness_config=config['config_black_plate_well'],
+        well_masking_cfg=config['well_masking'],
+        system_cfg=config['system_cfg'],
+        source_illumination=config['source_image_illumination']
     )
-    general_well_mask_for_roi_uint8 = prep_data.get("well_mask")
+    general_well_mask_for_roi_uint8 = prep_data["well_mask"]
     if general_well_mask_for_roi_uint8 is None:
         general_well_mask_for_roi_uint8 = masks.get("well_mask")
     elif masks.get("well_mask") is None:
         masks["well_mask"] = general_well_mask_for_roi_uint8
-    # Subtract the prepared background from the prepared foreground to isolate moving particles.
+    if rim_excluded_mask_uint8 is not None:
+        general_well_mask_for_roi_uint8 = (
+            rim_excluded_mask_uint8 if general_well_mask_for_roi_uint8 is None
+            else cv2.bitwise_and(general_well_mask_for_roi_uint8, rim_excluded_mask_uint8)
+        )
+    # Subtract the prepared background from the prepared foreground to isolate particles
+    # absent from the background (moving ones for time-shift pairs, all for external BG).
     subtracted_img_uint8 = subtract_images(prep_data["fg_for_sub"], prep_data["bg_for_sub"])
     sub_analysis = analyze_subtracted_image(
         subtracted_img_uint8,
         general_well_mask_for_roi_uint8,
-        config.get('particle_analysis_subtracted_config', {}),
-        config.get('global_threshold_config', {}),
-        config.get('sample_id', 'UNKNOWN_SAMPLE'),
-        fg_row.get('filename', 'UNKNOWN_FILE'),
-        subtracted_foreground_config=config.get('subtracted_foreground_config'),
+        config['particle_analysis_subtracted_config'],
+        config['global_threshold_config'],
+        config['sample_id'],
+        fg_row['filename'],
+        subtracted_foreground_config=config['subtracted_foreground_config'],
     )
     unsubtracted_cfg = config['unsubtracted_analysis_config']
     unsub_analysis = refine_with_local_otsu(
@@ -274,9 +345,19 @@ def process_frame_pair(
     fused_df_frame = _compare_and_fuse_particle_dfs(
         sub_analysis["particles_df"],
         unsub_analysis["particles_df"],
-        config.get('particle_comparison_config', {})
+        config['particle_comparison_config']
     )
-    return fused_df_frame
+    pair_diagnostics = {
+        "fg_filename": fg_row['filename'],
+        "bg_filename": bg_row['filename'],
+        "frame": int(fg_row['frame']),
+        "dpt": float(fg_row['dpt']),
+        "fd_mm": float(fg_row['fd_mm']),
+        "foreground_fraction": sub_analysis["foreground_fraction"],
+        "subtraction_failed": sub_analysis["subtraction_failed"],
+        "fused_detections": len(fused_df_frame),
+    }
+    return fused_df_frame, pair_diagnostics
 
 
 # --- _parse_image_filenames, _filter_image_df, _analyze_single_subtracted_image_global_thresh, _analyze_unsubtracted_locally, _compare_and_fuse_particle_dfs ---
@@ -307,13 +388,21 @@ def _parse_image_filenames(image_dir_path: str) -> Optional[pd.DataFrame]: # Unc
     logger.info(f"Parsed {len(df)} images from {image_dir_path}.")
     return df
 
-def _filter_image_df(df: pd.DataFrame) -> pd.DataFrame: # Unchanged
-    """Trim the parsed image table to frames usable for pairing foreground/background."""
+def _filter_image_df(df: pd.DataFrame, *, trim_to_last_fd0: bool) -> pd.DataFrame:
+    """Trim the parsed image table to frames usable for pairing foreground/background.
+
+    Frame 0 is always dropped. ``trim_to_last_fd0`` additionally cuts every frame after
+    the last fd_mm == 0 frame, keeping whole focus-sweep cycles so the modulo-wrapped
+    time-shift pairing still pairs equal focal planes. External-background pairing gives
+    each frame its own BG partner, so it keeps the tail (``trim_to_last_fd0=False``).
+    """
     if df.empty: return df
     initial_len = len(df)
     if df.iloc[0]["frame"] == 0:
         df = df.iloc[1:].reset_index(drop=True)
         logger.info(f"Removed frame 0. Rows: {initial_len} -> {len(df)}.")
+    if not trim_to_last_fd0:
+        return df
     fd0_frames = df[df["fd_mm"] == 0]
     if not fd0_frames.empty:
         max_frame_fd0 = fd0_frames["frame"].max()
@@ -327,7 +416,7 @@ def _determine_bg_offset_for_fg_bg_pairs(
     minimum_offset: Optional[int],
     fallback_offset: int,
     *,
-    tolerance: float = 1e-6
+    tolerance: float = _FOCAL_PLANE_TOLERANCE
 ) -> int:
     """Return an offset that pairs FG and BG frames with matching fd_mm.
 
@@ -408,6 +497,145 @@ def _determine_bg_offset_for_fg_bg_pairs(
         fallback_offset,
     )
     return fallback_offset
+
+
+def _build_time_shift_pairs(
+    images_df_filtered: pd.DataFrame,
+    config_s1: Dict[str, Any],
+    recording_fps: float,
+) -> List[Tuple[pd.Series, pd.Series]]:
+    """Pair every frame with a later frame of the same recording (time-shifted BG).
+
+    The offset is ``bg_offset_val``, or in ``automatic`` mode the smallest offset of at
+    least ~5 s whose frames match in fd_mm; pairs wrap modulo the frame count.
+    """
+    bg_offset_mode = config_s1['BG_frame_offset_mode']
+    bg_offset_default = config_s1['bg_offset_val']
+    min_offset_for_auto = max(int(round(recording_fps * 5)), 1) if recording_fps > 0 else None
+
+    effective_mode = bg_offset_mode
+    if bg_offset_mode == 'automatic':
+        if min_offset_for_auto is None:
+            logger.warning(
+                "Stage 1: Automatic background offset requested but acquisition.camera.fps is non-positive; "
+                "falling back to configured offset %d.",
+                bg_offset_default,
+            )
+            bg_offset = bg_offset_default
+            effective_mode = 'fixed-fallback'
+        else:
+            bg_offset = _determine_bg_offset_for_fg_bg_pairs(
+                images_df_filtered,
+                min_offset_for_auto,
+                bg_offset_default
+            )
+    else:
+        bg_offset = bg_offset_default
+
+    min_offset_display = min_offset_for_auto if min_offset_for_auto is not None else 'N/A'
+    logger.info(
+        "Stage 1: Using background frame offset %s (mode=%s, minimum_auto_offset=%s, recording_fps=%.3f)",
+        bg_offset,
+        effective_mode,
+        min_offset_display,
+        recording_fps,
+    )
+
+    frame_pairs: List[Tuple[pd.Series, pd.Series]] = []
+    for idx_frame_list in range(len(images_df_filtered)):
+        # Pair foreground frame with its background counterpart using configured offset.
+        pairing_data = select_background_frame(images_df_filtered, idx_frame_list, bg_offset)
+        fg_row = pairing_data.get("fg_row")
+        bg_row = pairing_data.get("bg_row")
+        if fg_row is None or bg_row is None:
+            logger.warning(f"Failed to select FG/BG pairing; skipping frame index {idx_frame_list}.")
+            continue
+        frame_pairs.append((fg_row, bg_row))
+    return frame_pairs
+
+
+def _build_external_background_pairs(
+    fg_images_df: pd.DataFrame,
+    bg_images_df: pd.DataFrame,
+) -> List[Tuple[pd.Series, pd.Series]]:
+    """Pair every FG frame with the same-index frame of the external (specimen-free) BG run.
+
+    Pairs are keyed on the frame index only: sample folders may have been renamed, so the
+    date/plate/well tokens inside the filenames are not trusted. Each pair must then share
+    its focal plane (dpt and fd_mm). Strict: subtracting a BG from another focal plane
+    yields plausible but wrong detections, so any unpaired or mismatched FG frame fails.
+
+    Raises:
+        DataValidationError: duplicate BG frame indices, FG frames without a BG frame,
+            or focal-plane mismatches.
+    """
+    duplicated_bg_frames = bg_images_df.loc[bg_images_df['frame'].duplicated(), 'frame']
+    if not duplicated_bg_frames.empty:
+        raise DataValidationError(
+            f"External BG has duplicate frame indices: {sorted(duplicated_bg_frames.unique())[:10]}"
+        )
+    bg_rows_by_frame = {int(bg_row['frame']): bg_row for _, bg_row in bg_images_df.iterrows()}
+
+    frame_pairs: List[Tuple[pd.Series, pd.Series]] = []
+    missing_frames: List[int] = []
+    mismatched_frames: List[str] = []
+    for _, fg_row in fg_images_df.iterrows():
+        frame = int(fg_row['frame'])
+        bg_row = bg_rows_by_frame.get(frame)
+        if bg_row is None:
+            missing_frames.append(frame)
+            continue
+        same_focal_plane = (
+            np.isclose(fg_row['dpt'], bg_row['dpt'], atol=_FOCAL_PLANE_TOLERANCE)
+            and np.isclose(fg_row['fd_mm'], bg_row['fd_mm'], atol=_FOCAL_PLANE_TOLERANCE)
+        )
+        if not same_focal_plane:
+            mismatched_frames.append(
+                f"f{frame:05d} FG dpt={fg_row['dpt']} fd={fg_row['fd_mm']} / BG dpt={bg_row['dpt']} fd={bg_row['fd_mm']}"
+            )
+            continue
+        frame_pairs.append((fg_row, bg_row))
+
+    problems = []
+    if missing_frames:
+        problems.append(f"{len(missing_frames)} FG frame(s) have no BG frame (first: {missing_frames[:5]})")
+    if mismatched_frames:
+        problems.append(f"{len(mismatched_frames)} focal-plane mismatch(es) (first: {mismatched_frames[:3]})")
+    if problems:
+        raise DataValidationError(f"External background pairing failed: {'; '.join(problems)}")
+    return frame_pairs
+
+
+def _audit_external_background_pairs(
+    pair_diagnostics_records: List[Dict[str, Any]],
+    max_failed_frame_fraction: float,
+    output_dir_stage1: str,
+    sample_id: str,
+) -> None:
+    """Write the FG/BG pairing audit CSV and fail the sample on a mostly failed subtraction.
+
+    An external BG is an independent recording (a time-shifted BG comes from the same
+    one): when too many frames trip the shared subtracted-foreground guard it does not
+    show the same scene (e.g. a moved dish), and the sample's detections would be
+    silently incomplete.
+    """
+    audit_df = pd.DataFrame(pair_diagnostics_records)
+    save_dataframe_to_csv(audit_df, output_dir_stage1, f"{sample_id}_stage1_bg_pairing.csv")
+    if audit_df.empty:
+        raise ProcessingError(f"External background: no FG/BG pair of sample {sample_id} could be processed.")
+
+    failed_frame_count = int(audit_df['subtraction_failed'].sum())
+    failed_frame_fraction = failed_frame_count / len(audit_df)
+    logger.info(
+        f"External background: {failed_frame_count}/{len(audit_df)} frames of {sample_id} tripped the "
+        f"subtracted-foreground guard ({failed_frame_fraction:.1%}; limit {max_failed_frame_fraction:.1%})."
+    )
+    if failed_frame_fraction > max_failed_frame_fraction:
+        raise ProcessingError(
+            f"External background for {sample_id}: {failed_frame_fraction:.1%} of frames failed the "
+            f"subtraction (limit {max_failed_frame_fraction:.1%}); the BG run does not match the FG scene. "
+            f"See {sample_id}_stage1_bg_pairing.csv."
+        )
 
 def _analyze_single_subtracted_image_global_thresh(
     image_to_analyze_gray_uint8: np.ndarray,
@@ -724,23 +952,43 @@ def _build_tracking_xy_figure(
     return fig
 
 
+def _sweep_period_frames(images_df: pd.DataFrame) -> int:
+    """Frames per focus-sweep cycle of a recording, from the spacing of its fd_mm == 0 frames.
+
+    Zigzag and sawtooth sweeps both return to fd_mm == 0 once per cycle. A run shorter
+    than one cycle has a single fd_mm == 0 frame; every gap in it is then shorter than
+    the run, so the run length is returned.
+
+    Raises:
+        DataValidationError: no fd_mm == 0 frame, so the sweep cycle is unknown.
+    """
+    fd0_frames = np.sort(images_df.loc[images_df['fd_mm'] == 0, 'frame'].to_numpy())
+    if fd0_frames.size == 0:
+        raise DataValidationError("No fd_mm == 0 frame found: the focus-sweep period cannot be determined.")
+    if fd0_frames.size == 1:
+        return int(images_df['frame'].max() - images_df['frame'].min() + 1)
+    return int(np.median(np.diff(fd0_frames)))
+
+
 def run_particle_tracking(
     fused_df: pd.DataFrame,
     sample_id: str,
     tracking_config: Dict[str, Any],
-    extent_mm: Tuple[float, float, float]
-) -> Tuple[pd.DataFrame, Optional[plt.Figure], Optional[plt.Figure]]:
+    memory_frames: int,
+    search_range_mm: float,
+) -> pd.DataFrame:
     """Perform particle tracking on fused detections and return data instead of writing files.
 
-    Returns the tracked dataframe plus two companion figures: the 3D track plot
-    and its 2D XY projection (both ``None`` when there is nothing to plot).
-    ``extent_mm`` fixes the axis ranges of those figures to the imaged volume.
+    Returns the detections that belong to a track (with ``track_id``); when no track
+    survives, the processed detections with ``track_id`` NaN. ``memory_frames`` (how long
+    a particle may go undetected) and ``search_range_mm`` (linking radius) come from
+    ``tracking`` for time-shift runs and are the static-object values for
+    external-background runs (see :func:`run_stage_01_initial_detection`). The track
+    figures are built by the caller from the final (object-filtered) tracks.
     """
     logger.info(f"--- Post-S1 Tracking initiated for: {sample_id} ---")
     pixel_size_um = tracking_config.get('pixel_size_um')
     magnification = tracking_config.get('magnification')
-    search_range_mm = tracking_config.get('search_range_mm')
-    memory_frames = tracking_config.get('memory_frames')
     min_track_length = tracking_config.get('min_track_length')
     if not all([pixel_size_um, magnification, search_range_mm, memory_frames, min_track_length]):
         raise ConfigError("One or more required tracking parameters are missing from the configuration.")
@@ -753,7 +1001,7 @@ def run_particle_tracking(
     )
     if processed_data.empty:
         logger.warning("Tracking workflow stopped: No data after initial processing.")
-        return processed_data, None, None
+        return processed_data
 
     tracked_data = _track_particles_3d(
         processed_data, search_range_mm, memory_frames, min_track_length, track_in_2d=track_in_2d
@@ -761,7 +1009,7 @@ def run_particle_tracking(
     if tracked_data.empty:
         logger.warning("Tracking workflow stopped: No tracks survived the filtering process.")
         processed_data['track_id'] = np.nan
-        return processed_data, None, None
+        return processed_data
 
     logger.info("Tracking Step 3: Merging tracking results with original data...")
     merge_cols = ['frame', 'x_mm', 'y_mm', 'z_mm']
@@ -785,10 +1033,25 @@ def run_particle_tracking(
     if not final_tracked_particles_df.empty:
         final_tracked_particles_df['track_id'] = final_tracked_particles_df['track_id'].astype(int)
 
-    tracking_figure = _build_tracking_figure(final_tracked_particles_df, extent_mm)
-    tracking_xy_figure = _build_tracking_xy_figure(final_tracked_particles_df, extent_mm)
     logger.info(f"--- Post-S1 Tracking for {sample_id} COMPLETED ---")
-    return final_tracked_particles_df, tracking_figure, tracking_xy_figure
+    return final_tracked_particles_df
+
+
+def _drop_lint_detections(
+    fused_df: pd.DataFrame,
+    lint_max_solidity: float,
+) -> Tuple[pd.DataFrame, pd.DataFrame]:
+    """Drop lint-shaped detections before tracking; return (kept detections, dropped detections).
+
+    A detection is lint-shaped when ``s1_solidity <= lint_max_solidity``: thin, curled or
+    branched lint fills little of its convex hull, but only while it is in focus. Dropping
+    exactly those detections removes the sharp frames of an isolated lint object, so its
+    remaining (blurred) track has no sharpness peak in Stage 2. Animals keep their compact
+    shape, so at most a stray frame of theirs goes, which the sweep-period tracking memory
+    bridges. Detections without a solidity value are kept.
+    """
+    lint_mask = fused_df['s1_solidity'] <= lint_max_solidity
+    return fused_df.loc[~lint_mask].reset_index(drop=True), fused_df.loc[lint_mask].reset_index(drop=True)
 
 
 def run_stage_01_initial_detection(
@@ -796,8 +1059,16 @@ def run_stage_01_initial_detection(
     output_dir_stage1: str,
     sample_id: str,
     config: Dict[str, Any],
+    bg_image_dir_path: Optional[str] = None,
 ) -> Optional[str]:
-    """Input: image dir, output dir, sample id, config. Output: Stage 1 CSV path or None."""
+    """Input: image dir, output dir, sample id, config. Output: Stage 1 CSV path or None.
+
+    Background source: without ``bg_image_dir_path`` each frame is paired with a
+    time-shifted frame of the same recording, so only particles that moved are found.
+    With it, each frame is paired with the same frame of that separate specimen-free
+    recording (external background), so non-moving specimens are found as well. Every
+    step after pairing (subtraction gate, refinement, fusion, tracking) is shared.
+    """
     logger.info(f"--- Stage 1: Initial Detection for Sample ID: {sample_id} ---")
     config_s1 = config['stage_01_initial_detection']
     system_cfg = config['system']
@@ -811,18 +1082,54 @@ def run_stage_01_initial_detection(
     particle_analysis_subtracted_config = config_s1['particle_analysis']
     unsubtracted_analysis_config = config_s1['unsubtracted_particle_analysis']
     particle_comparison_config = config_s1['particle_comparison']
-    bg_offset_mode = config_s1['BG_frame_offset_mode']
-    bg_offset_default = config_s1['bg_offset_val']
-
-    recording_fps = float(config['acquisition']['camera']['fps'])
-    min_offset_for_auto = max(int(round(recording_fps * 5)), 1) if recording_fps > 0 else None
 
     general_well_masking_cfg = config_s1['well_masking']
 
     images_df = _parse_image_filenames(image_dir_path)
     if images_df is None or images_df.empty: return None
-    images_df_filtered = _filter_image_df(images_df.copy())
-    if images_df_filtered.empty: return None
+
+    if bg_image_dir_path is None:
+        external_background_config = None
+        sweep_period_frames = None
+        static_search_range_mm = None
+        lint_max_solidity = None
+        images_df_filtered = _filter_image_df(images_df.copy(), trim_to_last_fd0=True)
+        if images_df_filtered.empty: return None
+        frame_pairs = _build_time_shift_pairs(
+            images_df_filtered, config_s1, float(config['acquisition']['camera']['fps'])
+        )
+    else:
+        external_background_config = config_s1['external_background']
+        images_df_filtered = _filter_image_df(images_df.copy(), trim_to_last_fd0=False)
+        if images_df_filtered.empty: return None
+        bg_images_df = _parse_image_filenames(bg_image_dir_path)
+        if bg_images_df is None or bg_images_df.empty:
+            raise DataValidationError(f"No background images found in {bg_image_dir_path!r} for sample {sample_id}.")
+        frame_pairs = _build_external_background_pairs(images_df_filtered, bg_images_df)
+        logger.info(
+            f"Stage 1: External background from {bg_image_dir_path!r}: {len(frame_pairs)} FG/BG frame pairs "
+            f"matched by frame index and focal plane."
+        )
+        # Specimens seen against an external BG are static, and many are only detectable
+        # while the sweep passes their focal plane: they vanish for up to one sweep cycle and
+        # reappear in place. Tracking therefore bridges one full cycle (instead of
+        # tracking.memory_frames, tuned for moving specimens), so each object keeps one track
+        # rather than one per pass, and links within the static-object radius
+        # (external_background.static_search_range_mm instead of tracking.search_range_mm):
+        # with a one-cycle memory, the movers' radius lets a waiting track absorb a
+        # neighbouring object. Bridging passes requires XY linking: between passes z
+        # differs by up to the whole scan height.
+        if config_s1['tracking']['enabled'] and not config_s1['tracking']['track_in_2d']:
+            raise ConfigError(
+                "External background requires stage_01_initial_detection.tracking.track_in_2d: true "
+                "(tracks are bridged across focus-sweep passes, where z differs by up to the scan height)."
+            )
+        sweep_period_frames = _sweep_period_frames(images_df)
+        logger.info(
+            f"Stage 1: External background: tracking memory = one focus-sweep period = {sweep_period_frames} frames."
+        )
+        static_search_range_mm = float(external_background_config['static_search_range_mm'])
+        lint_max_solidity = float(external_background_config['lint_max_solidity'])
 
     # Load flat/dark calibration once per sample directory and reuse it for all frames.
     # Reuse keeps the correction consistent and avoids repeated disk reads.
@@ -839,61 +1146,37 @@ def run_stage_01_initial_detection(
         "subtracted_foreground_config": subtracted_foreground_config,
         "unsubtracted_analysis_config": unsubtracted_analysis_config,
         "particle_comparison_config": particle_comparison_config,
+        "external_background_config": external_background_config,
         "sample_id": sample_id,
     }
 
     all_fused_particles_for_sample_list: List[pd.DataFrame] = []
+    pair_diagnostics_records: List[Dict[str, Any]] = []
     reusable_masks: Dict[str, Any] = {}
 
-    effective_mode = bg_offset_mode
-    if bg_offset_mode == 'automatic':
-        if min_offset_for_auto is None:
-            logger.warning(
-                "Stage 1: Automatic background offset requested but acquisition.camera.fps is non-positive; "
-                "falling back to configured offset %d.",
-                bg_offset_default,
-            )
-            bg_offset = bg_offset_default
-            effective_mode = 'fixed-fallback'
-        else:
-            bg_offset = _determine_bg_offset_for_fg_bg_pairs(
-                images_df_filtered,
-                min_offset_for_auto,
-                bg_offset_default
-            )
-    else:
-        bg_offset = bg_offset_default
-
-    min_offset_display = min_offset_for_auto if min_offset_for_auto is not None else 'N/A'
-    logger.info(
-        "Stage 1: Using background frame offset %s (mode=%s, minimum_auto_offset=%s, recording_fps=%.3f)",
-        bg_offset,
-        effective_mode,
-        min_offset_display,
-        recording_fps,
-    )
-
-    for idx_frame_list in range(len(images_df_filtered)):
-        # Pair foreground frame with its background counterpart using configured offset.
-        pairing_data = select_background_frame(images_df_filtered, idx_frame_list, bg_offset)
-        fg_row = pairing_data.get("fg_row")
-        bg_row = pairing_data.get("bg_row")
-        if fg_row is None or bg_row is None:
-            logger.warning(f"Failed to select FG/BG pairing; skipping frame index {idx_frame_list}.")
-            continue
-
+    for fg_row, bg_row in frame_pairs:
         logger.debug(f"Processing S1 Frame: {fg_row['filename']} (BG: {bg_row['filename']})")
-        fused_df_frame = process_frame_pair(
+        fused_df_frame, pair_diagnostics = process_frame_pair(
             fg_row,
             bg_row,
             frame_pair_config,
             ffc_assets,
             reusable_masks
         )
+        if pair_diagnostics is not None:
+            pair_diagnostics_records.append(pair_diagnostics)
 
         # Collect fused detections for the sample.
         if not fused_df_frame.empty:
             all_fused_particles_for_sample_list.append(fused_df_frame)
+
+    if external_background_config is not None:
+        _audit_external_background_pairs(
+            pair_diagnostics_records,
+            float(external_background_config['max_failed_frame_fraction']),
+            output_dir_stage1,
+            sample_id,
+        )
 
     if not all_fused_particles_for_sample_list:
         logger.warning(f"No particles detected or fused for the entire sample {sample_id}.")
@@ -903,6 +1186,14 @@ def run_stage_01_initial_detection(
     
     logger.info(f"Total fused particles for sample {sample_id}: {len(final_sample_df)}")
 
+    if lint_max_solidity is not None and not final_sample_df.empty:
+        final_sample_df, lint_detections_df = _drop_lint_detections(final_sample_df, lint_max_solidity)
+        save_dataframe_to_csv(lint_detections_df, output_dir_stage1, f"{sample_id}_stage1_rejected_lint_detections.csv")
+        logger.info(
+            f"Stage 1: Dropped {len(lint_detections_df)} lint-shaped detections (solidity <= {lint_max_solidity}) "
+            f"before tracking for {sample_id}; {len(final_sample_df)} remain."
+        )
+
     final_output_filename = f"{sample_id}_stage1_tracked_particles.csv"
     final_output_path = os.path.join(output_dir_stage1, final_output_filename)
     
@@ -910,12 +1201,18 @@ def run_stage_01_initial_detection(
     if tracking_config['enabled']:
         # Track fused particles and defer file I/O to the stage wrapper.
         try:
-            tracked_df, tracking_fig, tracking_xy_fig = run_particle_tracking(
-                final_sample_df, sample_id, tracking_config, get_scan_extent_mm(config)
+            if external_background_config is not None:
+                memory_frames, search_range_mm = sweep_period_frames, static_search_range_mm
+            else:
+                memory_frames = tracking_config.get('memory_frames')
+                search_range_mm = tracking_config.get('search_range_mm')
+            extent_mm = get_scan_extent_mm(config)
+            tracked_df = run_particle_tracking(
+                final_sample_df, sample_id, tracking_config, memory_frames, search_range_mm
             )
         except Exception as e:
             logger.exception(f"Particle tracking failed for sample {sample_id}: {e}")
-            tracked_df, tracking_fig, tracking_xy_fig = pd.DataFrame(), None, None
+            tracked_df = pd.DataFrame()
 
         if tracked_df.empty and not final_sample_df.empty:
             logger.warning("Particle tracking returned no tracks; saving fused detections with empty track IDs.")
@@ -923,6 +1220,12 @@ def run_stage_01_initial_detection(
             save_dataframe_to_csv(final_sample_df, output_dir_stage1, final_output_filename)
         else:
             save_dataframe_to_csv(tracked_df, output_dir_stage1, final_output_filename)
+
+        tracks_for_figures_df = (
+            tracked_df.dropna(subset=['track_id']) if 'track_id' in tracked_df.columns else pd.DataFrame()
+        )
+        tracking_fig = _build_tracking_figure(tracks_for_figures_df, extent_mm) if not tracks_for_figures_df.empty else None
+        tracking_xy_fig = _build_tracking_xy_figure(tracks_for_figures_df, extent_mm) if not tracks_for_figures_df.empty else None
         if tracking_fig is not None:
             figure_3d_path = os.path.join(output_dir_stage1, f"{sample_id}_stage1_tracks_3d.png")
             tracking_fig.savefig(figure_3d_path, dpi=150)
