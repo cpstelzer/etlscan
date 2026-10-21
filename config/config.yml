@@ -98,9 +98,21 @@ acquisition:
   focusing:
     pattern: "zigzag"
     scan_step_um: 200
+    # Lens settling before an exposure, per camera.trigger_mode:
+    #   software_grid: the trigger of frame i fires at least min_settle_ms after the lens
+    #     command for frame i has returned (and not before its grid time).
+    #   free_run: the loop sleeps lens_settle_time_sec after each lens command, then takes
+    #     the next frame of the free-running camera.
     lens_settle_time_sec: 0.025
+    min_settle_ms: 10
+    # A downward step larger than this (sawtooth fly-back) gets large_jump_settle_sec instead:
+    # software_grid delays that one trigger to command end + large_jump_settle_sec (the grid
+    # continues on schedule); free_run sleeps that long and discards one sacrificial frame.
     large_jump_threshold_dpt: -3.0
     large_jump_settle_sec: 0.040
+    # software_grid: read the lens temperature (if the controller reports it) every this many
+    # seconds, in the settling time right after a lens command (a read takes ~6 ms).
+    lens_temperature_interval_sec: 1.0
     # scan_height_mm, scan_ratio, lens_controller_port: set by hardware_profiles
   experiment_sweep:
     # Parameter grid for run_acquire_experiment.py (multi-well) and
@@ -124,6 +136,19 @@ acquisition:
     max_num_buffer_min: 50
     grab_strategy: "OneByOne"
     retrieve_timeout_margin_ms: 150
+    # How exposures are timed against the ETL commands (src/acquire/triggered_acquisition.py):
+    #   "software_grid" (default): one software trigger per focus-pattern entry, trigger i due
+    #     at t0 + i / fps on a fixed grid; frame i is exposed only after its own lens command
+    #     (+ focusing.min_settle_ms) and the lens never moves during an exposure. Needs
+    #     grab_strategy "OneByOne".
+    #   "free_run": legacy loop, kept for comparison. At 25 fps a full frame needs ~35 ms to
+    #     reach the PC, so every frame shows the plane commanded for the previous frame.
+    trigger_mode: "software_grid"
+    # software_grid timing:
+    trigger_ready_lead_ms: 8         # call WaitForFrameTriggerReady this long before a trigger is due (the check takes 5.4-5.8 ms)
+    post_exposure_margin_ms: 2       # after a trigger, wait exposure + this before the next lens command
+    timer_busy_wait_ms: 2            # sleep until this long before a deadline, then busy-wait
+    thread_switch_interval_ms: 0.5   # sys.setswitchinterval during the loop, so other threads cannot hold up a trigger
     # exposure_us: set by hardware_profiles
   # roi.width/height: set by hardware_profiles
   output:
