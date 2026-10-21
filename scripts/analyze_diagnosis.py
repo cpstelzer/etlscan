@@ -131,6 +131,28 @@ def _read_csv(path):
     return pd.read_csv(path) if os.path.isfile(path) else None
 
 
+def production_log_timing(folder):
+    """Trigger timing the production loop wrote to its metadata_log.csv (fixed-grid trigger
+    mode; empty for the free-run loop, which has no triggers)."""
+    path = os.path.join(folder, "metadata_log.csv")
+    if not os.path.isfile(path):
+        return {}
+    with open(path, encoding="utf-8") as f:
+        n_header = sum(1 for line in f if line.startswith("#"))
+    log = pd.read_csv(path, skiprows=n_header)
+    if "trigger_late_ms" not in log or log.trigger_late_ms.isna().all():
+        return {}
+    late = log.trigger_late_ms.dropna()
+    exp_trig = log.exposure_minus_trigger_ms.dropna()
+    out = {"prod_trigger_late_ms_median": float(late.median()), "prod_trigger_late_ms_max": float(late.max()),
+           "prod_triggers_late_over_2ms": int((late > 2).sum())}
+    if len(exp_trig):
+        med = float(exp_trig.median())
+        out["prod_exposure_minus_trigger_ms_median"] = med
+        out["prod_exposure_trigger_mismatches"] = int((np.abs(exp_trig - med) > 10).sum())
+    return out
+
+
 # ---------------------------------------------------------------------------
 # Sharpness per tile
 # ---------------------------------------------------------------------------
@@ -606,6 +628,11 @@ def _mean_or_none(*vals):
     return float(np.mean(v)) if v else None
 
 
+def loop_label(r):
+    """Loop name for the report tables; production tests also name their trigger mode."""
+    return f"{r['loop']} ({r['trigger_mode']})" if r.get("trigger_mode") else r["loop"]
+
+
 def is_zzcal(r):
     return (r["kind"] == "zigzag" and r["loop"] == "grid" and not r.get("stab_block")
             and not r.get("loopcmp_variant"))
@@ -630,6 +657,18 @@ def interpret(results, extras):
                          "constant off-by-one between frame and setting (buffering or indexing), independent of timing.")
         else:
             lines.append(f"- Production loop lag (frames): 25 fps {fmt(p25)}, 15 fps {fmt(p15)}, 10 fps {fmt(p10)}.")
+    prod_grid = [r for r in results if r["loop"] == "production" and r.get("trigger_mode") == "software_grid"]
+    if prod_grid:
+        n = sum(r.get("n_frames") or 0 for r in prod_grid)
+        lagged = sum(sum(c for k, c in (r.get("timing_timing_lag_counts") or {}).items() if int(k) != 0)
+                     for r in prod_grid)
+        late = sum(r.get("prod_triggers_late_over_2ms") or 0 for r in prod_grid)
+        mism = sum(r.get("prod_exposure_trigger_mismatches") or 0 for r in prod_grid)
+        lines.append("- Production loop with the fixed-grid trigger (software_grid): frames exposed under another "
+                     f"command than their own (timestamps): {lagged} of {n}; triggers late by more than 2 ms: "
+                     f"{late}; frames matched to the wrong trigger: {mism}; mean camera frame interval "
+                     + ", ".join(f"{r['name']} {fmt(r.get('timing_frame_interval_ms_mean'), 2)} ms"
+                                 for r in prod_grid) + ".")
     trig = {r["name"]: r.get("lag_frames") for r in results if r["name"].startswith("trig_toggle")}
     if trig:
         lines.append("- Triggered loop lag by settle time: " +
@@ -723,7 +762,7 @@ def report_lines(diag_dir, manifest, results, extras, sel, tile, ref_name):
               "timing lag counts | frame interval ms | exposure→retrieve ms | backlog max | ID gaps |",
               "|---|---|---|---|---|---|---|---|---|---|---|---|"]
         for r in tog:
-            L.append(f"| {r['name']} | {r['loop']} | {fmt(r.get('fps_set'), 0)} | {fmt(r.get('settle_ms'), 0)} | "
+            L.append(f"| {r['name']} | {loop_label(r)} | {fmt(r.get('fps_set'), 0)} | {fmt(r.get('settle_ms'), 0)} | "
                      f"{fmt(r.get('lag_frames'))} | {r.get('weights')} | {r.get('best_integer_lag')} | "
                      f"{r.get('timing_timing_lag_counts', '–')} | {fmt(r.get('timing_frame_interval_ms_median'), 1)} | "
                      f"{fmt(r.get('timing_exposure_to_retrieve_ms_median'), 1)} | {r.get('timing_backlog_max', '–')} | "
@@ -754,7 +793,7 @@ def report_lines(diag_dir, manifest, results, extras, sel, tile, ref_name):
               "equivalent lag (frames) | timing lag counts | backlog max | ID gaps |",
               "|---|---|---|---|---|---|---|---|---|---|"]
         for r in zz:
-            L.append(f"| {r['name']} | {r['loop']} | {fmt(r.get('step_um'), 0)} | {r.get('n_tiles')} | "
+            L.append(f"| {r['name']} | {loop_label(r)} | {fmt(r.get('step_um'), 0)} | {r.get('n_tiles')} | "
                      f"{fmt_iqr(r, 'up_minus_down_mm_median', 'up_minus_down_mm_iqr')} | "
                      f"{fmt_iqr(r, 'up_minus_down_template_mm', 'up_minus_down_template_mm_iqr')} | "
                      f"{fmt(r.get('lag_equiv_frames'))} | {r.get('timing_timing_lag_counts', '–')} | "
@@ -1075,7 +1114,8 @@ def analyze_run(diag_dir, args):
     for name, (info, df, commands, S, shape) in data.items():
         tf = timing_frames[name]
         temps = pd.to_numeric(tf["lens_temp_c"], errors="coerce") if "lens_temp_c" in tf else pd.Series(dtype=float)
-        r = {"name": name, "kind": info["kind"], "loop": info["loop"], "fps_set": info.get("fps_set"),
+        r = {"name": name, "kind": info["kind"], "loop": info["loop"], "trigger_mode": info.get("trigger_mode"),
+             "fps_set": info.get("fps_set"),
              "settle_ms": info.get("settle_ms"), "step_um": info.get("step_um"), "n_frames": len(tf),
              "n_frames_saved": len(df),
              "range_start_dpt": info.get("range_start_dpt"), "range_end_dpt": info.get("range_end_dpt"),
@@ -1087,6 +1127,8 @@ def analyze_run(diag_dir, args):
                  info.get("lens_temp_start_c"), info.get("lens_temp_end_c"))}
         timing, dft = timing_analysis(timing_frames[name], commands, info["folder_path"])
         r.update({f"timing_{k}": v for k, v in timing.items()})
+        if info["loop"] == "production":
+            r.update(production_log_timing(info["folder_path"]))
         if info["kind"] == "toggle":
             s = sharpness_index(S, sel)
             r.update(toggle_lag(df, info, s))

@@ -45,7 +45,8 @@ loopcmp (--tests loopcmp): does the per-frame SetAsInput() call change the direc
   grid1 - gridE - prod, then prod - gridE - grid1, so a slow drift cancels in the mean:
     grid1  fixed-grid loop, SetAsInput() once before the loop (the candidate fix)
     gridE  fixed-grid loop, SetAsInput() before every SetFocalPower()
-    prod   production loop (wellscanner_acquisition_module, free-run 25 fps; the
+    prod   production loop (wellscanner_acquisition_module.acquire_and_save_frames with
+           the trigger mode of the config or --prod-trigger-mode; with free_run the
            one-frame lag is removed in the analysis using the camera timestamps)
   Test names lc<rep>_<loop>_zz<step>. A grid_toggle_25fps test at the end serves the
   tile selection.
@@ -59,11 +60,17 @@ call is found.
 
 suite1: the first diagnosis (tests below, all settings relative to --start-dpt):
   1  prod_zz150, prod_zz450   Production loop (wellscanner_acquisition_module.
-                              acquire_and_save_frames, unchanged) on a zigzag of
-                              +-2 mm around the focus, 6 passes, 25 fps free-run.
+                              acquire_and_save_frames, called as run_acquisition
+                              does) on a zigzag of +-2 mm around the focus, 6
+                              passes, 25 fps.
   2  prod_toggle_25/15/10fps  Production loop on a pseudo-random sequence of two
                               settings: in focus (start) and defocused (start + 0.5
-                              dpt). Free-run at 25, 15 and 10 fps.
+                              dpt), at 25, 15 and 10 fps.
+     The production loop uses camera.trigger_mode of the config (software_grid, the
+     fixed-grid trigger loop, by default); --prod-trigger-mode free_run records the
+     legacy free-run loop for comparison. Logging proxies record every SetFocalPower
+     and RetrieveResult call of the loop; the lens temperature is passed to it when
+     a temperature call is found, as run_acquisition does.
   3  trig_toggle_settle25/10/2  Simple triggered loop: set lens, wait (25/10/2 ms),
                               software-trigger one exposure, wait for that frame.
   4  pipe_toggle_25fps        Pipelined triggered loop (candidate fix): set lens,
@@ -577,7 +584,8 @@ class Run:
     # --- 1/2: production loop with logging proxies ---------------------------
     def production(self, name, kind, sequence, fps, start_for_fd, step_um=None, extra_info=None,
                    temp_logger=None):
-        print(f"\n=== {name}: production loop, {len(sequence)} frames, {fps:g} fps free-run ===")
+        trigger_mode = self.acq["camera"]["trigger_mode"]
+        print(f"\n=== {name}: production loop, {len(sequence)} frames, {fps:g} fps, {trigger_mode} ===")
         folder = self.folder(name)
         final_fps = set_free_run(self.camera, fps)
         lens_log, grab_log = [], []
@@ -598,14 +606,17 @@ class Run:
             folder, os.path.join(folder, "metadata_log.csv"), self.date_str,
             self.plate, f"{self.well}_{name}", start_for_fd, conf,
             final_fps=final_fps, actual_exposure_us=self.exposure_us,
-            process_as_color=False, debayer_code=None)
+            process_as_color=False, debayer_code=None,
+            lens_temperature_reader=(lambda: _call_float(temp_logger.fn)) if temp_logger else None)
         write_csv(os.path.join(folder, "proxy_lens.csv"), lens_log)
         write_csv(os.path.join(folder, "proxy_grabs.csv"), grab_log)
         temp_end = temp_logger.read(f"{name}:end")[0] if temp_logger else None
-        info = {"name": name, "kind": kind, "loop": "production", "fps_set": fps,
+        grid = trigger_mode == "software_grid"
+        info = {"name": name, "kind": kind, "loop": "production", "trigger_mode": trigger_mode, "fps_set": fps,
                 "lens_temp_start_c": temp_start, "lens_temp_end_c": temp_end, **(extra_info or {}),
                 "fps_camera": final_fps, "fps_resulting": resulting_fps(self.camera),
-                "settle_ms": 1000 * self.acq["focusing"]["lens_settle_time_sec"],
+                "settle_ms": (self.acq["focusing"]["min_settle_ms"] if grid
+                              else 1000 * self.acq["focusing"]["lens_settle_time_sec"]),
                 "step_um": step_um, "start_dpt": self.start_dpt,
                 "defocus_dpt": TOGGLE_DEFOCUS_DPT if kind == "toggle" else None,
                 "scan_ratio": self.scan_ratio, "exposure_us": self.exposure_us,
@@ -997,11 +1008,16 @@ def main():
     ap.add_argument("--tag", default=None,
                     help="suffix of the output folder name (default s2, or stab for --tests stability; "
                          "use --tag \"\" for none)")
+    ap.add_argument("--prod-trigger-mode", choices=("software_grid", "free_run"), default=None,
+                    help="trigger mode of the production-loop tests (prod_*, loopcmp prod); default: "
+                         "camera.trigger_mode of the config")
     ap.add_argument("--yes", action="store_true", help="skip the confirmation prompt")
     args = ap.parse_args()
 
     acq = load_config(args.config)
     acq["loaded_from_path"] = os.path.abspath(args.config)
+    if args.prod_trigger_mode is not None:
+        acq["camera"]["trigger_mode"] = args.prod_trigger_mode
     if args.probe_temperature:
         probe_temperature(acq)
         return
@@ -1046,6 +1062,8 @@ def main():
         plan = [t for t in suite1 + suite2 if t in wanted]
 
     print("Diagnosis run\n  output:", base_dir, "\n  tests:", ", ".join(plan))
+    if any(t.startswith("prod") for t in plan) or loopcmp:
+        print(f"  production loop trigger mode: {acq['camera']['trigger_mode']}")
     print(f"  sample must be in focus at {start:+.3f} dpt")
     if any(t in suite1 for t in plan):
         print(f"  suite1 lens range: {start - ZIGZAG_HALF_RANGE_MM / scan_ratio:+.3f} to "
@@ -1081,7 +1099,8 @@ def main():
               f"{range_start:+.3f} to {range_end:+.3f} dpt; {n_rec} frames ({n_rec / GRID_FPS:.0f} s of recording); "
               f"total about {args.warmup_min + 6:.0f} min")
         print("    grid1 = fixed-grid loop, SetAsInput() once; gridE = fixed-grid loop, SetAsInput() before every "
-              "command; prod = production loop (free-run, one-frame lag removed in the analysis)")
+              f"command; prod = production loop ({acq['camera']['trigger_mode']}; a free-run lag is removed in "
+              "the analysis)")
         if not (range_start + RANGE_MARGIN_DPT <= start <= range_end - RANGE_MARGIN_DPT):
             print(f"  WARNING: --start-dpt {start:+.3f} is less than {RANGE_MARGIN_DPT} dpt inside the sweep range.")
     if stab_times:
@@ -1127,6 +1146,7 @@ def main():
                     "saw_cycles": args.saw_cycles, "temperature_call": t_path,
                     "stab_times_min": stab_times, "stab_between": args.stab_between if stab_times else None,
                     "loopcmp_warmup_min": args.warmup_min if loopcmp else None,
+                    "prod_trigger_mode": acq["camera"]["trigger_mode"],
                     "roi": [width, height], "camera_model": camera.GetDeviceInfo().GetModelName(),
                     "camera_serial": camera.GetDeviceInfo().GetSerialNumber(),
                     "tick_frequency_hz": run.tick_hz,
@@ -1136,11 +1156,11 @@ def main():
         for step in ZIGZAG_STEPS_UM:
             if f"prod_zz{step}" in plan:
                 seq, bottom = zigzag_sequence(start, scan_ratio, step, ZIGZAG_HALF_RANGE_MM, ZIGZAG_PASSES)
-                run.production(f"prod_zz{step}", "zigzag", seq, 25.0, bottom, step_um=step)
+                run.production(f"prod_zz{step}", "zigzag", seq, 25.0, bottom, step_um=step, temp_logger=templog)
         for fps in PROD_TOGGLE_FPS:
             if f"prod_toggle_{int(fps)}fps" in plan:
                 run.production(f"prod_toggle_{int(fps)}fps", "toggle", toggle_sequence(start, TOGGLE_FRAMES),
-                               fps, start)
+                               fps, start, temp_logger=templog)
         for settle in TRIG_SETTLE_MS:
             if f"trig_toggle_settle{int(settle)}" in plan:
                 run.triggered(f"trig_toggle_settle{int(settle)}", "toggle",
