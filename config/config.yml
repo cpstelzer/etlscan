@@ -149,6 +149,10 @@ acquisition:
     post_exposure_margin_ms: 2       # after a trigger, wait exposure + this before the next lens command
     timer_busy_wait_ms: 2            # sleep until this long before a deadline, then busy-wait
     thread_switch_interval_ms: 0.5   # sys.setswitchinterval during the loop, so other threads cannot hold up a trigger
+    # Recording check (both modes; printed once per recording, timing columns in metadata_log.csv):
+    clock_sync_samples: 20           # camera-clock latches before and after each recording (exposure times on the PC clock)
+    trigger_late_report_ms: 2        # count triggers later than this after their grid time
+    timestamp_mismatch_ms: 10        # a frame whose exposure - trigger is off the recording's median by more was matched to the wrong trigger
     # exposure_us: set by hardware_profiles
   # roi.width/height: set by hardware_profiles
   output:

@@ -602,25 +602,38 @@ class RecordingSummary:
         return "; ".join(parts)
 
 
-def summarize_recording(frames_expected: int, block_ids: Sequence[int], camera_ticks: Sequence[int],
-                        tick_hz: float, trigger_late_ms: Optional[Sequence[float]] = None,
+def summarize_recording(frames_expected: int, block_ids: Sequence[Optional[int]],
+                        camera_ticks: Sequence[Optional[int]], tick_hz: float,
+                        expected_block_id_steps: Optional[Sequence[int]] = None,
+                        trigger_late_ms: Optional[Sequence[float]] = None,
                         late_is_large_jump: Optional[Sequence[bool]] = None,
                         exposure_minus_trigger_ms: Optional[Sequence[float]] = None,
                         late_threshold_ms: Optional[float] = None,
                         mismatch_tolerance_ms: Optional[float] = None) -> RecordingSummary:
-    """Check a recording from its received frames (arrival order).
+    """Check a recording from its received frames, in recording order.
 
-    ``trigger_late_ms`` / ``late_is_large_jump`` (one per fired trigger) and
-    ``exposure_minus_trigger_ms`` (one per received frame with a camera timestamp) are given
-    for triggered recordings only. A frame is a timestamp mismatch when its exposure -
-    trigger deviates from the recording's median by more than ``mismatch_tolerance_ms``: it
-    was exposed by another trigger than the one it was assigned to.
+    ``block_ids`` / ``camera_ticks``: one per received frame (None where the camera gave
+    none). ``expected_block_id_steps``: the step expected before each frame after the first
+    (default 1; the free-run loop discards one frame after a large jump). The mean frame
+    interval is the camera-timestamp span over the block-ID span, so a lost or discarded
+    frame does not inflate it. ``trigger_late_ms`` / ``late_is_large_jump`` (one per fired
+    trigger) and ``exposure_minus_trigger_ms`` (one per received frame with a mapped exposure
+    time) are given for triggered recordings only. A frame is a timestamp mismatch when its
+    exposure - trigger deviates from the recording's median by more than
+    ``mismatch_tolerance_ms``: it was exposed by another trigger than the one it was assigned to.
     """
+    known_ids = [b for b in block_ids if b is not None]
+    steps = block_id_steps(known_ids)
+    if expected_block_id_steps is None or len(known_ids) != len(block_ids):
+        expected_block_id_steps = [1] * len(steps)
+    gaps = sum(1 for step, expected in zip(steps, expected_block_id_steps) if step != expected)
     mean_interval_ms = None
-    if len(camera_ticks) > 1:
-        mean_interval_ms = 1000.0 * (camera_ticks[-1] - camera_ticks[0]) / tick_hz / (len(camera_ticks) - 1)
-    summary = RecordingSummary(frames_expected, len(block_ids), mean_interval_ms,
-                               sum(1 for step in block_id_steps(block_ids) if step != 1))
+    known_ticks = [t for t in camera_ticks if t is not None]
+    if len(known_ticks) > 1:
+        n_intervals = sum(steps) if len(known_ids) == len(camera_ticks) == len(known_ticks) else len(known_ticks) - 1
+        if n_intervals > 0:
+            mean_interval_ms = 1000.0 * (known_ticks[-1] - known_ticks[0]) / tick_hz / n_intervals
+    summary = RecordingSummary(frames_expected, len(block_ids), mean_interval_ms, gaps)
     if trigger_late_ms is None:
         return summary
     late = [i for i, late_ms in enumerate(trigger_late_ms) if late_ms > late_threshold_ms]
