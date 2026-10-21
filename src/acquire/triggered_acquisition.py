@@ -26,7 +26,7 @@ import sys
 import threading
 import time
 from contextlib import contextmanager
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any, Callable, Dict, Iterator, List, Optional, Sequence, Tuple
 
 import numpy as np
@@ -347,6 +347,7 @@ class GridTrigger:
     trigger_time_s: Optional[float] = None      # just before ExecuteSoftwareTrigger
     loop_end_s: Optional[float] = None          # post-exposure wait done
     lens_temp_c: Optional[float] = None
+    grid_restart: bool = False                  # a new grid starts at this entry (after a pause)
     error: Optional[str] = None
 
     @property
@@ -373,6 +374,7 @@ class GridRecording:
     triggers: List[GridTrigger] = field(default_factory=list)
     frames: List[GrabbedFrame] = field(default_factory=list)
     retrieve_timeouts: int = 0
+    grid_restarts: int = 0
     callback_errors: List[str] = field(default_factory=list)
 
     @property
@@ -385,7 +387,9 @@ class FixedGridTriggerLoop:
 
     ``run`` configures the software trigger, sends ``SetAsInput()`` once, records until
     ``next_diopter(i)`` returns None, and restores free-run before it returns. Per entry the
-    lens gets only ``SetFocalPower()``.
+    lens gets only ``SetFocalPower()``. A late trigger keeps the grid (the following
+    triggers catch up, limited by the camera's minimum frame period); after an intentional
+    pause, ``next_diopter`` calls ``request_grid_restart`` and the grid starts anew instead.
     """
 
     def __init__(self, camera: Any, lens: Any, params: GridTimingParams,
@@ -396,6 +400,15 @@ class FixedGridTriggerLoop:
         self._params = params
         self._temperature_reader = lens_temperature_reader
         self._emit = emit
+        self._grid_restart_requested = False
+
+    def request_grid_restart(self) -> None:
+        """Start a new grid at the entry being requested instead of catching up the old one.
+
+        For callers whose ``next_diopter`` paused on purpose (realtime: waiting for a slow
+        consumer); call it from ``next_diopter``, before it returns the entry.
+        """
+        self._grid_restart_requested = True
 
     def run(self, next_diopter: Callable[[int], Optional[float]],
             on_frame: Callable[[GrabbedFrame, Optional[np.ndarray]], None],
@@ -466,8 +479,12 @@ class FixedGridTriggerLoop:
                 previous_diopter = diopter
                 if self._temperature_reader is not None and entry_index % params.lens_temperature_every_frames == 0:
                     trigger.lens_temp_c = self._read_temperature_in_loop()
-                if grid_start_s is None:
-                    grid_start_s = cmd_end_s + params.min_settle_s
+                if grid_start_s is None or self._grid_restart_requested:
+                    if grid_start_s is not None:
+                        trigger.grid_restart = True
+                        recording.grid_restarts += 1
+                    grid_start_s = cmd_end_s + params.min_settle_s - entry_index * period_s
+                    self._grid_restart_requested = False
                 trigger.grid_time_s = grid_start_s + entry_index * period_s
                 settle_s = params.large_jump_settle_s if large_jump else params.min_settle_s
                 fire_at_s = max(trigger.grid_time_s, cmd_end_s + settle_s)
@@ -582,6 +599,7 @@ class RecordingSummary:
     triggers_late_large_jump: Optional[int] = None
     timestamp_mismatches: Optional[int] = None      # None: no triggers or no camera clock
     exposure_minus_trigger_ms_median: Optional[float] = None
+    grid_restarts: int = 0
 
     def format(self, late_threshold_ms: float) -> str:
         interval = "n/a" if self.mean_frame_interval_ms is None else f"{self.mean_frame_interval_ms:.2f} ms"
@@ -599,6 +617,8 @@ class RecordingSummary:
         else:
             parts.append(f"timestamp mismatches {self.timestamp_mismatches} "
                          f"(exposure - trigger median {self.exposure_minus_trigger_ms_median:.2f} ms)")
+        if self.grid_restarts:
+            parts.append(f"grid restarted {self.grid_restarts} times after a pause")
         return "; ".join(parts)
 
 
@@ -644,3 +664,31 @@ def summarize_recording(frames_expected: int, block_ids: Sequence[Optional[int]]
     return RecordingSummary(summary.frames_expected, summary.frames_received, summary.mean_frame_interval_ms,
                             summary.block_id_gaps, len(late), sum(1 for i in late if late_is_large_jump[i]),
                             mismatches, median_ms)
+
+
+def summarize_grid_recording(recording: GridRecording, clock_map: Optional[CameraClockMap], tick_hz: float,
+                             late_threshold_ms: float, mismatch_tolerance_ms: float) -> RecordingSummary:
+    """Recording check of a fixed-grid recording (batch and realtime print the same check).
+
+    Received frames are those mapped to an entry with a successful grab, in entry order;
+    exposure - trigger needs the camera clock map (None: no mismatch check).
+    """
+    frames_by_entry: Dict[int, GrabbedFrame] = {}
+    for frame in recording.frames:
+        if frame.entry_index is not None and frame.grab_ok:
+            frames_by_entry.setdefault(frame.entry_index, frame)
+    received = [frames_by_entry[i] for i in sorted(frames_by_entry)]
+    fired = [t for t in recording.triggers if t.trigger_time_s is not None]
+    exposure_minus_trigger_ms = []
+    if clock_map is not None:
+        for frame in received:
+            trigger = recording.triggers[frame.entry_index]
+            if frame.camera_ticks is not None and trigger.trigger_time_s is not None:
+                exposure_minus_trigger_ms.append(
+                    1000.0 * (clock_map.host_time_s(frame.camera_ticks) - trigger.trigger_time_s))
+    summary = summarize_recording(
+        len(recording.triggers), [f.block_id for f in received], [f.camera_ticks for f in received], tick_hz,
+        trigger_late_ms=[t.trigger_late_ms for t in fired], late_is_large_jump=[t.large_jump for t in fired],
+        exposure_minus_trigger_ms=exposure_minus_trigger_ms, late_threshold_ms=late_threshold_ms,
+        mismatch_tolerance_ms=mismatch_tolerance_ms)
+    return replace(summary, grid_restarts=recording.grid_restarts)

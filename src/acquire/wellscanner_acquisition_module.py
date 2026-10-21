@@ -40,9 +40,9 @@ import optoICC
 from .focus_pattern import build_focus_cycle_pattern
 from .roi import reset_roi_to_full, set_centered_roi
 from .triggered_acquisition import (
-    TRIGGER_MODE_FREE_RUN, TRIGGER_MODE_SOFTWARE_GRID, TRIGGER_MODES, FixedGridTriggerLoop, GridTimingParams,
-    block_id_steps, build_camera_clock_map, camera_tick_frequency_hz, find_lens_temperature_reader,
-    grab_timestamp_ticks, read_lens_temperature, restore_free_run, sample_camera_clock, summarize_recording,
+    TRIGGER_MODE_SOFTWARE_GRID, TRIGGER_MODES, FixedGridTriggerLoop, GridTimingParams, block_id_steps,
+    build_camera_clock_map, camera_tick_frequency_hz, find_lens_temperature_reader, grab_timestamp_ticks,
+    read_lens_temperature, restore_free_run, sample_camera_clock, summarize_grid_recording, summarize_recording,
 )
 
 # --- Global Mappings ---
@@ -204,7 +204,7 @@ def _acquire_with_grid_trigger(camera, lens, full_focus_pattern, frame_output, e
     """One software trigger per focus-pattern entry on a fixed time grid (see
     src/acquire/triggered_acquisition.py). Frames are retrieved on a grabber thread and mapped
     to pattern entries by block ID; watermarking and saving run in ``executor``.
-    Returns (log entries, raw timing per entry, any frame missing or out of order)."""
+    Returns (log entries, raw timing per entry, the GridRecording, any frame missing or out of order)."""
     scan_ratio = config['focusing']['scan_ratio']
     total_frames_to_record = len(full_focus_pattern)
     params = GridTimingParams.from_config(config, final_fps, actual_exposure_us, retrieve_timeout)
@@ -256,7 +256,7 @@ def _acquire_with_grid_trigger(camera, lens, full_focus_pattern, frame_output, e
             "grid_time_s": trigger.grid_time_s, "lens_cmd_start_s": trigger.lens_cmd_start_s,
             "lens_cmd_end_s": trigger.lens_cmd_end_s, "trigger_time_s": trigger.trigger_time_s,
             "trigger_late_ms": trigger.trigger_late_ms, "large_jump": trigger.large_jump,
-            "received": frame is not None, "block_id": frame.block_id if frame is not None else None,
+            "block_id": frame.block_id if frame is not None else None,
             "camera_ticks": frame.camera_ticks if frame is not None else None,
             "lens_temp_c": trigger.lens_temp_c,
         })
@@ -289,7 +289,7 @@ def _acquire_with_grid_trigger(camera, lens, full_focus_pattern, frame_output, e
         elif trigger.error is not None:
             log_entry["output_filename"] = f"ERROR_IN_LOOP: {trigger.error}"
         log_data.append(log_entry)
-    return log_data, frame_timing, any_frames_skipped
+    return log_data, frame_timing, recording, any_frames_skipped
 
 
 # --- Acquisition loop: camera free-run (camera.trigger_mode "free_run", legacy) ---
@@ -298,7 +298,7 @@ def _acquire_with_free_run(camera, lens, full_focus_pattern, frame_output, execu
     """Legacy loop, kept for comparison: per frame SetAsInput + SetFocalPower, sleep
     focusing.lens_settle_time_sec, take the next frame of the free-running camera. At 25 fps a
     full frame needs ~35 ms to reach the PC, so each frame shows the plane commanded for the
-    previous frame. Returns (log entries, raw timing per entry, any frame skipped)."""
+    previous frame. Returns (log entries, raw timing per entry, None (no GridRecording), any frame skipped)."""
     lens_settle_time_sec = config['focusing']['lens_settle_time_sec']
     large_jump_settle_sec = config['focusing']['large_jump_settle_sec']
     large_jump_threshold_dpt = config['focusing']['large_jump_threshold_dpt']
@@ -449,7 +449,7 @@ def _acquire_with_free_run(camera, lens, full_focus_pattern, frame_output, execu
         print("Stopping camera grabbing (end of acquire_and_save_frames).")
         try: camera.StopGrabbing()
         except Exception as e: print(f"Error stopping camera grabbing: {e}")
-    return log_data, frame_timing, any_frames_skipped_in_well
+    return log_data, frame_timing, None, any_frames_skipped_in_well
 
 
 # Per-frame columns of metadata_log.csv after the legacy ones; times in s relative to the
@@ -467,7 +467,6 @@ def _add_timing_columns(log_data, frame_timing, start_acquisition_time, clock_ma
     Exposure times are the camera timestamps mapped to the PC clock with ``clock_map`` (None:
     the camera clock could not be latched, the exposure columns stay empty);
     exposure_minus_lens_cmd_ms is measured from the end of the frame's own lens command.
-    Returns exposure - trigger (ms) of every frame that has both, for the recording check.
     """
     def since_start(t):
         return "" if t is None else f"{t - start_acquisition_time:.6f}"
@@ -475,7 +474,6 @@ def _add_timing_columns(log_data, frame_timing, start_acquisition_time, clock_ma
     def ms(value):
         return "" if value is None else f"{value:.3f}"
 
-    exposure_minus_trigger_all = []
     for log_entry, timing in zip(log_data, frame_timing):
         ticks = timing.get("camera_ticks")
         exposure_s = clock_map.host_time_s(ticks) if clock_map is not None and ticks is not None else None
@@ -484,7 +482,6 @@ def _add_timing_columns(log_data, frame_timing, start_acquisition_time, clock_ma
         exposure_minus_trigger = None
         if exposure_s is not None and trigger_time_s is not None:
             exposure_minus_trigger = 1000 * (exposure_s - trigger_time_s)
-            exposure_minus_trigger_all.append(exposure_minus_trigger)
         log_entry.update({
             "grid_time_s": since_start(timing.get("grid_time_s")),
             "lens_cmd_start_s": since_start(timing.get("lens_cmd_start_s")),
@@ -498,27 +495,16 @@ def _add_timing_columns(log_data, frame_timing, start_acquisition_time, clock_ma
                                              else 1000 * (exposure_s - lens_cmd_end_s)),
             "lens_temp_c": "" if timing.get("lens_temp_c") is None else f"{timing['lens_temp_c']:.2f}",
         })
-    return exposure_minus_trigger_all
 
 
-def _summarize_frame_timing(frame_timing, exposure_minus_trigger_ms, trigger_mode, tick_hz, camera_config):
-    """Recording check (frames, frame interval, block-ID gaps, late triggers, timestamp
-    mismatches) from the raw loop timing; printed once per recording."""
+def _summarize_free_run(frame_timing, tick_hz):
+    """Recording check of the legacy loop (frames, frame interval, block-ID gaps; no triggers).
+    The fixed-grid loop uses the shared summarize_grid_recording."""
     received = [t for t in frame_timing if t["received"]]
-    block_ids = [t.get("block_id") for t in received]
-    camera_ticks = [t.get("camera_ticks") for t in received]
-    if trigger_mode == TRIGGER_MODE_FREE_RUN:
-        # the legacy loop discards one frame after a large jump
-        expected_steps = [2 if t["large_jump"] else 1 for t in received[1:]]
-        return summarize_recording(len(frame_timing), block_ids, camera_ticks, tick_hz, expected_steps)
-    fired = [t for t in frame_timing if t.get("trigger_time_s") is not None]
-    return summarize_recording(
-        len(frame_timing), block_ids, camera_ticks, tick_hz,
-        trigger_late_ms=[t["trigger_late_ms"] for t in fired],
-        late_is_large_jump=[t["large_jump"] for t in fired],
-        exposure_minus_trigger_ms=exposure_minus_trigger_ms,
-        late_threshold_ms=camera_config['trigger_late_report_ms'],
-        mismatch_tolerance_ms=camera_config['timestamp_mismatch_ms'])
+    # the legacy loop discards one frame after a large jump
+    expected_steps = [2 if t["large_jump"] else 1 for t in received[1:]]
+    return summarize_recording(len(frame_timing), [t.get("block_id") for t in received],
+                               [t.get("camera_ticks") for t in received], tick_hz, expected_steps)
 
 
 # --- Acquisition Function ---
@@ -586,12 +572,12 @@ def acquire_and_save_frames(camera, lens, full_focus_pattern,
 
     with ThreadPoolExecutor(max_workers=os.cpu_count() or 4) as executor:
         if trigger_mode == TRIGGER_MODE_SOFTWARE_GRID:
-            log_data, frame_timing, any_frames_skipped_in_well = _acquire_with_grid_trigger(
+            log_data, frame_timing, recording, any_frames_skipped_in_well = _acquire_with_grid_trigger(
                 camera, lens, full_focus_pattern, frame_output, executor, config, START_DPT,
                 final_fps, actual_exposure_us, retrieve_timeout,
                 start_acquisition_time, start_acquisition_datetime, lens_temperature_reader)
         else:
-            log_data, frame_timing, any_frames_skipped_in_well = _acquire_with_free_run(
+            log_data, frame_timing, recording, any_frames_skipped_in_well = _acquire_with_free_run(
                 camera, lens, full_focus_pattern, frame_output, executor, config, START_DPT,
                 final_fps, retrieve_timeout, start_acquisition_time)
     clock_samples_after = sample_camera_clock(camera, config['camera']['clock_sync_samples'])
@@ -599,8 +585,12 @@ def acquire_and_save_frames(camera, lens, full_focus_pattern,
 
     tick_hz = camera_tick_frequency_hz(camera)
     clock_map = build_camera_clock_map(clock_samples_before, clock_samples_after, tick_hz)
-    exposure_minus_trigger_ms = _add_timing_columns(log_data, frame_timing, start_acquisition_time, clock_map, tick_hz)
-    summary = _summarize_frame_timing(frame_timing, exposure_minus_trigger_ms, trigger_mode, tick_hz, config['camera'])
+    _add_timing_columns(log_data, frame_timing, start_acquisition_time, clock_map, tick_hz)
+    if recording is not None:
+        summary = summarize_grid_recording(recording, clock_map, tick_hz, config['camera']['trigger_late_report_ms'],
+                                           config['camera']['timestamp_mismatch_ms'])
+    else:
+        summary = _summarize_free_run(frame_timing, tick_hz)
     print(f"Recording check: {summary.format(config['camera']['trigger_late_report_ms'])}")
     if clock_map is None:
         print("  Note: the camera clock could not be latched; exposure-time columns are empty.")
