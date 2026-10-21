@@ -287,3 +287,129 @@ def test_camera_clock_map_interpolates_the_offset_between_latches():
     clock_map = build_camera_clock_map(before, after, 1e9)
     assert clock_map.host_time_s(int(115.0005 * 1e9)) == pytest.approx(15.0, abs=1e-9)
     assert build_camera_clock_map([], [], 1e9) is None
+
+
+# --- realtime camera source (src/realtime/acquisition.py) ------------------------
+
+def _realtime_source(trigger_mode, target_fps=10.0, max_frames=12, control=None, adaptive=False,
+                     queue_size=2, drop=True):
+    import copy
+
+    from src.realtime.acquisition import CameraFrameSource
+    from src.utils.config_loader import load_config_once
+
+    acquisition_config = copy.deepcopy(load_config_once(str(CONFIG_PATH))["acquisition"])
+    acquisition_config["camera"]["trigger_mode"] = trigger_mode
+    return CameraFrameSource(
+        target_fps, max_frames, 150, adaptive, 0.2, 3, 1, 750.0, None, None,
+        etl_control_enabled=True, start_dpt=-2.0, focus_pattern="zigzag", scan_height_mm=14.0,
+        scan_step_um=550.0, scan_ratio=3.36, lens_settle_time_sec=0.025, large_jump_threshold_dpt=-3.0,
+        large_jump_settle_sec=0.040, lens_controller_port="COM11", acquisition_config=acquisition_config,
+        queue_size=queue_size, drop_frame_if_backlogged=drop, acquisition_control=control)
+
+
+def _realtime_cycle():
+    from src.acquire.focus_pattern import build_focus_cycle_pattern
+
+    return build_focus_cycle_pattern(-2.0, "zigzag", 14.0, 550.0, 3.36)
+
+
+@pytest.fixture()
+def cameras(hw, monkeypatch):
+    """Every simulated camera the code under test opens."""
+    created = []
+    original_init = hw.pylon.InstantCamera.__init__
+
+    def init(self, *args, **kwargs):
+        original_init(self, *args, **kwargs)
+        created.append(self)
+
+    monkeypatch.setattr(hw.pylon.InstantCamera, "__init__", init)
+    return created
+
+
+def _exposure_intervals_ms(packets):
+    ns = [p.camera_timestamp_ns for p in packets]
+    return [(b - a) / 1e6 for a, b in zip(ns[:-1], ns[1:])]
+
+
+def test_realtime_grid_frames_show_their_labels(hw, cameras):
+    packets = list(_realtime_source("software_grid"))
+
+    assert [p.frame_index for p in packets] == list(range(12))
+    assert [p.diopter for p in packets] == pytest.approx(_realtime_cycle()[:12])
+    assert [_shown_setting(hw, p.camera_timestamp_ns) for p in packets] == pytest.approx([p.diopter for p in packets])
+    assert min(_exposure_intervals_ms(packets)) == pytest.approx(100.0, abs=3.0)      # 10 fps grid
+    assert cameras[0].TriggerMode.GetValue() == "Off"                                 # free-run restored
+
+
+def test_realtime_grid_adaptive_request_applies_two_frames_later(hw, cameras):
+    """The lens command for frame k + 1 is sent right after frame k's exposure, before frame k
+    reaches the consumer, so a request made on frame k applies from frame k + 2."""
+    from src.realtime.acquisition import AcquisitionControl
+
+    control = AcquisitionControl()
+    packets = []
+    for packet in _realtime_source("software_grid", control=control, adaptive=True):
+        packets.append(packet)
+        if packet.frame_index == 4:
+            control.submit_adaptive_center_diopter(0.5)
+    rounds = [p.focus_round_id for p in packets]
+
+    assert rounds.index(1) == 6
+    assert [_shown_setting(hw, p.camera_timestamp_ns) for p in packets] == pytest.approx([p.diopter for p in packets])
+
+
+def test_realtime_grid_pause_keeps_every_frame_and_restarts_the_grid(hw, cameras, caplog):
+    import logging
+    import time
+
+    packets = []
+    with caplog.at_level(logging.INFO, logger="src.realtime.acquisition"):
+        for packet in _realtime_source("software_grid", queue_size=1, drop=False):
+            packets.append(packet)
+            if packet.frame_index == 3:
+                time.sleep(0.5)                  # processing falls behind
+
+    assert [p.frame_index for p in packets] == list(range(12))          # nothing dropped
+    assert [_shown_setting(hw, p.camera_timestamp_ns) for p in packets] == pytest.approx([p.diopter for p in packets])
+    assert min(_exposure_intervals_ms(packets)) > 90.0                  # no catch-up burst after the pause
+    assert "grid restarted 1 times" in caplog.text
+
+
+def test_realtime_grid_drops_frames_for_slow_processing_on_request(hw, cameras):
+    import time
+
+    packets = []
+    for packet in _realtime_source("software_grid", queue_size=1, drop=True):
+        packets.append(packet)
+        if packet.frame_index == 3:
+            time.sleep(0.5)
+
+    indices = [p.frame_index for p in packets]
+    assert indices[:4] == [0, 1, 2, 3] and len(indices) < 12 and indices[-1] == 11   # frames dropped, grid kept
+    assert [_shown_setting(hw, p.camera_timestamp_ns) for p in packets] == pytest.approx([p.diopter for p in packets])
+
+
+def test_realtime_stop_request_ends_the_grid_and_restores_free_run(hw, cameras):
+    from src.realtime.acquisition import AcquisitionControl
+
+    control = AcquisitionControl()
+    packets = []
+    for packet in _realtime_source("software_grid", max_frames=None, control=control):
+        packets.append(packet)
+        if packet.frame_index == 2:
+            control.request_stop()
+
+    assert 3 <= len(packets) <= 5
+    assert cameras[0].TriggerMode.GetValue() == "Off"
+
+
+def test_realtime_free_run_keeps_the_legacy_loop(hw, cameras):
+    """Legacy realtime loop at 25 fps on the mock: same plane sequence, one-frame lag."""
+    packets = list(_realtime_source("free_run", target_fps=25.0, max_frames=20))
+    cycle = _realtime_cycle()
+
+    assert [p.diopter for p in packets] == pytest.approx(cycle[:20])
+    shown = [_shown_setting(hw, p.camera_timestamp_ns) for p in packets]
+    assert sum(shown[i] == pytest.approx(cycle[i - 1]) for i in range(1, 20)) >= 17
