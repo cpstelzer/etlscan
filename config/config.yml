@@ -248,7 +248,11 @@ realtime_mode:
     target_fps: 5
     # Per-frame processing budget is derived internally as 1000/target_fps; when
     # frames exceed it the monitor emits a rate-limited "falling behind" warning.
-    drop_frame_if_backlogged: true
+    # When processing falls behind: true drops frames (the camera keeps target_fps);
+    # false loses no frame: the queue blocks, and with acquisition.camera.trigger_mode
+    # software_grid the trigger loop waits before the next lens command and then starts a
+    # new time grid (no catch-up burst), so the frame rate drops instead.
+    drop_frame_if_backlogged: false
     queue_size: 3
   background:
     bgi_min_age_s: 2.0
