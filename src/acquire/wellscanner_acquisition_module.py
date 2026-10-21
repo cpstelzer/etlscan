@@ -41,7 +41,8 @@ from .focus_pattern import build_focus_cycle_pattern
 from .roi import reset_roi_to_full, set_centered_roi
 from .triggered_acquisition import (
     TRIGGER_MODE_SOFTWARE_GRID, TRIGGER_MODES, FixedGridTriggerLoop, GridTimingParams, block_id_steps,
-    build_camera_clock_map, camera_tick_frequency_hz, find_lens_temperature_reader, grab_timestamp_ticks,
+    build_camera_clock_map, camera_tick_frequency_hz, camera_ticks_to_ns, find_lens_temperature_reader,
+    grab_timestamp_ticks,
     read_lens_temperature, restore_free_run, sample_camera_clock, summarize_grid_recording, summarize_recording,
 )
 
@@ -489,7 +490,7 @@ def _add_timing_columns(log_data, frame_timing, start_acquisition_time, clock_ma
             "trigger_time_s": since_start(trigger_time_s),
             "trigger_late_ms": ms(timing.get("trigger_late_ms")),
             "block_id": "" if timing.get("block_id") is None else timing["block_id"],
-            "camera_timestamp_ns": "" if ticks is None else int(round(ticks * 1e9 / tick_hz)),
+            "camera_timestamp_ns": "" if ticks is None else camera_ticks_to_ns(ticks, tick_hz),
             "exposure_minus_trigger_ms": ms(exposure_minus_trigger),
             "exposure_minus_lens_cmd_ms": ms(None if exposure_s is None or lens_cmd_end_s is None
                                              else 1000 * (exposure_s - lens_cmd_end_s)),

@@ -171,6 +171,11 @@ def grab_timestamp_ticks(grab_result: Any) -> Optional[int]:
     return None
 
 
+def camera_ticks_to_ns(camera_ticks: Optional[int], tick_hz: float) -> Optional[int]:
+    """Camera timestamp in ns (None stays None)."""
+    return None if camera_ticks is None else int(round(camera_ticks * 1e9 / tick_hz))
+
+
 def grab_block_id(grab_result: Any) -> Optional[int]:
     """Block ID (frame counter of the camera stream) of a grab result, None if it has none."""
     try:
@@ -479,12 +484,15 @@ class FixedGridTriggerLoop:
                 previous_diopter = diopter
                 if self._temperature_reader is not None and entry_index % params.lens_temperature_every_frames == 0:
                     trigger.lens_temp_c = self._read_temperature_in_loop()
-                if grid_start_s is None or self._grid_restart_requested:
-                    if grid_start_s is not None:
-                        trigger.grid_restart = True
-                        recording.grid_restarts += 1
-                    grid_start_s = cmd_end_s + params.min_settle_s - entry_index * period_s
-                    self._grid_restart_requested = False
+                restarted_grid_start_s = cmd_end_s + params.min_settle_s - entry_index * period_s
+                if grid_start_s is None:
+                    grid_start_s = restarted_grid_start_s
+                elif self._grid_restart_requested and restarted_grid_start_s > grid_start_s:
+                    # only a pause that made this entry late moves the grid, and only later
+                    grid_start_s = restarted_grid_start_s
+                    trigger.grid_restart = True
+                    recording.grid_restarts += 1
+                self._grid_restart_requested = False
                 trigger.grid_time_s = grid_start_s + entry_index * period_s
                 settle_s = params.large_jump_settle_s if large_jump else params.min_settle_s
                 fire_at_s = max(trigger.grid_time_s, cmd_end_s + settle_s)
