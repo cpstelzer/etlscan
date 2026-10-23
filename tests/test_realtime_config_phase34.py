@@ -24,7 +24,18 @@ def _load_rt_config_module():
 def _base_unified_config(**overrides):
     cfg = {
         "acquisition": {
-            "camera": {"exposure_us": 1234, "retrieve_timeout_margin_ms": 150},
+            "camera": {
+                "exposure_us": 1234,
+                "retrieve_timeout_margin_ms": 150,
+                "trigger_mode": "software_grid",
+                "trigger_ready_lead_ms": 8,
+                "post_exposure_margin_ms": 2,
+                "timer_busy_wait_ms": 2,
+                "thread_switch_interval_ms": 0.5,
+                "clock_sync_samples": 20,
+                "trigger_late_report_ms": 2,
+                "timestamp_mismatch_ms": 10,
+            },
             "roi": {"width": 3333, "height": 2222},
             "focusing": {
                 "pattern": "zigzag",
@@ -32,6 +43,8 @@ def _base_unified_config(**overrides):
                 "scan_step_um": 350,
                 "scan_ratio": 2.25,
                 "lens_settle_time_sec": 0.025,
+                "min_settle_ms": 10,
+                "lens_temperature_interval_sec": 1.0,
                 "large_jump_threshold_dpt": -3.0,
                 "large_jump_settle_sec": 0.040,
                 "lens_controller_port": "COM5",
@@ -175,3 +188,26 @@ def test_realtime_loader_requires_adaptive_params_when_enabled(tmp_path: Path) -
     mod = _load_rt_config_module()
     with pytest.raises(ValueError, match="adaptive_window_fraction"):
         mod.load_realtime_config(str(config_path))
+
+
+def test_realtime_loader_reads_the_shared_trigger_mode(tmp_path: Path) -> None:
+    mod = _load_rt_config_module()
+    rt_cfg = mod.load_realtime_config(str(_write_config(tmp_path, _base_unified_config())))
+    assert rt_cfg.acquisition_config["camera"]["trigger_mode"] == "software_grid"
+
+    cfg = _base_unified_config(**{"acquisition.camera.trigger_mode": "external"})
+    (tmp_path / "invalid").mkdir()   # load_config_once caches by path
+    with pytest.raises(ValueError, match="trigger_mode"):
+        mod.load_realtime_config(str(_write_config(tmp_path / "invalid", cfg)))
+
+
+def test_realtime_loader_requires_grid_settings_only_for_the_grid_loop(tmp_path: Path) -> None:
+    mod = _load_rt_config_module()
+    cfg = _base_unified_config()
+    del cfg["acquisition"]["focusing"]["min_settle_ms"]
+    with pytest.raises(KeyError, match="min_settle_ms"):
+        mod.load_realtime_config(str(_write_config(tmp_path, cfg)))
+
+    cfg["acquisition"]["camera"]["trigger_mode"] = "free_run"
+    (tmp_path / "free_run").mkdir()   # load_config_once caches by path
+    mod.load_realtime_config(str(_write_config(tmp_path / "free_run", cfg)))

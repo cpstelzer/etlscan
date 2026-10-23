@@ -4,6 +4,7 @@ from dataclasses import dataclass, field
 import logging
 from typing import Any, Dict, Optional
 
+from src.acquire.triggered_acquisition import TRIGGER_MODE_SOFTWARE_GRID, TRIGGER_MODES, GridTimingParams
 from src.utils.config_loader import load_config_once, get_unified_segmentation_params
 
 logger = logging.getLogger(__name__)
@@ -58,6 +59,9 @@ class RealtimeConfig:
     large_jump_threshold_dpt: float
     large_jump_settle_sec: float
     lens_controller_port: Optional[str]
+    # The shared `acquisition` section: camera.trigger_mode and the fixed-grid timing are read
+    # from it by the camera source (GridTimingParams.from_config), as in the batch acquisition.
+    acquisition_config: Dict[str, Any]
 
 
 def _resolve_stage1_config(pipeline_cfg: Dict[str, Any], rt: Dict[str, Any]) -> Dict[str, Any]:
@@ -181,6 +185,7 @@ def load_realtime_config(config_path: str = "config/config.yml") -> RealtimeConf
         large_jump_threshold_dpt=float(focusing_cfg["large_jump_threshold_dpt"]),
         large_jump_settle_sec=float(focusing_cfg["large_jump_settle_sec"]),
         lens_controller_port=focusing_cfg["lens_controller_port"],
+        acquisition_config=acquisition_cfg,
     )
 
     _must_be_positive("runtime.target_fps", parsed.target_fps)
@@ -242,5 +247,17 @@ def load_realtime_config(config_path: str = "config/config.yml") -> RealtimeConf
     _must_be_positive("focusing.scan_step_um", parsed.scan_step_um)
     _must_be_nonnegative("focusing.lens_settle_time_sec", parsed.lens_settle_time_sec)
     _must_be_nonnegative("focusing.large_jump_settle_sec", parsed.large_jump_settle_sec)
+
+    trigger_mode = camera_cfg["trigger_mode"]
+    if trigger_mode not in TRIGGER_MODES:
+        raise ValueError(f"acquisition.camera.trigger_mode must be one of {TRIGGER_MODES}, got {trigger_mode!r}")
+    if trigger_mode == TRIGGER_MODE_SOFTWARE_GRID and parsed.etl_control_enabled:
+        # fail fast on missing/invalid grid settings (only checked here; the camera source builds the
+        # parameters again once the camera reports its actual exposure)
+        GridTimingParams.from_config(acquisition_cfg, parsed.target_fps, parsed.exposure_us,
+                                     parsed.retrieve_timeout_margin_ms)
+        for key in ("clock_sync_samples", "trigger_late_report_ms", "timestamp_mismatch_ms"):
+            if key not in camera_cfg:
+                raise KeyError(f"acquisition.camera.{key} is required with trigger_mode {trigger_mode!r}")
 
     return parsed

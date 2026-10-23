@@ -25,9 +25,11 @@ _SECTION_BANNER = re.compile(r"(?:===|---)\s*(.+?)\s*(?:===|---)")
 
 # Header fields that determine what each frame shows. A FG run and its external BG run
 # must agree on all of them: camera settings set the image formation, and the ETL scan
-# fields plus the start diopter set the focal plane of every frame index. Run identity
-# (timestamp, plate/well id, output folder), measured frame rates and the config path
-# legitimately differ between the two runs and are not compared.
+# fields plus the start diopter set the focal plane of every frame index; the trigger mode
+# decides whether frame k shows the plane of entry k (software_grid) or of entry k - 1
+# (free_run at 25 fps). Run identity (timestamp, plate/well id, output folder), measured
+# frame rates, lens temperatures and the config path legitimately differ between the two
+# runs and are not compared.
 _IMAGE_DEFINING_HEADER_FIELDS = (
     ("Acquisition Run Metadata", "Start Diopter (dpt)"),
     ("Configuration", "Processed as Color"),
@@ -40,8 +42,14 @@ _IMAGE_DEFINING_HEADER_FIELDS = (
     ("Configuration", "Scan Height (mm)"),
     ("Configuration", "Scan Step (um)"),
     ("Configuration", "Scan Ratio (mm/dpt)"),
+    ("Configuration", "Trigger Mode"),
 )
 _SCAN_STEP_FIELD = ("Configuration", "Scan Step (um)")
+# Value of a header field that older acquisitions did not write: every run recorded before
+# the fixed-grid trigger loop used the free-run loop.
+_HEADER_FIELD_DEFAULTS = {
+    ("Configuration", "Trigger Mode"): "free_run",
+}
 
 # Experiment-design table: one row per sample, keyed like the sample folder name
 # (YYYYMMDD_plateX_wellY). scan_step_um is cross-checked against the acquisition
@@ -91,9 +99,11 @@ def read_acquisition_metadata_header(metadata_log_path: str) -> Dict[str, Dict[s
 
 
 def _get_header_field(header: Dict[str, Dict[str, str]], field: tuple, log_path: str) -> str:
-    """Return one header value, raising when the section or key is absent."""
+    """Return one header value; an absent field takes its ``_HEADER_FIELD_DEFAULTS`` value or raises."""
     section, key = field
     if section not in header or key not in header[section]:
+        if field in _HEADER_FIELD_DEFAULTS:
+            return _HEADER_FIELD_DEFAULTS[field]
         raise DataValidationError(f"Metadata header of {log_path!r} has no '{key}' in section '{section}'.")
     return header[section][key]
 

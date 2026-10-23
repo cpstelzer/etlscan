@@ -226,6 +226,23 @@ Given 32 GB RAM + mid-range GPU workstation target:
 - If processing falls behind:
   - prefer dropping oldest unprocessed frame (configurable),
   - always keep acquisition responsive.
+  - `runtime.drop_frame_if_backlogged: false` (current setting) instead loses no frame: the
+    fixed-grid camera loop waits before its next lens command and starts a new time grid,
+    so the frame rate drops while processing is behind.
+
+Camera timing (`acquisition.camera.trigger_mode`, shared with the batch acquisition):
+- `software_grid`: the camera source runs the batch fixed-grid trigger loop
+  (`src/acquire/triggered_acquisition.py`) on a background thread at `runtime.target_fps`;
+  every frame's `diopter` is the setting it was exposed under (block-ID mapping, camera
+  timestamps in `FramePacket.camera_timestamp_ns`), which keeps the per-diopter background
+  library consistent. `free_run`: the legacy loop. Without ETL control the camera free-runs.
+- Latency of `submit_adaptive_center_diopter` / `request_repeat_same_diopter_once`: a request
+  applies from the next lens command, which follows right after the current exposure. A
+  request made while processing frame k therefore applies from frame k + 2 at the earliest
+  (one to two frame intervals from the request to the first exposure on the new plan), plus
+  however far processing runs behind acquisition.
+- The session end calls `AcquisitionControl.request_stop()`, so the loop ends and restores
+  free-run.
 
 Runtime telemetry to expose:
 - acquired fps,

@@ -28,7 +28,7 @@ import os
 import traceback
 import csv
 import yaml # For loading config
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import math # For FPS rounding
 
@@ -39,6 +39,12 @@ import optoICC
 
 from .focus_pattern import build_focus_cycle_pattern
 from .roi import reset_roi_to_full, set_centered_roi
+from .triggered_acquisition import (
+    TRIGGER_MODE_SOFTWARE_GRID, TRIGGER_MODES, FixedGridTriggerLoop, GridTimingParams, block_id_steps,
+    build_camera_clock_map, camera_tick_frequency_hz, camera_ticks_to_ns, find_lens_temperature_reader,
+    grab_timestamp_ticks,
+    read_lens_temperature, restore_free_run, sample_camera_clock, summarize_grid_recording, summarize_recording,
+)
 
 # --- Global Mappings ---
 # Maps Pylon Bayer formats to OpenCV debayering codes
@@ -96,17 +102,435 @@ def load_config(config_path=DEFAULT_CONFIG_PATH):
 
     return acq
 
+# --- Saved-frame rendering and naming (shared by both acquisition loops) ---
+class _FrameOutput:
+    """File name and image content of every saved frame: 8-bit conversion, debayering in
+    colour mode and the watermark (dpt, focusing distance, frame number)."""
+
+    def __init__(self, config, run_folder_path, current_date_str, PLATE_ID, WELL_ID, output_image_format,
+                 total_frames_to_record, process_as_color, debayer_code, watermark_base_x, watermark_first_line_y):
+        self._run_folder_path = run_folder_path
+        self._file_prefix = f"{current_date_str}_plate{PLATE_ID}_well{WELL_ID}_"
+        self._output_image_format = output_image_format
+        self._total_frames_to_record = total_frames_to_record
+        self._process_as_color = process_as_color
+        self._debayer_code = debayer_code
+        self._font = config['watermark']['font']
+        self._font_scale = config['watermark']['font_scale']
+        self._color_bgr = tuple(config['watermark']['color_bgr'])
+        self._color_mono = (self._color_bgr[0],)
+        self._thickness = config['watermark']['thickness']
+        self._base_x = watermark_base_x
+        self._first_line_y = watermark_first_line_y
+        line_height_approx = cv2.getTextSize("Test", self._font, self._font_scale, self._thickness)[0][1]
+        line_spacing_factor = 1.5
+        self._line_height = int(line_height_approx * line_spacing_factor)
+
+    def path(self, frame_count, current_diopter, focusing_distance_mm):
+        img_filename = (f"{self._file_prefix}"
+                        f"f{frame_count:05d}_dpt{current_diopter:.3f}_fd{focusing_distance_mm:.2f}mm."
+                        f"{self._output_image_format}")
+        return os.path.join(self._run_folder_path, img_filename)
+
+    def render(self, raw_frame, frame_count, current_diopter, focusing_distance_mm):
+        if raw_frame.dtype != np.uint8:
+            if raw_frame.dtype in [np.uint16, np.uint12, np.uint10]:
+                shift = max(0, raw_frame.itemsize * 8 - 8)
+                frame_8bit = (raw_frame >> shift).astype(np.uint8)
+            else:
+                print(f"Warning: Unsupported frame dtype {raw_frame.dtype}. Attempting direct cast to uint8.")
+                try: frame_8bit = raw_frame.astype(np.uint8)
+                except Exception as conv_e:
+                    raise ValueError(f"Error converting frame dtype: {conv_e}. Skipping frame {frame_count}.") from conv_e
+        else:
+            frame_8bit = raw_frame
+
+        if self._process_as_color and self._debayer_code is not None:
+            processed_frame = cv2.cvtColor(frame_8bit, self._debayer_code)
+            watermark_color = self._color_bgr
+        else:
+            processed_frame = frame_8bit
+            watermark_color = self._color_mono
+
+        watermark_text = (f"Dpt: {current_diopter:.3f}, FD: {focusing_distance_mm:.2f} mm, "
+                          f"Frame: {frame_count+1}/{self._total_frames_to_record}")
+        if not processed_frame.flags.writeable: frame_display = processed_frame.copy()
+        else: frame_display = processed_frame
+
+        watermark_lines = []
+        for part in watermark_text.split(','):
+            watermark_lines.extend(part.strip().split('\n'))
+        watermark_lines = [line.strip() for line in watermark_lines if line.strip()]
+
+        for i, line in enumerate(watermark_lines):
+            cv2.putText(frame_display, line,
+                        (self._base_x, self._first_line_y + i * self._line_height),
+                        self._font, self._font_scale,
+                        watermark_color, self._thickness, cv2.LINE_AA)
+        return frame_display
+
+    def render_and_save(self, output_path, raw_frame, frame_count, current_diopter, focusing_distance_mm):
+        """Worker-thread job of the fixed-grid loop; returns the rendering time in ms."""
+        proc_start_time = time.perf_counter()
+        frame_display = self.render(raw_frame, frame_count, current_diopter, focusing_distance_mm)
+        image_processing_time_ms = (time.perf_counter() - proc_start_time) * 1000
+        if not cv2.imwrite(output_path, frame_display):
+            raise IOError(f"cv2.imwrite could not write {output_path}")
+        return image_processing_time_ms
+
+
+def _wait_for_saves(futures):
+    """Wait for every submitted save; returns (number saved, number failed)."""
+    print("Waiting for all frame saving tasks to complete...")
+    saved_count = 0
+    error_count = 0
+    for future in as_completed(futures):
+        output_path = futures[future]
+        try:
+            future.result()
+            saved_count += 1
+        except Exception as e:
+            print(f"ERROR saving frame {output_path}: {e}")
+            error_count += 1
+    print(f"Successfully saved {saved_count} frames.")
+    if error_count > 0: print(f"Encountered {error_count} errors during saving.")
+    return saved_count, error_count
+
+
+# --- Acquisition loop: fixed-grid software trigger (camera.trigger_mode "software_grid") ---
+def _acquire_with_grid_trigger(camera, lens, full_focus_pattern, frame_output, executor, config,
+                               START_DPT, final_fps, actual_exposure_us, retrieve_timeout,
+                               start_acquisition_time, start_acquisition_datetime,
+                               lens_temperature_reader):
+    """One software trigger per focus-pattern entry on a fixed time grid (see
+    src/acquire/triggered_acquisition.py). Frames are retrieved on a grabber thread and mapped
+    to pattern entries by block ID; watermarking and saving run in ``executor``.
+    Returns (log entries, raw timing per entry, the GridRecording, any frame missing or out of order)."""
+    scan_ratio = config['focusing']['scan_ratio']
+    total_frames_to_record = len(full_focus_pattern)
+    params = GridTimingParams.from_config(config, final_fps, actual_exposure_us, retrieve_timeout)
+    print(f"Fixed-grid software trigger: {final_fps:.2f} fps grid, lens settle >= {params.min_settle_s * 1000:g} ms, "
+          f"ready check {params.trigger_ready_lead_s * 1000:g} ms before each trigger, lens moves "
+          f"{(params.exposure_s + params.post_exposure_margin_s) * 1000:.2f} ms after it.")
+    saves = {}                      # pattern entry -> (future, output path, submit time in ms)
+    futures = {}
+    progress_every = int(max(1, final_fps * 2))
+
+    def save_frame(frame, raw_frame):
+        entry_index = frame.entry_index
+        if entry_index is None or raw_frame is None or entry_index in saves:
+            return                  # unmapped, failed or duplicate frame: reported after the recording
+        current_diopter = full_focus_pattern[entry_index]
+        focusing_distance_mm = (current_diopter - START_DPT) * scan_ratio
+        output_path = frame_output.path(entry_index, current_diopter, focusing_distance_mm)
+        save_submit_start_time = time.perf_counter()
+        future = executor.submit(frame_output.render_and_save, output_path, raw_frame,
+                                 entry_index, current_diopter, focusing_distance_mm)
+        saves[entry_index] = (future, output_path, (time.perf_counter() - save_submit_start_time) * 1000)
+        futures[future] = output_path
+        if len(saves) % progress_every == 0:
+            elapsed_total = time.perf_counter() - start_acquisition_time
+            print(f"  Processed frame {len(saves)}/{total_frames_to_record}. "
+                  f"Current Avg FPS: {len(saves) / elapsed_total if elapsed_total > 0 else 0:.2f}")
+
+    loop = FixedGridTriggerLoop(camera, lens, params, lens_temperature_reader)
+    recording = loop.run(lambda i: full_focus_pattern[i] if i < total_frames_to_record else None, save_frame,
+                         initial_diopter=START_DPT, grab_strategy=config['camera']['grab_strategy'])
+    print("\nFinished acquisition loop.")
+    print(f"Total frames received: {len(recording.frames)} of {recording.triggers_fired} triggers.")
+    for error in recording.callback_errors:
+        print(f"ERROR handing a frame to the saver: {error}")
+    _wait_for_saves(futures)
+
+    frames_by_entry = {}
+    for frame in recording.frames:
+        if frame.entry_index is not None and frame.grab_ok:
+            frames_by_entry.setdefault(frame.entry_index, frame)
+    any_frames_skipped = (len(frames_by_entry) < total_frames_to_record or recording.retrieve_timeouts > 0
+                          or len(recording.frames) != len(frames_by_entry))
+    log_data, frame_timing = [], []
+    previous_block_id = None
+    for trigger in recording.triggers:
+        entry_index = trigger.entry_index
+        frame = frames_by_entry.get(entry_index)
+        frame_timing.append({
+            "grid_time_s": trigger.grid_time_s, "lens_cmd_start_s": trigger.lens_cmd_start_s,
+            "lens_cmd_end_s": trigger.lens_cmd_end_s, "trigger_time_s": trigger.trigger_time_s,
+            "trigger_late_ms": trigger.trigger_late_ms, "large_jump": trigger.large_jump,
+            "block_id": frame.block_id if frame is not None else None,
+            "camera_ticks": frame.camera_ticks if frame is not None else None,
+            "lens_temp_c": trigger.lens_temp_c,
+        })
+        log_entry = {
+            "timestamp": (start_acquisition_datetime
+                          + timedelta(seconds=trigger.loop_end_s - start_acquisition_time)).isoformat(),
+            "frame_count": entry_index,
+            "diopter": f"{trigger.diopter:.3f}",
+            "focusing_distance_mm": f"{(trigger.diopter - START_DPT) * scan_ratio:.2f}",
+            "lens_set_time_ms": (trigger.lens_cmd_end_s - trigger.lens_cmd_start_s) * 1000,
+            "total_loop_iteration_time_ms": (trigger.loop_end_s - trigger.lens_cmd_start_s) * 1000,
+            "skipped_frame_warning": True,
+        }
+        if trigger.trigger_time_s is not None:
+            log_entry["lens_settle_wait_ms"] = (trigger.trigger_time_s - trigger.lens_cmd_end_s) * 1000
+        if frame is not None:
+            log_entry["pylon_frame_id"] = frame.block_id if frame.block_id is not None else "N/A"
+            log_entry["frame_grab_time_ms"] = (frame.retrieve_end_s - frame.retrieve_start_s) * 1000
+            log_entry["skipped_frame_warning"] = (previous_block_id is not None
+                                                  and block_id_steps([previous_block_id, frame.block_id])[0] != 1)
+            any_frames_skipped = any_frames_skipped or log_entry["skipped_frame_warning"]
+            previous_block_id = frame.block_id
+        save = saves.get(entry_index)
+        if save is not None:
+            future, output_path, submit_ms = save
+            log_entry["output_filename"] = output_path
+            log_entry["image_save_submit_time_ms"] = submit_ms
+            if future.exception() is None:
+                log_entry["image_processing_time_ms"] = future.result()
+        elif trigger.error is not None:
+            log_entry["output_filename"] = f"ERROR_IN_LOOP: {trigger.error}"
+        log_data.append(log_entry)
+    return log_data, frame_timing, recording, any_frames_skipped
+
+
+# --- Acquisition loop: camera free-run (camera.trigger_mode "free_run", legacy) ---
+def _acquire_with_free_run(camera, lens, full_focus_pattern, frame_output, executor, config,
+                           START_DPT, final_fps, retrieve_timeout, start_acquisition_time):
+    """Legacy loop, kept for comparison: per frame SetAsInput + SetFocalPower, sleep
+    focusing.lens_settle_time_sec, take the next frame of the free-running camera. At 25 fps a
+    full frame needs ~35 ms to reach the PC, so each frame shows the plane commanded for the
+    previous frame. Returns (log entries, raw timing per entry, None (no GridRecording), any frame skipped)."""
+    lens_settle_time_sec = config['focusing']['lens_settle_time_sec']
+    large_jump_settle_sec = config['focusing']['large_jump_settle_sec']
+    large_jump_threshold_dpt = config['focusing']['large_jump_threshold_dpt']
+    scan_ratio = config['focusing']['scan_ratio']
+    grab_strategy = config['camera']['grab_strategy']
+    total_frames_to_record = len(full_focus_pattern)
+
+    log_data, frame_timing = [], []
+    any_frames_skipped_in_well = False
+
+    restore_free_run(camera)
+    camera.StartGrabbing(grab_strategy)
+    print(f"Camera grabbing started with strategy: {grab_strategy.name if hasattr(grab_strategy, 'name') else grab_strategy}")
+
+    last_pylon_frame_id = None
+    frames_processed_count = 0
+    previous_diopter = START_DPT
+
+    futures = {}
+    for frame_count in range(total_frames_to_record):
+        loop_iter_start_time = time.perf_counter()
+        log_entry = {}
+        timing = {"large_jump": False, "received": False}
+        grabResult = None
+        try:
+            current_diopter = full_focus_pattern[frame_count]
+            focusing_distance_mm = (current_diopter - START_DPT) * scan_ratio
+            log_entry["diopter"] = f"{current_diopter:.3f}"
+            log_entry["focusing_distance_mm"] = f"{focusing_distance_mm:.2f}"
+
+            diopter_change = current_diopter - previous_diopter
+            is_large_jump = diopter_change < large_jump_threshold_dpt
+
+            lens_set_start_time = time.perf_counter()
+            try:
+                lens.StaticInput.SetAsInput()
+                lens.StaticInput.SetFocalPower(current_diopter)
+            except Exception as e:
+                print(f"Frame {frame_count}: Error setting focal power to {current_diopter:.3f}: {e}")
+            lens_set_end_time = time.perf_counter()
+            log_entry["lens_set_time_ms"] = (lens_set_end_time - lens_set_start_time) * 1000
+            timing.update(lens_cmd_start_s=lens_set_start_time, lens_cmd_end_s=lens_set_end_time,
+                          large_jump=is_large_jump)
+
+            settle_time_this_frame = large_jump_settle_sec if is_large_jump else lens_settle_time_sec
+            time.sleep(settle_time_this_frame)
+            log_entry["lens_settle_wait_ms"] = (time.perf_counter() - lens_set_end_time) * 1000
+
+            if is_large_jump:
+                try:
+                    sacrificial_grab = camera.RetrieveResult(retrieve_timeout, pylon.TimeoutHandling_ThrowException)
+                    sacrificial_grab.Release()
+                except pylon.TimeoutException:
+                    print(f"  Warning: Timeout during sacrificial grab for frame {frame_count}.")
+                except Exception as e_sac:
+                    print(f"  Warning: Error during sacrificial grab for frame {frame_count}: {e_sac}")
+
+            grab_start_time = time.perf_counter()
+            grab_success = False
+            try:
+                grabResult = camera.RetrieveResult(retrieve_timeout, pylon.TimeoutHandling_ThrowException)
+                grab_success = grabResult.GrabSucceeded()
+                if not grab_success:
+                    print(f"Frame {frame_count}: Error grabbing: {grabResult.GetErrorCode()} - {grabResult.GetErrorDescription()}")
+            except pylon.TimeoutException:
+                 print(f"Frame {frame_count}: Timeout waiting for frame retrieval (>{retrieve_timeout}ms).")
+                 any_frames_skipped_in_well = True
+            except pylon.GenericException as e:
+                print(f"Frame {frame_count}: Pylon exception during RetrieveResult: {e}")
+            grab_end_time = time.perf_counter()
+            log_entry["frame_grab_time_ms"] = (grab_end_time - grab_start_time) * 1000
+
+            previous_diopter = current_diopter
+
+            if grab_success and grabResult:
+                proc_start_time = time.perf_counter()
+                current_pylon_frame_id = grabResult.GetBlockID() if hasattr(grabResult, "GetBlockID") else None
+                log_entry["pylon_frame_id"] = current_pylon_frame_id if current_pylon_frame_id is not None else "N/A"
+                timing.update(received=True, block_id=current_pylon_frame_id,
+                              camera_ticks=grab_timestamp_ticks(grabResult))
+                skipped_warning = False
+                if current_pylon_frame_id is not None and last_pylon_frame_id is not None:
+                    # --- MODIFIED SKIP LOGIC ---
+                    # Expect a jump of 2 after an intentional sacrificial grab, otherwise expect a jump of 1
+                    expected_increment = 2 if is_large_jump else 1
+                    expected_next_id = (last_pylon_frame_id + expected_increment)
+
+                    block_id_bits = 16
+                    if hasattr(grabResult, 'GetBlockID') and grabResult.GetBlockID() is not None:
+                        try: block_id_bits = grabResult.PayloadType.GetValue()
+                        except: pass
+                    max_block_id = (1 << block_id_bits) -1
+                    is_wrap_around = (current_pylon_frame_id == 0 and last_pylon_frame_id > (max_block_id - 1000) )
+
+                    if current_pylon_frame_id != expected_next_id and not is_wrap_around:
+                        print(f"Warning: Frame skip detected! Last PylonID: {last_pylon_frame_id}, Current: {current_pylon_frame_id}, Expected Increment: {expected_increment}")
+                        skipped_warning = True
+                        any_frames_skipped_in_well = True
+                log_entry["skipped_frame_warning"] = skipped_warning
+                last_pylon_frame_id = current_pylon_frame_id
+
+                frame_display = frame_output.render(grabResult.Array, frame_count, current_diopter, focusing_distance_mm)
+
+                proc_end_time = time.perf_counter()
+                log_entry["image_processing_time_ms"] = (proc_end_time - proc_start_time) * 1000
+
+                output_path = frame_output.path(frame_count, current_diopter, focusing_distance_mm)
+                log_entry["output_filename"] = output_path
+
+                save_submit_start_time = time.perf_counter()
+                future = executor.submit(cv2.imwrite, output_path, frame_display)
+                futures[future] = output_path
+                save_submit_end_time = time.perf_counter()
+                log_entry["image_save_submit_time_ms"] = (save_submit_end_time - save_submit_start_time) * 1000
+                frames_processed_count += 1
+
+                if (frame_count + 1) % int(max(1, final_fps * 2)) == 0:
+                    elapsed_total = time.perf_counter() - start_acquisition_time
+                    current_avg_fps = frames_processed_count / elapsed_total if elapsed_total > 0 else 0
+                    print(f"  Processed frame {frames_processed_count}/{total_frames_to_record}. Current Avg FPS: {current_avg_fps:.2f}")
+
+            elif not grab_success and grabResult is None:
+                any_frames_skipped_in_well = True
+
+            if grabResult:
+                grabResult.Release()
+        except Exception as loop_e:
+            print(f"ERROR in main loop for frame {frame_count}: {type(loop_e).__name__} - {loop_e}")
+            traceback.print_exc(file=sys.stdout)
+            log_entry["output_filename"] = f"ERROR_IN_LOOP: {loop_e}"
+            any_frames_skipped_in_well = True
+            if grabResult and grabResult.IsReadable():
+                try: grabResult.Release()
+                except Exception as release_err: print(f"Error releasing grabResult after loop error: {release_err}")
+
+        loop_iter_end_time = time.perf_counter()
+        log_entry["timestamp"] = datetime.now().isoformat()
+        log_entry["frame_count"] = frame_count
+        log_entry["total_loop_iteration_time_ms"] = (loop_iter_end_time - loop_iter_start_time) * 1000
+        log_data.append(log_entry)
+        frame_timing.append(timing)
+
+    print("\nFinished acquisition loop.")
+    print(f"Total frames processed in loop: {frames_processed_count}")
+    _wait_for_saves(futures)
+
+    if camera and camera.IsGrabbing():
+        print("Stopping camera grabbing (end of acquire_and_save_frames).")
+        try: camera.StopGrabbing()
+        except Exception as e: print(f"Error stopping camera grabbing: {e}")
+    return log_data, frame_timing, None, any_frames_skipped_in_well
+
+
+# Per-frame columns of metadata_log.csv after the legacy ones; times in s relative to the
+# acquisition start, empty where a value does not exist (e.g. trigger columns in free-run).
+TIMING_LOG_FIELDNAMES = [
+    "grid_time_s", "lens_cmd_start_s", "lens_cmd_end_s", "trigger_time_s", "trigger_late_ms",
+    "block_id", "camera_timestamp_ns", "exposure_minus_trigger_ms", "exposure_minus_lens_cmd_ms",
+    "lens_temp_c",
+]
+
+
+def _add_timing_columns(log_data, frame_timing, start_acquisition_time, clock_map, tick_hz):
+    """Fill the TIMING_LOG_FIELDNAMES columns from the raw loop timing (perf_counter times).
+
+    Exposure times are the camera timestamps mapped to the PC clock with ``clock_map`` (None:
+    the camera clock could not be latched, the exposure columns stay empty);
+    exposure_minus_lens_cmd_ms is measured from the end of the frame's own lens command.
+    """
+    def since_start(t):
+        return "" if t is None else f"{t - start_acquisition_time:.6f}"
+
+    def ms(value):
+        return "" if value is None else f"{value:.3f}"
+
+    for log_entry, timing in zip(log_data, frame_timing):
+        ticks = timing.get("camera_ticks")
+        exposure_s = clock_map.host_time_s(ticks) if clock_map is not None and ticks is not None else None
+        trigger_time_s = timing.get("trigger_time_s")
+        lens_cmd_end_s = timing.get("lens_cmd_end_s")
+        exposure_minus_trigger = None
+        if exposure_s is not None and trigger_time_s is not None:
+            exposure_minus_trigger = 1000 * (exposure_s - trigger_time_s)
+        log_entry.update({
+            "grid_time_s": since_start(timing.get("grid_time_s")),
+            "lens_cmd_start_s": since_start(timing.get("lens_cmd_start_s")),
+            "lens_cmd_end_s": since_start(lens_cmd_end_s),
+            "trigger_time_s": since_start(trigger_time_s),
+            "trigger_late_ms": ms(timing.get("trigger_late_ms")),
+            "block_id": "" if timing.get("block_id") is None else timing["block_id"],
+            "camera_timestamp_ns": "" if ticks is None else camera_ticks_to_ns(ticks, tick_hz),
+            "exposure_minus_trigger_ms": ms(exposure_minus_trigger),
+            "exposure_minus_lens_cmd_ms": ms(None if exposure_s is None or lens_cmd_end_s is None
+                                             else 1000 * (exposure_s - lens_cmd_end_s)),
+            "lens_temp_c": "" if timing.get("lens_temp_c") is None else f"{timing['lens_temp_c']:.2f}",
+        })
+
+
+def _summarize_free_run(frame_timing, tick_hz):
+    """Recording check of the legacy loop (frames, frame interval, block-ID gaps; no triggers).
+    The fixed-grid loop uses the shared summarize_grid_recording."""
+    received = [t for t in frame_timing if t["received"]]
+    # the legacy loop discards one frame after a large jump
+    expected_steps = [2 if t["large_jump"] else 1 for t in received[1:]]
+    return summarize_recording(len(frame_timing), [t.get("block_id") for t in received],
+                               [t.get("camera_ticks") for t in received], tick_hz, expected_steps)
+
+
 # --- Acquisition Function ---
 def acquire_and_save_frames(camera, lens, full_focus_pattern,
                             actual_frame_width, actual_frame_height, watermark_base_x, watermark_first_line_y,
                             run_folder_path, log_file_path, current_date_str,
                             PLATE_ID, WELL_ID, START_DPT, config,
                             final_fps, actual_exposure_us,
-                            process_as_color, debayer_code):
+                            process_as_color, debayer_code,
+                            lens_temperature_reader=None):
+    """Record one frame per focus-pattern entry, save it, and write the metadata log.
+
+    camera.trigger_mode selects the loop: "software_grid" (fixed-grid software trigger; it
+    switches the camera to triggered mode and back to free-run itself) or "free_run" (legacy
+    loop). lens_temperature_reader: optional callable returning the lens temperature in deg C.
+    Returns True if any frame was skipped or is missing.
+    """
     print(f"\n--- Starting Frame Acquisition & Saving ---")
     print(f"Outputting to folder: {run_folder_path}")
     print(f"Logging metadata to: {log_file_path}")
-    
+
+    trigger_mode = config['camera']['trigger_mode']
+    if trigger_mode not in TRIGGER_MODES:
+        raise ValueError(f"camera.trigger_mode must be one of {TRIGGER_MODES}, got {trigger_mode!r}.")
+
     if process_as_color:
         output_image_format = config['output']['image_format']
         print(f"Color Mode: Saving frames as '.{output_image_format}' (from config for max speed).")
@@ -119,17 +543,10 @@ def acquire_and_save_frames(camera, lens, full_focus_pattern,
     if process_as_color: print(f"Using debayer code: {debayer_code}")
     print(f"Using final acquisition FPS: {final_fps:.2f}")
     print(f"Using actual exposure time: {actual_exposure_us} us")
+    print(f"Trigger mode: {trigger_mode}")
 
     lens_settle_time_sec = config['focusing']['lens_settle_time_sec']
-    large_jump_settle_sec = config['focusing'].get('large_jump_settle_sec', 0.040)
-    large_jump_threshold_dpt = config['focusing'].get('large_jump_threshold_dpt', -3.0)
     scan_ratio = config['focusing']['scan_ratio']
-    watermark_font = config['watermark']['font']
-    watermark_font_scale = config['watermark']['font_scale']
-    watermark_color_bgr = tuple(config['watermark']['color_bgr'])
-    watermark_color_mono = (watermark_color_bgr[0],)
-    watermark_thickness = config['watermark']['thickness']
-    grab_strategy = config['camera']['grab_strategy']
     retrieve_timeout = int(1000 / final_fps + config['camera']['retrieve_timeout_margin_ms']) if final_fps > 0 else 2000
 
     total_frames_to_record = len(full_focus_pattern)
@@ -144,203 +561,45 @@ def acquire_and_save_frames(camera, lens, full_focus_pattern,
         "frame_grab_time_ms", "image_processing_time_ms", "image_save_submit_time_ms",
         "total_loop_iteration_time_ms", "output_filename"
     ]
-    log_data = []
-    any_frames_skipped_in_well = False
+    log_fieldnames += TIMING_LOG_FIELDNAMES
+    frame_output = _FrameOutput(config, run_folder_path, current_date_str, PLATE_ID, WELL_ID, output_image_format,
+                                total_frames_to_record, process_as_color, debayer_code,
+                                watermark_base_x, watermark_first_line_y)
 
-    camera.StartGrabbing(grab_strategy)
-    print(f"Camera grabbing started with strategy: {grab_strategy.name if hasattr(grab_strategy, 'name') else grab_strategy}")
-
-    last_pylon_frame_id = None
-    frames_processed_count = 0
-    start_acquisition_time = time.perf_counter()  # monotonic, for elapsed-time/FPS only
+    lens_temp_start_c = read_lens_temperature(lens_temperature_reader)
+    clock_samples_before = sample_camera_clock(camera, config['camera']['clock_sync_samples'])
+    start_acquisition_time = time.perf_counter()  # monotonic, for elapsed-time/FPS and the timing columns
     start_acquisition_datetime = datetime.now()  # wall clock, for the log header
-    previous_diopter = START_DPT
 
     with ThreadPoolExecutor(max_workers=os.cpu_count() or 4) as executor:
-        futures = {}
-        for frame_count in range(total_frames_to_record):
-            loop_iter_start_time = time.perf_counter()
-            log_entry = {}
-            try:
-                current_diopter = full_focus_pattern[frame_count]
-                focusing_distance_mm = (current_diopter - START_DPT) * scan_ratio
-                log_entry["diopter"] = f"{current_diopter:.3f}"
-                log_entry["focusing_distance_mm"] = f"{focusing_distance_mm:.2f}"
-                
-                diopter_change = current_diopter - previous_diopter
-                is_large_jump = diopter_change < large_jump_threshold_dpt
+        if trigger_mode == TRIGGER_MODE_SOFTWARE_GRID:
+            log_data, frame_timing, recording, any_frames_skipped_in_well = _acquire_with_grid_trigger(
+                camera, lens, full_focus_pattern, frame_output, executor, config, START_DPT,
+                final_fps, actual_exposure_us, retrieve_timeout,
+                start_acquisition_time, start_acquisition_datetime, lens_temperature_reader)
+        else:
+            log_data, frame_timing, recording, any_frames_skipped_in_well = _acquire_with_free_run(
+                camera, lens, full_focus_pattern, frame_output, executor, config, START_DPT,
+                final_fps, retrieve_timeout, start_acquisition_time)
+    clock_samples_after = sample_camera_clock(camera, config['camera']['clock_sync_samples'])
+    lens_temp_end_c = read_lens_temperature(lens_temperature_reader)
 
-                lens_set_start_time = time.perf_counter()
-                try:
-                    lens.StaticInput.SetAsInput()
-                    lens.StaticInput.SetFocalPower(current_diopter)
-                except Exception as e:
-                    print(f"Frame {frame_count}: Error setting focal power to {current_diopter:.3f}: {e}")
-                lens_set_end_time = time.perf_counter()
-                log_entry["lens_set_time_ms"] = (lens_set_end_time - lens_set_start_time) * 1000
-
-                settle_time_this_frame = large_jump_settle_sec if is_large_jump else lens_settle_time_sec
-                time.sleep(settle_time_this_frame)
-                log_entry["lens_settle_wait_ms"] = (time.perf_counter() - lens_set_end_time) * 1000
-
-                if is_large_jump:
-                    try:
-                        sacrificial_grab = camera.RetrieveResult(retrieve_timeout, pylon.TimeoutHandling_ThrowException)
-                        sacrificial_grab.Release()
-                    except pylon.TimeoutException:
-                        print(f"  Warning: Timeout during sacrificial grab for frame {frame_count}.")
-                    except Exception as e_sac:
-                        print(f"  Warning: Error during sacrificial grab for frame {frame_count}: {e_sac}")
-                
-                grab_start_time = time.perf_counter()
-                grabResult = None
-                grab_success = False
-                try:
-                    grabResult = camera.RetrieveResult(retrieve_timeout, pylon.TimeoutHandling_ThrowException)
-                    grab_success = grabResult.GrabSucceeded()
-                    if not grab_success:
-                        print(f"Frame {frame_count}: Error grabbing: {grabResult.GetErrorCode()} - {grabResult.GetErrorDescription()}")
-                except pylon.TimeoutException:
-                     print(f"Frame {frame_count}: Timeout waiting for frame retrieval (>{retrieve_timeout}ms).")
-                     any_frames_skipped_in_well = True
-                except pylon.GenericException as e:
-                    print(f"Frame {frame_count}: Pylon exception during RetrieveResult: {e}")
-                grab_end_time = time.perf_counter()
-                log_entry["frame_grab_time_ms"] = (grab_end_time - grab_start_time) * 1000
-                
-                previous_diopter = current_diopter
-
-                if grab_success and grabResult:
-                    proc_start_time = time.perf_counter()
-                    current_pylon_frame_id = grabResult.GetBlockID() if hasattr(grabResult, "GetBlockID") else None
-                    log_entry["pylon_frame_id"] = current_pylon_frame_id if current_pylon_frame_id is not None else "N/A"
-                    skipped_warning = False
-                    if current_pylon_frame_id is not None and last_pylon_frame_id is not None:
-                        # --- MODIFIED SKIP LOGIC ---
-                        # Expect a jump of 2 after an intentional sacrificial grab, otherwise expect a jump of 1
-                        expected_increment = 2 if is_large_jump else 1
-                        expected_next_id = (last_pylon_frame_id + expected_increment)
-                        
-                        block_id_bits = 16 
-                        if hasattr(grabResult, 'GetBlockID') and grabResult.GetBlockID() is not None:
-                            try: block_id_bits = grabResult.PayloadType.GetValue()
-                            except: pass 
-                        max_block_id = (1 << block_id_bits) -1
-                        is_wrap_around = (current_pylon_frame_id == 0 and last_pylon_frame_id > (max_block_id - 1000) )
-                        
-                        if current_pylon_frame_id != expected_next_id and not is_wrap_around:
-                            print(f"Warning: Frame skip detected! Last PylonID: {last_pylon_frame_id}, Current: {current_pylon_frame_id}, Expected Increment: {expected_increment}")
-                            skipped_warning = True
-                            any_frames_skipped_in_well = True
-                    log_entry["skipped_frame_warning"] = skipped_warning
-                    last_pylon_frame_id = current_pylon_frame_id
-
-                    raw_frame = grabResult.Array
-                    
-                    if raw_frame.dtype != np.uint8:
-                        if raw_frame.dtype in [np.uint16, np.uint12, np.uint10]:
-                            shift = max(0, raw_frame.itemsize * 8 - 8)
-                            frame_8bit = (raw_frame >> shift).astype(np.uint8)
-                        else:
-                            print(f"Warning: Unsupported frame dtype {raw_frame.dtype}. Attempting direct cast to uint8.")
-                            try: frame_8bit = raw_frame.astype(np.uint8)
-                            except Exception as conv_e:
-                                print(f"Error converting frame dtype: {conv_e}. Skipping frame {frame_count}.")
-                                grabResult.Release()
-                                continue
-                    else:
-                        frame_8bit = raw_frame
-
-                    if process_as_color and debayer_code is not None:
-                        processed_frame = cv2.cvtColor(frame_8bit, debayer_code)
-                        watermark_color = watermark_color_bgr
-                    else:
-                        processed_frame = frame_8bit
-                        watermark_color = watermark_color_mono
-
-                    watermark_text = (f"Dpt: {current_diopter:.3f}, FD: {focusing_distance_mm:.2f} mm, "
-                                      f"Frame: {frame_count+1}/{total_frames_to_record}")
-                    if not processed_frame.flags.writeable: frame_display = processed_frame.copy()
-                    else: frame_display = processed_frame
-                    
-                    watermark_lines = []
-                    for part in watermark_text.split(','):
-                        watermark_lines.extend(part.strip().split('\n'))
-                    watermark_lines = [line.strip() for line in watermark_lines if line.strip()]
-
-                    line_height_approx = cv2.getTextSize("Test", watermark_font, watermark_font_scale, watermark_thickness)[0][1]
-                    line_spacing_factor = 1.5 
-                    line_height = int(line_height_approx * line_spacing_factor)
-
-                    for i, line in enumerate(watermark_lines):
-                        cv2.putText(frame_display, line,
-                                    (watermark_base_x, watermark_first_line_y + i * line_height),
-                                    watermark_font, watermark_font_scale,
-                                    watermark_color, watermark_thickness, cv2.LINE_AA)
-
-                    proc_end_time = time.perf_counter()
-                    log_entry["image_processing_time_ms"] = (proc_end_time - proc_start_time) * 1000
-
-                    img_filename = (f"{current_date_str}_plate{PLATE_ID}_well{WELL_ID}_"
-                                    f"f{frame_count:05d}_dpt{current_diopter:.3f}_fd{focusing_distance_mm:.2f}mm."
-                                    f"{output_image_format}")
-                    output_path = os.path.join(run_folder_path, img_filename)
-                    log_entry["output_filename"] = output_path
-
-                    save_submit_start_time = time.perf_counter()
-                    future = executor.submit(cv2.imwrite, output_path, frame_display)
-                    futures[future] = output_path
-                    save_submit_end_time = time.perf_counter()
-                    log_entry["image_save_submit_time_ms"] = (save_submit_end_time - save_submit_start_time) * 1000
-                    frames_processed_count += 1
-
-                    if (frame_count + 1) % int(max(1, final_fps * 2)) == 0:
-                        elapsed_total = time.perf_counter() - start_acquisition_time
-                        current_avg_fps = frames_processed_count / elapsed_total if elapsed_total > 0 else 0
-                        print(f"  Processed frame {frames_processed_count}/{total_frames_to_record}. Current Avg FPS: {current_avg_fps:.2f}")
-
-                elif not grab_success and grabResult is None:
-                    any_frames_skipped_in_well = True
-
-                if grabResult:
-                    grabResult.Release()
-            except Exception as loop_e:
-                print(f"ERROR in main loop for frame {frame_count}: {type(loop_e).__name__} - {loop_e}")
-                traceback.print_exc(file=sys.stdout)
-                log_entry["output_filename"] = f"ERROR_IN_LOOP: {loop_e}"
-                any_frames_skipped_in_well = True
-                if grabResult and grabResult.IsReadable():
-                    try: grabResult.Release()
-                    except Exception as release_err: print(f"Error releasing grabResult after loop error: {release_err}")
-
-            loop_iter_end_time = time.perf_counter()
-            log_entry["timestamp"] = datetime.now().isoformat()
-            log_entry["frame_count"] = frame_count
-            log_entry["total_loop_iteration_time_ms"] = (loop_iter_end_time - loop_iter_start_time) * 1000
-            for field in log_fieldnames:
-                if field not in log_entry: log_entry[field] = "Error/NA"
-            log_data.append(log_entry)
-
-            iter_duration = loop_iter_end_time - loop_iter_start_time
-            frame_interval = 1.0 / final_fps if final_fps > 0 else float('inf')
-            if iter_duration > frame_interval:
-                print(f"Warning: Loop {frame_count} took {iter_duration*1000:.2f} ms > frame interval ({frame_interval*1000:.2f} ms).")
-
-        print("\nFinished acquisition loop.")
-        print(f"Total frames processed in loop: {frames_processed_count}")
-        print("Waiting for all frame saving tasks to complete...")
-        saved_count = 0
-        error_count = 0
-        for future in as_completed(futures):
-            output_path = futures[future]
-            try:
-                future.result()
-                saved_count += 1
-            except Exception as e:
-                print(f"ERROR saving frame {output_path}: {e}")
-                error_count += 1
-        print(f"Successfully saved {saved_count} frames.")
-        if error_count > 0: print(f"Encountered {error_count} errors during saving.")
+    tick_hz = camera_tick_frequency_hz(camera)
+    clock_map = build_camera_clock_map(clock_samples_before, clock_samples_after, tick_hz)
+    _add_timing_columns(log_data, frame_timing, start_acquisition_time, clock_map, tick_hz)
+    if recording is not None:
+        summary = summarize_grid_recording(recording, clock_map, tick_hz, config['camera']['trigger_late_report_ms'],
+                                           config['camera']['timestamp_mismatch_ms'])
+    else:
+        summary = _summarize_free_run(frame_timing, tick_hz)
+    print(f"Recording check: {summary.format(config['camera']['trigger_late_report_ms'])}")
+    if clock_map is None:
+        print("  Note: the camera clock could not be latched; exposure-time columns are empty.")
+    if summary.timestamp_mismatches:
+        any_frames_skipped_in_well = True
+    for log_entry in log_data:
+        for field in log_fieldnames:
+            if field not in log_entry: log_entry[field] = "Error/NA"
 
     print(f"Writing {len(log_data)} log entries to {log_file_path}...")
     try:
@@ -366,9 +625,16 @@ def acquire_and_save_frames(camera, lens, full_focus_pattern,
             csvfile.write(f"# Lens Controller Port: {config['focusing']['lens_controller_port']}\n")
             csvfile.write(f"# Focusing Pattern: {config['focusing'].get('pattern', 'zigzag')}\n")
             csvfile.write(f"# Lens Settle Time (s): {lens_settle_time_sec}\n")
+            csvfile.write(f"# Trigger Mode: {trigger_mode}\n")
+            if trigger_mode == TRIGGER_MODE_SOFTWARE_GRID:
+                csvfile.write(f"# Min Settle (ms): {config['focusing']['min_settle_ms']}\n")
             csvfile.write(f"# Scan Height (mm): {config['focusing']['scan_height_mm']}\n")
             csvfile.write(f"# Scan Step (um): {config['focusing']['scan_step_um']}\n")
             csvfile.write(f"# Scan Ratio (mm/dpt): {scan_ratio}\n")
+            if lens_temp_start_c is not None:
+                csvfile.write(f"# Lens Temperature Start (C): {lens_temp_start_c:.2f}\n")
+            if lens_temp_end_c is not None:
+                csvfile.write(f"# Lens Temperature End (C): {lens_temp_end_c:.2f}\n")
             csvfile.write("# === Frame Data ===\n")
             writer = csv.DictWriter(csvfile, fieldnames=log_fieldnames)
             writer.writeheader()
@@ -379,11 +645,8 @@ def acquire_and_save_frames(camera, lens, full_focus_pattern,
     except Exception as e:
         print(f"An unexpected error occurred during log writing: {e}")
 
-    if camera and camera.IsGrabbing():
-        print("Stopping camera grabbing (end of acquire_and_save_frames).")
-        try: camera.StopGrabbing()
-        except Exception as e: print(f"Error stopping camera grabbing: {e}")
     return any_frames_skipped_in_well
+
 
 # --- Main Acquisition Entry Point ---
 def run_acquisition(PLATE_ID, WELL_ID, START_DPT, config, process_as_color=False):
@@ -416,6 +679,9 @@ def run_acquisition(PLATE_ID, WELL_ID, START_DPT, config, process_as_color=False
             lens = ecc1c.Lens
             if lens is None: raise ConnectionError("Failed to get valid Lens object from ECC-1C.")
             print(f"Connected to ECC-1C on {config['focusing']['lens_controller_port']}.")
+            lens_temperature_reader, lens_temperature_call = find_lens_temperature_reader(ecc1c, lens)
+            if lens_temperature_reader is not None:
+                print(f"Lens temperature is read via {lens_temperature_call}.")
         except optoICC.NoEccError as e:
             print(f"ERROR OptoICC: {e}. Check lens controller connection and port '{config['focusing']['lens_controller_port']}'.")
             raise
@@ -633,7 +899,8 @@ def run_acquisition(PLATE_ID, WELL_ID, START_DPT, config, process_as_color=False
             run_folder_path, log_file_path, current_date_str,
             PLATE_ID, WELL_ID, START_DPT, config,
             final_fps=final_fps, actual_exposure_us=actual_exposure_us,
-            process_as_color=process_as_color, debayer_code=debayer_code
+            process_as_color=process_as_color, debayer_code=debayer_code,
+            lens_temperature_reader=lens_temperature_reader,
         )
         acquisition_results.update({'final_fps': final_fps, 'actual_exposure_us': actual_exposure_us,
                                     'any_frames_skipped': any_skipped, 'status': 'success'})

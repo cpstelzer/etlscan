@@ -63,6 +63,31 @@ def test_incompatible_runs_name_the_differing_field(tmp_path, write_metadata_log
         validate_background_compatibility(fg_log, bg_log)
 
 
+@pytest.mark.parametrize(
+    "fg_trigger_mode, bg_trigger_mode, compatible",
+    [
+        (None, None, True),                       # two runs recorded before the grid loop
+        ("free_run", None, True),                 # a missing field counts as free_run
+        ("software_grid", "software_grid", True),
+        ("software_grid", None, False),           # grid FG against an older (free-run) BG
+        ("software_grid", "free_run", False),
+    ],
+)
+def test_trigger_mode_must_match_and_defaults_to_free_run(tmp_path, write_metadata_log,
+                                                           fg_trigger_mode, bg_trigger_mode, compatible):
+    def _log(directory, trigger_mode):
+        return write_metadata_log(directory, config_overrides={} if trigger_mode is None
+                                  else {"Trigger Mode": trigger_mode})
+
+    fg_log, bg_log = _log(tmp_path / "fg", fg_trigger_mode), _log(tmp_path / "bg", bg_trigger_mode)
+    if compatible:
+        validate_background_compatibility(fg_log, bg_log)
+        validate_background_compatibility(bg_log, fg_log)
+    else:
+        with pytest.raises(DataValidationError, match=r"'Trigger Mode' FG='software_grid' BG='free_run'"):
+            validate_background_compatibility(fg_log, bg_log)
+
+
 # --- experiment design ----------------------------------------------------------
 
 def _write_design(tmp_path, rows):

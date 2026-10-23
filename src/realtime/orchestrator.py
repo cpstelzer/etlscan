@@ -56,6 +56,9 @@ def _start_acquisition_thread(
         large_jump_threshold_dpt=config.large_jump_threshold_dpt,
         large_jump_settle_sec=config.large_jump_settle_sec,
         lens_controller_port=config.lens_controller_port,
+        acquisition_config=config.acquisition_config,
+        queue_size=config.queue_size,
+        drop_frame_if_backlogged=config.drop_frame_if_backlogged,
         acquisition_control=acquisition_control,
     )
 
@@ -430,6 +433,8 @@ def run_realtime_session(config: RealtimeConfig, plate: int, well: int) -> str:
     finally:
         if config.adaptive_enabled:
             _finalize_adaptive_round_if_possible(adaptive_round_id)
+        # the camera source ends its loop (fixed grid: restores free-run) instead of running on
+        acquisition_control.request_stop()
         acq_thread.join(timeout=2.0)
         monitor.maybe_log(force=True)
 
