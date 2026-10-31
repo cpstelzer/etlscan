@@ -14,6 +14,7 @@ from src.utils import (
 # --- MODIFIED: Import visualization tools ---
 from src.utils.config_loader import get_unified_segmentation_params
 from src.visualization.feature_visualization import visualize_ml_features
+from src.visualization.figure_style import figure_style
 from src.utils.common_exceptions import ProcessingError
 from src.core.image_io_operations import load_image
 from src.core.segmentation import segment_main_body_from_image_float
@@ -185,13 +186,14 @@ def run_stage_04_biological_analysis(
         try:
             vis_filename = f"{os.path.splitext(crop_filename)[0]}_s4_analysis_vis.png"
             vis_output_path = os.path.join(output_visualizations_dir, vis_filename)
-            visualize_ml_features(
-                image_path_or_array=crop_path,
-                main_props=main_props_for_vis,
-                egg_area_props=best_egg_for_vis,
-                output_visualization_path=vis_output_path,
-                ml_feature_params=vis_params
-            )
+            with figure_style(config):
+                visualize_ml_features(
+                    image_path_or_array=crop_path,
+                    main_props=main_props_for_vis,
+                    egg_area_props=best_egg_for_vis,
+                    output_visualization_path=vis_output_path,
+                    ml_feature_params=vis_params
+                )
         except Exception as e:
             logger.error(f"Failed to generate Stage 4 visualization for {crop_filename}: {e}")
 

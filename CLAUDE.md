@@ -95,7 +95,8 @@ well_plate_analyzer/
 │   │   ├── path_helpers.py
 │   │   └── data_io.py
 │   └── visualization/
-│       └── feature_visualization.py
+│       ├── feature_visualization.py  # Stage-4 body/egg overlay
+│       └── figure_style.py           # Shared plot style from config['figure_style']
 └── tests/                      # pytest suite (mirror of src/ layout)
 ```
 
@@ -162,6 +163,7 @@ which applies these transforms at load time:
 | `acquisition.experiment_sweep` | Scan-step × pattern grid for both sweep scripts, plus `variable_recording_duration` / `plane_revisit_times` (run length = max(`camera.video_duration_sec`, time for every plane to get k visits)). |
 | `acquisition.camera.trigger_mode` | How exposures are timed against the ETL commands (`acquire_and_save_frames`, every `run_acquire*.py`). `software_grid` (default): one software trigger per focus-pattern entry, trigger i due at t0 + i / `fps` on a fixed grid; frame i is exposed only after its own lens command + `focusing.min_settle_ms`, the lens moves only `exposure + post_exposure_margin_ms` after a trigger, `WaitForFrameTriggerReady` runs `trigger_ready_lead_ms` before the due time; a large jump (`large_jump_threshold_dpt`) delays only its own trigger to command end + `large_jump_settle_sec`. The realtime camera source (`src/realtime/acquisition.py`) follows the same setting and runs the same loop on a background thread at `realtime_mode.runtime.target_fps` (adaptive/repeat requests apply from the next lens command; `drop_frame_if_backlogged: false` pauses the loop and restarts the grid instead of dropping). `free_run`: legacy loop (sleep `focusing.lens_settle_time_sec`, take the next free-run frame), kept for comparison — at 25 fps it labels each frame with the previous frame's plane (one-frame lag). `metadata_log.csv` gets `# Trigger Mode` (image-defining: an external-BG run must use the same loop as its FG run; a missing field means `free_run`, i.e. all older data), `# Min Settle (ms)` (grid), `# Lens Temperature Start/End (C)` (if the controller reports it) and, after the legacy columns, `grid_time_s`, `lens_cmd_start_s`, `lens_cmd_end_s`, `trigger_time_s`, `trigger_late_ms`, `block_id`, `camera_timestamp_ns`, `exposure_minus_trigger_ms`, `exposure_minus_lens_cmd_ms`, `lens_temp_c` (times relative to the acquisition start; exposure times from camera timestamps via clock latches). One recording check per run (`camera.clock_sync_samples`, `trigger_late_report_ms`, `timestamp_mismatch_ms`). |
 | Egg detection | `stage_04_biological_analysis.egg_detection` is only consumed by stage 4; it is **not** merged into `get_unified_segmentation_params`. |
+| `figure_style` | Publication style of **every** figure the pipeline writes (Stage-1/2 track maps, Stage-2 focus diagnostics, Stage-4 overlays, `train_model.py` feature-importance chart): dpi, font family, font/tick/title sizes, line width, marker size, axes line width. Applied as matplotlib rcParams by the `figure_style(config)` context manager; plot code sets no font sizes, line widths, marker sizes or dpi itself — new plots must be created *and saved* inside that block. Figures are ~7–8 in wide so the pt sizes print legibly at single-column width. |
 | `stage_01_initial_detection.external_background` | Read only with `run_pipeline --background_source external`: `fg/`/`bg/` subfolder names, low-frequency illumination match (downsample, median kernel), `rim_exclusion_px`, `max_failed_frame_fraction`, per-detection lint filter `lint_max_solidity`. Tracking in this mode uses a one-sweep-period memory (derived, not configured) and the static-object linking radius `static_search_range_mm`; the subtracted-foreground gate and all other detection/tracking params are shared with time-shift mode. |
 
 ---
@@ -242,6 +244,7 @@ both image and ML errors).
 | `get_scan_extent_mm` | `src/utils/config_loader.py` | Full (x, y, z) mm extent of the imaged volume — the fixed axis range for the Stage-1/Stage-2 tracking plots |
 | `create_well_mask_with_fallback` | `src/core/well_analysis.py` | Well mask with the full-frame bright-mask fallback (brightness matching + external-BG rim exclusion) |
 | `read_acquisition_metadata_header` | `src/utils/acquisition_metadata.py` | Parse the `# Key: value` header of a run's `metadata_log.csv` |
+| `figure_style` | `src/visualization/figure_style.py` | Context manager applying `config['figure_style']` to all figures created and saved inside it |
 
 ---
 
