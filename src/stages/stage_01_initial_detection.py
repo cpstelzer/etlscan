@@ -28,6 +28,7 @@ from src.core.image_enhancement import subtract_images, apply_blur
 from src.core.masking_operations import mask_well_area, apply_mask
 from src.core.region_props_calculator import find_contours, calculate_contour_measurements, filter_contours_by_area
 from src.core.segmentation import generate_binary_mask_from_float_image, assess_subtracted_foreground
+from src.visualization.figure_style import figure_style
 from src.core.well_analysis import (
     create_well_mask_black_plate,
     create_well_mask_with_fallback,
@@ -904,14 +905,14 @@ def _build_tracking_figure(
     if tracked_df.empty:
         return None
     x_max_mm, y_max_mm, z_max_mm = extent_mm
-    fig = plt.figure(figsize=(10, 8))
+    fig = plt.figure(figsize=(7.5, 7))
     ax = fig.add_subplot(111, projection='3d')
-    ax.set_title("3D Particle Tracks")
-    ax.set_xlabel("X (mm)")
-    ax.set_ylabel("Y (mm)")
-    ax.set_zlabel("Z (mm)")
+    ax.set_title("3D particle tracks")
+    ax.set_xlabel("x (mm)", labelpad=14)
+    ax.set_ylabel("y (mm)", labelpad=14)
+    ax.set_zlabel("z (mm)", labelpad=14)
     for _, track in tracked_df.groupby('track_id'):
-        ax.plot(track['x_mm'], track['y_mm'], track['z_mm'], linewidth=1)
+        ax.plot(track['x_mm'], track['y_mm'], track['z_mm'])
     ax.set_xlim(0, x_max_mm)
     ax.set_ylim(0, y_max_mm)
     ax.set_zlim(0, z_max_mm)
@@ -938,13 +939,13 @@ def _build_tracking_xy_figure(
     if tracked_df.empty:
         return None
     x_max_mm, y_max_mm, _ = extent_mm
-    fig = plt.figure(figsize=(8, 8))
+    fig = plt.figure(figsize=(7, 7))
     ax = fig.add_subplot(111)
-    ax.set_title("2D XY Projection of Particle Tracks")
-    ax.set_xlabel("X (mm)")
-    ax.set_ylabel("Y (mm)")
+    ax.set_title("XY projection of particle tracks")
+    ax.set_xlabel("x (mm)")
+    ax.set_ylabel("y (mm)")
     for _, track in tracked_df.groupby('track_id'):
-        ax.plot(track['x_mm'], track['y_mm'], linewidth=1)
+        ax.plot(track['x_mm'], track['y_mm'])
     ax.set_xlim(0, x_max_mm)
     ax.set_ylim(0, y_max_mm)
     ax.set_aspect('equal', adjustable='box')
@@ -1224,18 +1225,20 @@ def run_stage_01_initial_detection(
         tracks_for_figures_df = (
             tracked_df.dropna(subset=['track_id']) if 'track_id' in tracked_df.columns else pd.DataFrame()
         )
-        tracking_fig = _build_tracking_figure(tracks_for_figures_df, extent_mm) if not tracks_for_figures_df.empty else None
-        tracking_xy_fig = _build_tracking_xy_figure(tracks_for_figures_df, extent_mm) if not tracks_for_figures_df.empty else None
-        if tracking_fig is not None:
-            figure_3d_path = os.path.join(output_dir_stage1, f"{sample_id}_stage1_tracks_3d.png")
-            tracking_fig.savefig(figure_3d_path, dpi=150)
-            plt.close(tracking_fig)
-            # Tracking figure documents the trajectories visually.
-        if tracking_xy_fig is not None:
-            figure_xy_path = os.path.join(output_dir_stage1, f"{sample_id}_stage1_tracks_xy.png")
-            tracking_xy_fig.savefig(figure_xy_path, dpi=150)
-            plt.close(tracking_xy_fig)
-            # Flat XY projection makes the spatial layout directly comparable to Stage 2.
+        with figure_style(config):
+            tracking_fig = _build_tracking_figure(tracks_for_figures_df, extent_mm) if not tracks_for_figures_df.empty else None
+            tracking_xy_fig = _build_tracking_xy_figure(tracks_for_figures_df, extent_mm) if not tracks_for_figures_df.empty else None
+            if tracking_fig is not None:
+                figure_3d_path = os.path.join(output_dir_stage1, f"{sample_id}_stage1_tracks_3d.png")
+                # The tight bbox of a 3D axes omits its z label; include it explicitly.
+                tracking_fig.savefig(figure_3d_path, bbox_extra_artists=[tracking_fig.axes[0].zaxis.label])
+                plt.close(tracking_fig)
+                # Tracking figure documents the trajectories visually.
+            if tracking_xy_fig is not None:
+                figure_xy_path = os.path.join(output_dir_stage1, f"{sample_id}_stage1_tracks_xy.png")
+                tracking_xy_fig.savefig(figure_xy_path)
+                plt.close(tracking_xy_fig)
+                # Flat XY projection makes the spatial layout directly comparable to Stage 2.
     else:
         logger.info("Particle tracking is disabled. Saving fused data as final output.")
         final_sample_df['track_id'] = np.nan

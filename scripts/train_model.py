@@ -56,6 +56,7 @@ from src.core.feature_calculators.quality_calculator import calculate_quality_fe
 from src.core.feature_calculators.morphology_calculator import calculate_detailed_body_morphology
 from src.core.feature_calculators.shape_descriptors import calculate_shape_descriptors
 from src.stages.stage_03_filtering_and_classification import apply_size_invariant_feature_strategy
+from src.visualization.figure_style import figure_style
 
 
 logger = logging.getLogger(__name__)
@@ -327,6 +328,21 @@ def _normalize_feature_table(df: pd.DataFrame, label_column: str = 'label') -> T
     return numeric_X, y
 
 
+def plot_feature_importances(importance_df: pd.DataFrame, chart_path: str, top_n: int) -> None:
+    """Save a horizontal bar chart of the ``top_n`` most important features."""
+    fig, ax = plt.subplots(figsize=(8, 7))
+    top_features = importance_df.head(top_n)
+    ax.barh(top_features['feature'], top_features['importance'], color='steelblue')
+    ax.invert_yaxis()
+    ax.set_xlabel('Importance (mean decrease in Gini impurity)')
+    ax.set_title(f'Top {top_n} features for particle classification')
+    plt.tight_layout()
+    try:
+        plt.savefig(chart_path)
+    finally:
+        plt.close(fig)
+
+
 def main():
     """Entry point for training the RandomForest model or image-based feature extraction."""
     parser = argparse.ArgumentParser(description="Train a new ML model on the rich feature set.")
@@ -547,18 +563,9 @@ def main():
     importance_df.to_csv(importance_csv_path, index=False)
     logger.info(f"Full feature importance list saved to: {importance_csv_path}")
 
-    plt.style.use('seaborn-v0_8-whitegrid')
-    fig, ax = plt.subplots(figsize=(10, 8))
-    top_n = 20
-    top_features = importance_df.head(top_n)
-    ax.barh(top_features['feature'], top_features['importance'], color='steelblue')
-    ax.invert_yaxis() 
-    ax.set_xlabel('Importance (Mean Decrease in Gini Impurity)')
-    ax.set_title(f'Top {top_n} Feature Importances for Particle Classification')
-    plt.tight_layout()
-    
     chart_path = os.path.join(models_dir, "feature_importance_chart.png")
-    plt.savefig(chart_path)
+    with figure_style(config):
+        plot_feature_importances(importance_df, chart_path, top_n=20)
     logger.info(f"Feature importance chart saved to: {chart_path}")
 
     model_filename = s3_config.get('model_filename', 'rf_fem_classifier.joblib')

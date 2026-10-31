@@ -15,6 +15,7 @@ matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 import matplotlib.image as mpimg
 from matplotlib.gridspec import GridSpecFromSubplotSpec
+from matplotlib.ticker import MaxNLocator
 from scipy.signal import find_peaks
 from scipy.interpolate import UnivariateSpline
 
@@ -31,6 +32,7 @@ from src.core.particle_operations import (
     normalized_crop_config,
 )
 from src.core.segmentation import segment_main_body_from_image_float
+from src.visualization.figure_style import figure_style
 from src.core.feature_calculators.quality_calculator import calculate_quality_features
 from src.core.feature_calculators.morphology_calculator import calculate_detailed_body_morphology
 from src.core.feature_calculators.shape_descriptors import calculate_shape_descriptors
@@ -159,21 +161,22 @@ def run_stage_02_characterization(
             area_col='main_area_filled'
         )
 
-    # save
-    saved_csv_path = emit_stage2_artifacts(
-        comprehensive_df,
-        crops_df,
-        filtered_df,
-        diagnostics_df,
-        final_particles_df,
-        output_dir_stage2,
-        sample_id,
-        normalized_cropping,
-        image_dir_path,
-        focus_cfg,
-        get_scan_extent_mm(config),
-        bool(cropping_config['save_all_particle_crops']),
-    )
+    # save (figure_style governs the focus-diagnostic plots written here)
+    with figure_style(config):
+        saved_csv_path = emit_stage2_artifacts(
+            comprehensive_df,
+            crops_df,
+            filtered_df,
+            diagnostics_df,
+            final_particles_df,
+            output_dir_stage2,
+            sample_id,
+            normalized_cropping,
+            image_dir_path,
+            focus_cfg,
+            get_scan_extent_mm(config),
+            bool(cropping_config['save_all_particle_crops']),
+        )
 
     logger.info(f"--- Stage 2: Characterization for {sample_id} COMPLETED ---")
     return saved_csv_path
@@ -613,11 +616,11 @@ def plot_track_with_collage(
 
     peak_idx = detect_peaks_in_track(track_df, sharp_col, focus_cfg)
 
-    fig = plt.figure(figsize=(16, 14))
+    fig = plt.figure(figsize=(8, 8))
     grid_spec = fig.add_gridspec(2, 1, height_ratios=[2, 1])
     ax_sharpness = fig.add_subplot(grid_spec[0])
 
-    ax_sharpness.plot(track_df[frame_col], track_df[sharp_col], color='tab:blue', linewidth=3.0)
+    ax_sharpness.plot(track_df[frame_col], track_df[sharp_col], color='tab:blue')
     detection_smooth_window = max(1, int(focus_cfg.get('smooth_window', 1)))
     if detection_smooth_window > 1:
         smoothed_for_plot = smooth_series(
@@ -626,17 +629,16 @@ def plot_track_with_collage(
         )
         ax_sharpness.plot(
             track_df[frame_col], smoothed_for_plot,
-            color='tab:blue', linewidth=1.5, linestyle='--', alpha=0.7
+            color='tab:blue', linestyle='--', alpha=0.7
         )
-    ax_sharpness.set_xlabel('Frame', fontsize=20, fontweight='bold')
-    ax_sharpness.set_ylabel('Sharpness', color='tab:blue', fontsize=20, fontweight='bold')
-    ax_sharpness.tick_params(axis='both', labelsize=16, width=1.5, length=6)
+    ax_sharpness.set_xlabel('Frame')
+    ax_sharpness.set_ylabel('Sharpness', color='tab:blue')
     ax_sharpness.tick_params(axis='y', labelcolor='tab:blue')
 
     ax_z = ax_sharpness.twinx()
-    ax_z.plot(track_df[frame_col], track_df[z_col], color='tab:orange', linewidth=3.0)
-    ax_z.set_ylabel('z_mm', color='tab:orange', fontsize=20, fontweight='bold')
-    ax_z.tick_params(axis='y', labelsize=16, labelcolor='tab:orange', width=1.5, length=6)
+    ax_z.plot(track_df[frame_col], track_df[z_col], color='tab:orange')
+    ax_z.set_ylabel('z (mm)', color='tab:orange')
+    ax_z.tick_params(axis='y', labelcolor='tab:orange')
 
     maxima_frames: List[Tuple[int, int, Optional[int], Optional[int]]] = []
     x_pix_col = FOCUS_X_PIXEL_COLUMN
@@ -644,10 +646,9 @@ def plot_track_with_collage(
 
     for idx, peak_position in enumerate(peak_idx):
         peak_row = track_df.iloc[peak_position]
-        ax_z.scatter(
+        ax_z.plot(
             peak_row[frame_col], peak_row[z_col],
-            color='red', marker='o', s=140, zorder=5,
-            edgecolors='black', linewidths=1.5
+            color='red', marker='o', linestyle='none', zorder=5, markeredgecolor='black'
         )
         offset_x = 2
         offset_y = 0.02 * (track_df[z_col].max() - track_df[z_col].min() + 1e-9)
@@ -656,7 +657,6 @@ def plot_track_with_collage(
             peak_row[z_col] + offset_y,
             str(idx + 1),
             color='black',
-            fontsize=16,
             fontweight='bold'
         )
 
@@ -664,11 +664,7 @@ def plot_track_with_collage(
         y_pix_val = peak_row.get(y_pix_col, np.nan)
         maxima_frames.append((idx + 1, int(peak_row[frame_col]), x_pix_val, y_pix_val))
 
-    ax_sharpness.set_title(
-        f'Track {track_id} (length={len(track_df)})',
-        fontsize=24,
-        fontweight='bold'
-    )
+    ax_sharpness.set_title(f'Track {track_id} ({len(track_df)} frames)')
 
     ax_collage = fig.add_subplot(grid_spec[1])
     ax_collage.axis('off')
@@ -703,25 +699,22 @@ def plot_track_with_collage(
                 ax_img.imshow(img, aspect='equal')
             ax_img.axis('off')
             ax_img.text(
-                2,
-                10,
+                0.04,
+                0.96,
                 str(label),
+                transform=ax_img.transAxes,
                 color='yellow',
-                fontsize=18,
                 fontweight='bold',
                 ha='left',
                 va='top',
                 bbox=dict(facecolor='black', alpha=0.6, boxstyle='round')
             )
     else:
-        ax_collage.text(
-            0.5, 0.5, 'No crop images available',
-            ha='center', va='center', fontsize=20, fontweight='bold'
-        )
+        ax_collage.text(0.5, 0.5, 'No crop images available', ha='center', va='center')
 
     plt.tight_layout()
     try:
-        plt.savefig(outpath, dpi=200, bbox_inches='tight')
+        plt.savefig(outpath)
         if FOCUS_SHOW_PLOTS:
             plt.show()
     finally:
@@ -929,7 +922,7 @@ def plot_3d_reconstructed(
         return None
 
     from mpl_toolkits.mplot3d import Axes3D  # noqa: F401
-    fig = plt.figure(figsize=(12, 10))
+    fig = plt.figure(figsize=(7.5, 7))
     ax = fig.add_subplot(111, projection='3d')
 
     cmap = plt.get_cmap('tab20')
@@ -962,16 +955,15 @@ def plot_3d_reconstructed(
             )
 
         color = cmap(idx % ncol)
-        ax.plot(x_vals, y_vals, z_line, linewidth=2.0, alpha=0.8, color=color)
-        ax.scatter(
+        ax.plot(x_vals, y_vals, z_line, alpha=0.8, color=color)
+        ax.plot(
             selected_df[x_mm_col].values,
             selected_df[y_mm_col].values,
             selected_df[z_col].values,
             marker='o',
-            s=45,
+            linestyle='none',
             color=color,
-            edgecolor='k',
-            linewidth=0.6
+            markeredgecolor='k'
         )
         plotted += 1
 
@@ -983,14 +975,14 @@ def plot_3d_reconstructed(
     ax.set_xlim(0, x_max_mm)
     ax.set_ylim(0, y_max_mm)
     ax.set_zlim(0, z_max_mm)
-    ax.set_xlabel('x [mm]', fontsize=20, labelpad=18)
-    ax.set_ylabel('y [mm]', fontsize=20, labelpad=18)
-    ax.set_zlabel('z [mm]', fontsize=20, labelpad=18)
-    ax.tick_params(axis='both', which='major', labelsize=14)
-    ax.set_title(f'Reconstructed trajectories of {plotted} tracks', fontsize=22)
+    ax.set_xlabel('x (mm)', labelpad=14)
+    ax.set_ylabel('y (mm)', labelpad=14)
+    ax.set_zlabel('z (mm)', labelpad=14)
+    ax.set_title(f'Reconstructed trajectories of {plotted} tracks')
     plt.tight_layout()
     try:
-        plt.savefig(outpath, dpi=200)
+        # The tight bbox of a 3D axes omits its z label; include it explicitly.
+        plt.savefig(outpath, bbox_extra_artists=[ax.zaxis.label])
     finally:
         plt.close(fig)
 
@@ -1031,7 +1023,7 @@ def plot_xy_reconstructed(
     if track_lengths.empty:
         return None
 
-    fig = plt.figure(figsize=(10, 10))
+    fig = plt.figure(figsize=(7, 7))
     ax = fig.add_subplot(111)
 
     cmap = plt.get_cmap('tab20')
@@ -1048,18 +1040,16 @@ def plot_xy_reconstructed(
         ax.plot(
             track_df[x_mm_col].values,
             track_df[y_mm_col].values,
-            linewidth=2.0,
             alpha=0.8,
             color=color
         )
-        ax.scatter(
+        ax.plot(
             selected_df[x_mm_col].values,
             selected_df[y_mm_col].values,
             marker='o',
-            s=45,
+            linestyle='none',
             color=color,
-            edgecolor='k',
-            linewidth=0.6
+            markeredgecolor='k'
         )
         plotted += 1
 
@@ -1070,14 +1060,13 @@ def plot_xy_reconstructed(
     x_max_mm, y_max_mm, _ = extent_mm
     ax.set_xlim(0, x_max_mm)
     ax.set_ylim(0, y_max_mm)
-    ax.set_xlabel('x [mm]', fontsize=20, labelpad=10)
-    ax.set_ylabel('y [mm]', fontsize=20, labelpad=10)
-    ax.tick_params(axis='both', which='major', labelsize=14)
+    ax.set_xlabel('x (mm)')
+    ax.set_ylabel('y (mm)')
     ax.set_aspect('equal', adjustable='box')
-    ax.set_title(f'Reconstructed XY trajectories of {plotted} tracks', fontsize=22)
+    ax.set_title(f'Reconstructed XY trajectories of {plotted} tracks')
     plt.tight_layout()
     try:
-        plt.savefig(outpath, dpi=200)
+        plt.savefig(outpath)
     finally:
         plt.close(fig)
 
@@ -1090,14 +1079,14 @@ def plot_diagnostics_summary(diagnostics_df: pd.DataFrame, outpath: str) -> Opti
         return None
 
     df_sorted = diagnostics_df.sort_values('n_frames', ascending=False).reset_index(drop=True)
-    fig, ax_frames = plt.subplots(figsize=(12, 6))
+    fig, ax_frames = plt.subplots(figsize=(8, 4.5))
 
     ax_frames.plot(
         df_sorted.index,
         df_sorted['n_frames'],
         color='tab:blue',
         marker='o',
-        label='Track length (n_frames)'
+        label='Track length'
     )
     ax_frames.set_xlabel('Track (sorted by length)')
     ax_frames.set_ylabel('Track length (frames)', color='tab:blue')
@@ -1109,17 +1098,23 @@ def plot_diagnostics_summary(diagnostics_df: pd.DataFrame, outpath: str) -> Opti
         df_sorted['n_selected'],
         alpha=0.4,
         color='tab:orange',
-        label='Sharpness maxima (n_selected)'
+        label='Sharpness maxima'
     )
-    ax_peaks.set_ylabel('Sharpness maxima count', color='tab:orange')
+    ax_peaks.set_ylabel('Sharpness maxima', color='tab:orange')
     ax_peaks.tick_params(axis='y', labelcolor='tab:orange')
+    ax_peaks.yaxis.set_major_locator(MaxNLocator(integer=True))
+    # Draw the track-length line above the bars of the twin axis.
+    ax_frames.set_zorder(ax_peaks.get_zorder() + 1)
+    ax_frames.patch.set_visible(False)
 
-    ax_frames.legend(loc='upper left')
-    ax_peaks.legend(loc='upper right')
-    plt.title('Track lengths and sharpness maxima across all tracks')
+    # One legend for both axes, so the two cannot overlap each other.
+    frame_handles, frame_labels = ax_frames.get_legend_handles_labels()
+    peak_handles, peak_labels = ax_peaks.get_legend_handles_labels()
+    ax_frames.legend(frame_handles + peak_handles, frame_labels + peak_labels, loc='upper right', frameon=False)
+    ax_frames.set_title('Track lengths and sharpness maxima')
     plt.tight_layout()
     try:
-        plt.savefig(outpath, dpi=150)
+        plt.savefig(outpath)
     finally:
         plt.close(fig)
     return outpath
