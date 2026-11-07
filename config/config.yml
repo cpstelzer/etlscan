@@ -138,15 +138,10 @@ acquisition:
     # run_acquire_single_sweep.py (single well): every combination of step size
     # and pattern is recorded once per well, in shuffled order. Each combination
     # overrides focusing.scan_step_um / focusing.pattern for its run only.
-    scan_steps_um_options: [150, 250, 350, 450, 550]
-    focusing_pattern_options: ["zigzag"] # zigzag and/or sawtooth
-    # false: every run records camera.video_duration_sec.
-    # true: every run records max(camera.video_duration_sec, time needed until
-    #   every focal plane -- including the two end planes -- was visited at
-    #   least plane_revisit_times times at camera.fps). Frames needed for N
-    #   planes and k visits: sawtooth k*N, zigzag (2k-1)*(N-1)+1.
+    scan_steps_um_options: [200, 400, 600, 800, 1000, 1200]
+    focusing_pattern_options: ["zigzag", "sawtooth"]
     variable_recording_duration: true
-    plane_revisit_times: 5
+    plane_revisit_times: 6
   camera:
     fps: 25.0
     video_duration_sec: 15
@@ -207,7 +202,7 @@ acquisition:
 hardware_profiles:
   TS1_0638_70_EL:
     focusing:
-      scan_height_mm: 14  # Default: 11.2 mm
+      scan_height_mm: 14.6  # Default: 11.2 mm
       scan_ratio: 3.36 # Optical leverage (mm/dpt) Dry:3.52 mm/dpt; Wet: 3.36 mm/dpt
       lens_controller_port: "COM11"
     camera:
