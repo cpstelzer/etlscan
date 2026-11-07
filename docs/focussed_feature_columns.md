@@ -49,6 +49,10 @@ that automated preprocessing can ignore them safely.
 
 ## Stage 2 quality metrics
 - `variance_laplacian`
+- `variance_laplacian_per_intensity` — `variance_laplacian` ÷ mean crop intensity.
+  Out of focus the plain Laplacian variance is camera shot noise and grows
+  linearly with brightness; this ratio has one out-of-focus level for dark and
+  bright crops and is the signal of the Stage-2 focus-peak detection.
 - `tenengrad_variance`
 - `energy_laplacian`
 - `energy_gradient`
@@ -65,6 +69,10 @@ sequentially, e.g.:
 Boolean quality guards (`has_black_mask_artifact`, `is_on_crop_boundary`) are
 kept alongside these numeric features but are intentionally omitted from the
 numeric list above because they serve as filtering flags instead of ML inputs.
+The same holds for `focus_peak_at_track_edge` (in-focus selections only): True
+when the focus peak is the track's first or last frame, i.e. the object entered
+or left the recording at its sharpest and the true maximum may lie outside the
+track.
 
 ## Stage 2 3D depth reconstruction
 Stage 2 reconstructs a continuous per-frame depth for each track from the sparse

@@ -30,8 +30,7 @@ and start coding:
 ```
 well_plate_analyzer/
 ├── config/
-│   ├── config.yml              # Single YAML config for the entire pipeline
-│   └── config_external_bg.yml  # Variant (base_config: config.yml): Stage-2 peak gating for external-BG runs
+│   └── config.yml              # Single YAML config for the entire pipeline
 ├── data/
 │   ├── input/<batch>/<sample>/ # Raw PNG sequences (one dir per sample)
 │   ├── output/<batch>/         # Stage outputs, organised per sample
@@ -151,7 +150,8 @@ which applies these transforms at load time:
 
 | Section | Notes |
 |---------|-------|
-| `base_config` (variants) | A config with a top-level `base_config: "<file>"` (relative to itself) is a **variant**: it holds only the values it changes and is deep-merged over that base before the transforms below. Use variants instead of copying `config.yml`, so they cannot drift. `config_external_bg.yml` is one (Stage-2 `sharpness_min_threshold: 0`, `min_prominence_fraction: 0.2`). |
+| `base_config` (variants) | A config with a top-level `base_config: "<file>"` (relative to itself) is a **variant**: it holds only the values it changes and is deep-merged over that base before the transforms below. Use variants instead of copying `config.yml`, so they cannot drift. |
+| Stage-2 focus peaks | `stage_02_characterization.focussed_particles.peak_detection`: a peak is measured against the track's own out-of-focus baseline (running median over `baseline_window_mm` of focal travel; frames derived from the sample's scan step), never an absolute sharpness value. Detection runs on `variance_laplacian_per_intensity` (Laplacian variance ÷ crop mean intensity), because out of focus the plain `variance_laplacian` is shot noise that grows with brightness. Peaks at a track's first/last frame are kept and flagged `focus_peak_at_track_edge`. With `one_peak_per_sweep_pass` only the strongest peak of each monotonic sweep pass (derived from z) is kept. `sharpness_min_threshold` in the same block is the **realtime** per-frame gate only. |
 | `paths.pipeline_base` | Offline-pipeline root (output, models, training data). Legacy `project_base_dir` still accepted as a fallback in `get_project_base_dir`. |
 | `paths.raw_data_root` | Acquisition output root; **injected** into `acquisition.paths.output_folder_base` (single source of truth). Point `run_pipeline --input_batch_dir` here. |
 | `imaging` + `segmentation` | Split for clarity; the loader **assembles** them into the internal `config['system']` view that pipeline code consumes. Don't read `imaging`/`segmentation` directly in stage code — read `system`. |

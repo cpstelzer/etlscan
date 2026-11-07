@@ -54,6 +54,31 @@ def test_returns_all_expected_keys(sharp_image):
     assert set(scores.keys()) == set(AVAILABLE_SHARPNESS_METRICS)
 
 
+def test_per_intensity_is_laplacian_variance_over_mean(blurry_image):
+    scores = calculate_sharpness_metrics(blurry_image)
+    expected = scores["variance_laplacian"] / blurry_image.mean()
+    assert np.isclose(scores["variance_laplacian_per_intensity"], expected)
+
+
+def test_per_intensity_removes_shot_noise_brightness_dependence():
+    # Featureless crops with photon (Poisson) noise, as out-of-focus crops are:
+    # the plain Laplacian variance follows the brightness, the ratio does not.
+    rng = np.random.default_rng(0)
+    dark = rng.poisson(50, (200, 200)).astype(np.uint8)
+    bright = rng.poisson(200, (200, 200)).astype(np.uint8)
+    dark_scores = calculate_sharpness_metrics(dark)
+    bright_scores = calculate_sharpness_metrics(bright)
+    assert bright_scores["variance_laplacian"] > 3 * dark_scores["variance_laplacian"]
+    ratio = bright_scores["variance_laplacian_per_intensity"] / dark_scores["variance_laplacian_per_intensity"]
+    assert 0.9 < ratio < 1.1
+
+
+def test_per_intensity_of_black_crop_is_nan():
+    scores = calculate_sharpness_metrics(np.zeros((20, 20), dtype=np.uint8))
+    assert np.isnan(scores["variance_laplacian_per_intensity"])
+    assert scores["variance_laplacian"] == 0
+
+
 def test_normalize_and_combine_adds_norm_and_combined_columns():
     df = pd.DataFrame({
         "variance_laplacian": [100.0, 200.0, 300.0],
