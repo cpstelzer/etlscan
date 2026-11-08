@@ -18,6 +18,7 @@ from src.utils import (
     parse_date_plate_well, extract_frame_from_filename
 )
 from src.utils.common_exceptions import ProcessingError, ImageProcessingError, ConfigError, DataValidationError
+from src.utils.acquisition_metadata import read_frames_lost_at_acquisition
 from src.utils.config_loader import get_pixel_to_mm_factor, get_scan_extent_mm
 from src.core.image_io_operations import (
     load_image,
@@ -558,17 +559,27 @@ def _build_time_shift_pairs(
 def _build_external_background_pairs(
     fg_images_df: pd.DataFrame,
     bg_images_df: pd.DataFrame,
-) -> List[Tuple[pd.Series, pd.Series]]:
+    bg_metadata_log_path: str,
+) -> Tuple[List[Tuple[pd.Series, pd.Series]], List[pd.Series]]:
     """Pair every FG frame with the same-index frame of the external (specimen-free) BG run.
 
     Pairs are keyed on the frame index only: sample folders may have been renamed, so the
     date/plate/well tokens inside the filenames are not trusted. Each pair must then share
     its focal plane (dpt and fd_mm). Strict: subtracting a BG from another focal plane
-    yields plausible but wrong detections, so any unpaired or mismatched FG frame fails.
+    yields plausible but wrong detections, so any mismatched FG frame fails.
+
+    An FG frame without a BG frame is accepted only when the BG run's metadata log (read
+    only then) records that frame as lost at acquisition: the camera's exposure never
+    reached the PC, so the BG run has a known gap and the FG frame cannot be subtracted.
+    Any other missing BG frame (e.g. a file deleted after the run) fails.
+
+    Returns:
+        The FG/BG pairs, and the FG rows whose BG frame was lost at acquisition.
 
     Raises:
-        DataValidationError: duplicate BG frame indices, FG frames without a BG frame,
-            or focal-plane mismatches.
+        DataValidationError: duplicate BG frame indices, FG frames without a BG frame that
+            the BG log does not record as lost, or focal-plane mismatches.
+        FileNotFoundError: a BG frame is missing and the BG run has no metadata log.
     """
     duplicated_bg_frames = bg_images_df.loc[bg_images_df['frame'].duplicated(), 'frame']
     if not duplicated_bg_frames.empty:
@@ -578,13 +589,13 @@ def _build_external_background_pairs(
     bg_rows_by_frame = {int(bg_row['frame']): bg_row for _, bg_row in bg_images_df.iterrows()}
 
     frame_pairs: List[Tuple[pd.Series, pd.Series]] = []
-    missing_frames: List[int] = []
+    fg_rows_without_bg: List[pd.Series] = []
     mismatched_frames: List[str] = []
     for _, fg_row in fg_images_df.iterrows():
         frame = int(fg_row['frame'])
         bg_row = bg_rows_by_frame.get(frame)
         if bg_row is None:
-            missing_frames.append(frame)
+            fg_rows_without_bg.append(fg_row)
             continue
         same_focal_plane = (
             np.isclose(fg_row['dpt'], bg_row['dpt'], atol=_FOCAL_PLANE_TOLERANCE)
@@ -597,18 +608,32 @@ def _build_external_background_pairs(
             continue
         frame_pairs.append((fg_row, bg_row))
 
+    fg_rows_with_bg_lost: List[pd.Series] = []
+    unexplained_missing_frames: List[int] = []
+    if fg_rows_without_bg:
+        bg_frames_lost_at_acquisition = read_frames_lost_at_acquisition(bg_metadata_log_path)
+        for fg_row in fg_rows_without_bg:
+            if int(fg_row['frame']) in bg_frames_lost_at_acquisition:
+                fg_rows_with_bg_lost.append(fg_row)
+            else:
+                unexplained_missing_frames.append(int(fg_row['frame']))
+
     problems = []
-    if missing_frames:
-        problems.append(f"{len(missing_frames)} FG frame(s) have no BG frame (first: {missing_frames[:5]})")
+    if unexplained_missing_frames:
+        problems.append(
+            f"{len(unexplained_missing_frames)} FG frame(s) have no BG frame, and {bg_metadata_log_path!r} "
+            f"does not record them as lost at acquisition (first: {unexplained_missing_frames[:5]})"
+        )
     if mismatched_frames:
         problems.append(f"{len(mismatched_frames)} focal-plane mismatch(es) (first: {mismatched_frames[:3]})")
     if problems:
         raise DataValidationError(f"External background pairing failed: {'; '.join(problems)}")
-    return frame_pairs
+    return frame_pairs, fg_rows_with_bg_lost
 
 
 def _audit_external_background_pairs(
     pair_diagnostics_records: List[Dict[str, Any]],
+    fg_rows_with_bg_lost: List[pd.Series],
     max_failed_frame_fraction: float,
     output_dir_stage1: str,
     sample_id: str,
@@ -618,24 +643,57 @@ def _audit_external_background_pairs(
     An external BG is an independent recording (a time-shifted BG comes from the same
     one): when too many frames trip the shared subtracted-foreground guard it does not
     show the same scene (e.g. a moved dish), and the sample's detections would be
-    silently incomplete.
+    silently incomplete. FG frames whose BG frame was lost at acquisition could not be
+    subtracted either: they are listed with ``bg_lost_at_acquisition`` and
+    ``subtraction_failed`` set and count against the same limit.
     """
-    audit_df = pd.DataFrame(pair_diagnostics_records)
+    pairs_df = pd.DataFrame(pair_diagnostics_records)
+    if not pairs_df.empty:
+        pairs_df['bg_lost_at_acquisition'] = False
+    lost_df = pd.DataFrame([
+        {
+            "fg_filename": fg_row['filename'],
+            "bg_filename": "",
+            "frame": int(fg_row['frame']),
+            "dpt": float(fg_row['dpt']),
+            "fd_mm": float(fg_row['fd_mm']),
+            "foreground_fraction": np.nan,
+            "subtraction_failed": True,
+            "fused_detections": 0,
+            "bg_lost_at_acquisition": True,
+        }
+        for fg_row in fg_rows_with_bg_lost
+    ])
+    audit_parts = [part_df for part_df in (pairs_df, lost_df) if not part_df.empty]
+    audit_df = (
+        pd.concat(audit_parts, ignore_index=True).sort_values('frame', ignore_index=True)
+        if audit_parts else pd.DataFrame()
+    )
     save_dataframe_to_csv(audit_df, output_dir_stage1, f"{sample_id}_stage1_bg_pairing.csv")
-    if audit_df.empty:
+    if pairs_df.empty:
         raise ProcessingError(f"External background: no FG/BG pair of sample {sample_id} could be processed.")
 
-    failed_frame_count = int(audit_df['subtraction_failed'].sum())
-    failed_frame_fraction = failed_frame_count / len(audit_df)
+    lost_frame_count = len(lost_df)
+    guard_failed_frame_count = int(pairs_df['subtraction_failed'].sum())
+    failed_frame_fraction = (guard_failed_frame_count + lost_frame_count) / len(audit_df)
     logger.info(
-        f"External background: {failed_frame_count}/{len(audit_df)} frames of {sample_id} tripped the "
-        f"subtracted-foreground guard ({failed_frame_fraction:.1%}; limit {max_failed_frame_fraction:.1%})."
+        f"External background: {guard_failed_frame_count + lost_frame_count}/{len(audit_df)} frames of {sample_id} "
+        f"could not be subtracted ({failed_frame_fraction:.1%}; limit {max_failed_frame_fraction:.1%}): "
+        f"{guard_failed_frame_count} tripped the subtracted-foreground guard, "
+        f"{lost_frame_count} had their BG frame lost at acquisition."
     )
+    if lost_frame_count:
+        logger.warning(
+            f"External background for {sample_id}: skipped FG frame(s) "
+            f"{[int(fg_row['frame']) for fg_row in fg_rows_with_bg_lost]} - the BG run's metadata log records "
+            f"their BG frame as lost at acquisition."
+        )
     if failed_frame_fraction > max_failed_frame_fraction:
         raise ProcessingError(
-            f"External background for {sample_id}: {failed_frame_fraction:.1%} of frames failed the "
-            f"subtraction (limit {max_failed_frame_fraction:.1%}); the BG run does not match the FG scene. "
-            f"See {sample_id}_stage1_bg_pairing.csv."
+            f"External background for {sample_id}: {failed_frame_fraction:.1%} of frames could not be "
+            f"subtracted (limit {max_failed_frame_fraction:.1%}): {guard_failed_frame_count} tripped the "
+            f"subtracted-foreground guard (the BG run does not match the FG scene) and {lost_frame_count} "
+            f"had their BG frame lost at acquisition. See {sample_id}_stage1_bg_pairing.csv."
         )
 
 def _analyze_single_subtracted_image_global_thresh(
@@ -1091,6 +1149,7 @@ def run_stage_01_initial_detection(
 
     if bg_image_dir_path is None:
         external_background_config = None
+        fg_rows_with_bg_lost: List[pd.Series] = []
         sweep_period_frames = None
         static_search_range_mm = None
         lint_max_solidity = None
@@ -1106,10 +1165,15 @@ def run_stage_01_initial_detection(
         bg_images_df = _parse_image_filenames(bg_image_dir_path)
         if bg_images_df is None or bg_images_df.empty:
             raise DataValidationError(f"No background images found in {bg_image_dir_path!r} for sample {sample_id}.")
-        frame_pairs = _build_external_background_pairs(images_df_filtered, bg_images_df)
+        frame_pairs, fg_rows_with_bg_lost = _build_external_background_pairs(
+            images_df_filtered,
+            bg_images_df,
+            os.path.join(bg_image_dir_path, config['acquisition']['paths']['log_filename']),
+        )
         logger.info(
             f"Stage 1: External background from {bg_image_dir_path!r}: {len(frame_pairs)} FG/BG frame pairs "
-            f"matched by frame index and focal plane."
+            f"matched by frame index and focal plane; {len(fg_rows_with_bg_lost)} FG frame(s) without BG "
+            f"(BG frame lost at acquisition)."
         )
         # Specimens seen against an external BG are static, and many are only detectable
         # while the sweep passes their focal plane: they vanish for up to one sweep cycle and
@@ -1174,6 +1238,7 @@ def run_stage_01_initial_detection(
     if external_background_config is not None:
         _audit_external_background_pairs(
             pair_diagnostics_records,
+            fg_rows_with_bg_lost,
             float(external_background_config['max_failed_frame_fraction']),
             output_dir_stage1,
             sample_id,

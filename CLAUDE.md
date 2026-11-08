@@ -30,8 +30,7 @@ and start coding:
 ```
 well_plate_analyzer/
 ├── config/
-│   ├── config.yml              # Single YAML config for the entire pipeline
-│   └── config_external_bg.yml  # Variant (base_config: config.yml): Stage-2 peak gating for external-BG runs
+│   └── config.yml              # Single YAML config for the entire pipeline
 ├── data/
 │   ├── input/<batch>/<sample>/ # Raw PNG sequences (one dir per sample)
 │   ├── output/<batch>/         # Stage outputs, organised per sample
@@ -127,8 +126,12 @@ two modes; every step after FG/BG pairing is shared):
   *non-moving* (e.g. fixated) specimens are found too. `--input_batch_dir` is the
   experiment root holding `fg/` and `bg/` with identically named sample folders. Pairs
   match by frame index + focal plane (strict; filename plate/well tokens are not
-  trusted). Each BG frame first gets the FG's low-frequency illumination and the well rim
-  is excluded; a sample fails if too many frames trip the subtracted-foreground guard.
+  trusted). A missing BG frame is accepted only if the BG `metadata_log.csv` records it as
+  lost at acquisition (`output_filename` = `Error/NA` / `ERROR_IN_LOOP:`); that FG frame is
+  skipped and audited (`bg_lost_at_acquisition`), any other missing BG frame fails the sample.
+  Each BG frame first gets the FG's low-frequency illumination and the well rim
+  is excluded; a sample fails if more than `max_failed_frame_fraction` of its frames trip the
+  subtracted-foreground guard or lost their BG frame.
   Static specimens visible only near their focal plane reappear once per sweep pass, so
   tracking bridges one focus-sweep period (derived per sample from its fd == 0 frames;
   requires `track_in_2d`) and links within `static_search_range_mm`, instead of the movers'
@@ -151,7 +154,8 @@ which applies these transforms at load time:
 
 | Section | Notes |
 |---------|-------|
-| `base_config` (variants) | A config with a top-level `base_config: "<file>"` (relative to itself) is a **variant**: it holds only the values it changes and is deep-merged over that base before the transforms below. Use variants instead of copying `config.yml`, so they cannot drift. `config_external_bg.yml` is one (Stage-2 `sharpness_min_threshold: 0`, `min_prominence_fraction: 0.2`). |
+| `base_config` (variants) | A config with a top-level `base_config: "<file>"` (relative to itself) is a **variant**: it holds only the values it changes and is deep-merged over that base before the transforms below. Use variants instead of copying `config.yml`, so they cannot drift. |
+| Stage-2 focus peaks | `stage_02_characterization.focussed_particles.peak_detection`: a peak is measured against the track's own out-of-focus baseline (running median over `baseline_window_mm` of focal travel; frames derived from the sample's scan step), never an absolute sharpness value. Detection runs on `variance_laplacian_per_intensity` (Laplacian variance ÷ crop mean intensity), because out of focus the plain `variance_laplacian` is shot noise that grows with brightness. Peaks at a track's first/last frame are kept and flagged `focus_peak_at_track_edge`. With `one_peak_per_sweep_pass` only the strongest peak of each monotonic sweep pass (derived from z) is kept. `sharpness_min_threshold` in the same block is the **realtime** per-frame gate only. |
 | `paths.pipeline_base` | Offline-pipeline root (output, models, training data). Legacy `project_base_dir` still accepted as a fallback in `get_project_base_dir`. |
 | `paths.raw_data_root` | Acquisition output root; **injected** into `acquisition.paths.output_folder_base` (single source of truth). Point `run_pipeline --input_batch_dir` here. |
 | `imaging` + `segmentation` | Split for clarity; the loader **assembles** them into the internal `config['system']` view that pipeline code consumes. Don't read `imaging`/`segmentation` directly in stage code — read `system`. |
@@ -244,6 +248,7 @@ both image and ML errors).
 | `get_scan_extent_mm` | `src/utils/config_loader.py` | Full (x, y, z) mm extent of the imaged volume — the fixed axis range for the Stage-1/Stage-2 tracking plots |
 | `create_well_mask_with_fallback` | `src/core/well_analysis.py` | Well mask with the full-frame bright-mask fallback (brightness matching + external-BG rim exclusion) |
 | `read_acquisition_metadata_header` | `src/utils/acquisition_metadata.py` | Parse the `# Key: value` header of a run's `metadata_log.csv` |
+| `read_frames_lost_at_acquisition` | `src/utils/acquisition_metadata.py` | Frame indices a run logged but saved no image for (markers shared with the acquisition writer) |
 | `figure_style` | `src/visualization/figure_style.py` | Context manager applying `config['figure_style']` to all figures created and saved inside it |
 
 ---

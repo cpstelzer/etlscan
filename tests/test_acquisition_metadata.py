@@ -1,11 +1,15 @@
-"""Tests for src/utils/acquisition_metadata.py: header parsing, FG/BG run compatibility,
-and the experiment-design cross-check used before a batch is processed."""
+"""Tests for src/utils/acquisition_metadata.py: header parsing, frames lost at acquisition,
+FG/BG run compatibility, and the experiment-design cross-check used before a batch is
+processed."""
 import pandas as pd
 import pytest
 
 from src.utils.acquisition_metadata import (
+    METADATA_LOOP_ERROR_PREFIX,
+    METADATA_MISSING_VALUE,
     load_experiment_design,
     read_acquisition_metadata_header,
+    read_frames_lost_at_acquisition,
     resolve_sample_design_values,
     validate_background_compatibility,
 )
@@ -34,6 +38,34 @@ def test_read_header_rejects_malformed_line(tmp_path):
 def test_read_header_missing_file_raises(tmp_path):
     with pytest.raises(FileNotFoundError):
         read_acquisition_metadata_header(str(tmp_path / "absent.csv"))
+
+
+# --- frames lost at acquisition -------------------------------------------------
+
+def test_lost_frames_are_rows_without_a_saved_image(tmp_path, write_metadata_log):
+    log_path = write_metadata_log(tmp_path, output_filenames={
+        0: "C:/run/20261016_plate3_well7_f00000_dpt-2.000_fd0.00mm.png",
+        1: METADATA_MISSING_VALUE,                          # exposure never reached the PC
+        2: f"{METADATA_LOOP_ERROR_PREFIX} grab timeout",    # frame loop raised
+        3: "C:/run/20261016_plate3_well7_f00003_dpt-1.256_fd2.50mm.png",
+    })
+    assert read_frames_lost_at_acquisition(log_path) == {1, 2}
+
+
+def test_lost_frames_of_complete_run_is_empty(tmp_path, write_metadata_log):
+    assert read_frames_lost_at_acquisition(write_metadata_log(tmp_path)) == set()
+
+
+def test_lost_frames_need_the_frame_table_columns(tmp_path):
+    log_path = tmp_path / "metadata_log.csv"
+    log_path.write_text("# === Frame Data ===\ntimestamp,diopter\n2026-10-16T10:32:18.52,-2.000\n", encoding="utf-8")
+    with pytest.raises(DataValidationError, match="frame_count"):
+        read_frames_lost_at_acquisition(str(log_path))
+
+
+def test_lost_frames_missing_log_raises(tmp_path):
+    with pytest.raises(FileNotFoundError):
+        read_frames_lost_at_acquisition(str(tmp_path / "absent.csv"))
 
 
 # --- FG/BG compatibility --------------------------------------------------------

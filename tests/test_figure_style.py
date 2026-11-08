@@ -63,7 +63,7 @@ def test_figure_style_names_missing_keys():
             pass
 
 
-@pytest.mark.parametrize("config_name", ["config.yml", "config_external_bg.yml"])
+@pytest.mark.parametrize("config_name", ["config.yml"])
 def test_repo_configs_define_a_complete_figure_style(config_name):
     with figure_style(load_config_once(str(CONFIG_DIR / config_name))):
         pass

@@ -138,15 +138,10 @@ acquisition:
     # run_acquire_single_sweep.py (single well): every combination of step size
     # and pattern is recorded once per well, in shuffled order. Each combination
     # overrides focusing.scan_step_um / focusing.pattern for its run only.
-    scan_steps_um_options: [150, 250, 350, 450, 550]
-    focusing_pattern_options: ["zigzag"] # zigzag and/or sawtooth
-    # false: every run records camera.video_duration_sec.
-    # true: every run records max(camera.video_duration_sec, time needed until
-    #   every focal plane -- including the two end planes -- was visited at
-    #   least plane_revisit_times times at camera.fps). Frames needed for N
-    #   planes and k visits: sawtooth k*N, zigzag (2k-1)*(N-1)+1.
+    scan_steps_um_options: [200, 400, 600, 800, 1000, 1200]
+    focusing_pattern_options: ["zigzag", "sawtooth"]
     variable_recording_duration: true
-    plane_revisit_times: 5
+    plane_revisit_times: 6
   camera:
     fps: 25.0
     video_duration_sec: 15
@@ -207,7 +202,7 @@ acquisition:
 hardware_profiles:
   TS1_0638_70_EL:
     focusing:
-      scan_height_mm: 14  # Default: 11.2 mm
+      scan_height_mm: 14.6  # Default: 11.2 mm
       scan_ratio: 3.36 # Optical leverage (mm/dpt) Dry:3.52 mm/dpt; Wet: 3.36 mm/dpt
       lens_controller_port: "COM11"
     camera:
@@ -333,8 +328,10 @@ stage_01_initial_detection:
     illumination_match_median_kernel_px: 31
     # Inset (px) of the BG well mask: drops the slightly shifted well rim / meniscus edge.
     rim_exclusion_px: 60
-    # A sample fails when more of its frames than this trip the subtracted-foreground guard
-    # (the BG run does not show the same scene, e.g. a moved dish).
+    # A sample fails when more of its frames than this cannot be subtracted: they trip the
+    # subtracted-foreground guard (the BG run does not show the same scene, e.g. a moved
+    # dish), or their BG frame is missing and the BG metadata_log.csv records it as lost at
+    # acquisition (such FG frames are skipped; any other missing BG frame fails the sample).
     max_failed_frame_fraction: 0.2
     # Specimens here are static, and many are detectable only while the sweep passes their
     # focal plane, so tracking bridges one full focus-sweep period (derived per sample from
@@ -437,12 +434,27 @@ stage_02_characterization:
     enabled: true
     frame_column: "frame"
     track_column: "track_id"
-    sharpness_column: "variance_laplacian" 
-    min_sharpness_fraction: 0.15      # was 0.3: dropped genuine short peaks on fast (S5VPJ6415) sweeps
-    min_prominence_fraction: 0.05
-    smooth_window: 1                  # was 3: smoothing filled inter-peak valleys, collapsing prominence
-    sharpness_min_threshold: 100       # was 110: retune to this rig's variance_laplacian magnitudes
-    min_peak_distance_frames: 2       # min frames between adjacent peaks (scipy find_peaks distance)
+    # Laplacian variance per unit of mean crop intensity. Out of focus the plain
+    # variance_laplacian is camera shot noise and grows with crop brightness, so
+    # dark and bright image regions would need different thresholds.
+    sharpness_column: "variance_laplacian_per_intensity"
+    # Focus peaks are measured against the track's own out-of-focus level (baseline),
+    # never against an absolute sharpness value (src/stages/stage_02_characterization.py,
+    # detect_peaks_in_track).
+    peak_detection:
+      baseline_window_mm: 4.0              # running-median window, in focal travel (frames = mm / scan step)
+      baseline_min_window_frames: 5        # lower bound of that window for coarse scan steps
+      baseline_min_coverage: 0.5           # share of window frames with a detection for a local baseline
+      sparse_baseline_percentile: 20       # baseline of sparsely detected stretches: this track percentile
+      min_rise_above_baseline: 0.15        # peak must exceed its baseline by this fraction of the baseline
+      min_fraction_of_strongest_rise: 0.15 # ...and reach this fraction of the track's strongest rise
+      # One object crosses the focal plane once per sweep pass: keep only the strongest
+      # peak per pass (drops in-focus contaminants elsewhere in the crop; also drops a
+      # second organism sharing the track's crop).
+      one_peak_per_sweep_pass: true
+    # Realtime only (src/realtime/config.py min_focus_score): per-frame gate on
+    # variance_laplacian. Batch peak detection does not use it.
+    sharpness_min_threshold: 100
     max_tracks_to_plot: 15
     trajectory_smoothing_factor: 0.5   # 3D depth spline: 0 interpolates, larger smooths more (unitless)
     min_points_for_spline: 5           # tracks with fewer in-focus points get a constant mean depth

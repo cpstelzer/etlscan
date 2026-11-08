@@ -16,6 +16,8 @@ from types import SimpleNamespace
 import pandas as pd
 import pytest
 
+from src.utils.acquisition_metadata import read_frames_lost_at_acquisition
+
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 MOCK_DIR = PROJECT_ROOT / "tests" / "fixtures" / "etl_mock"
 CONFIG_PATH = PROJECT_ROOT / "config" / "config.yml"
@@ -178,6 +180,8 @@ def test_grid_mode_maps_frames_by_block_id_after_a_lost_frame(hw, tmp_path, caps
         assert _shown_setting(hw, row.camera_timestamp_ns) == pytest.approx(run.frames[row.frame_count])
     assert run.log.loc[9, "output_filename"] == "Error/NA"
     assert bool(run.log.loc[10, "skipped_frame_warning"]) is True
+    # Stage 1 (external BG) reads exactly this frame back as lost at acquisition.
+    assert read_frames_lost_at_acquisition(os.path.join(run.folder, "metadata_log.csv")) == {9}
     out = capsys.readouterr().out
     assert f"frames received {len(run.pattern) - 1}/{len(run.pattern)}" in out and "block-ID gaps 1" in out
 
@@ -198,6 +202,7 @@ def test_grid_mode_skipped_trigger_does_not_shift_later_frames(hw, tmp_path, mon
 
     assert sorted(run.frames) == [i for i in range(len(run.pattern)) if i != 5]
     assert run.log.loc[5, "output_filename"].startswith("ERROR_IN_LOOP")
+    assert read_frames_lost_at_acquisition(os.path.join(run.folder, "metadata_log.csv")) == {5}
     assert run.log.block_id.dropna().diff().dropna().eq(1).all()   # no exposure for entry 5
     for _, row in run.log.dropna(subset=["camera_timestamp_ns"]).iterrows():
         assert _shown_setting(hw, row.camera_timestamp_ns) == pytest.approx(run.frames[row.frame_count])

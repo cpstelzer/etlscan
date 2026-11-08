@@ -25,6 +25,7 @@ except ImportError:
     HAVE_TRACKPY = False
 
 from src.stages.stage_01_initial_detection import (  # noqa: E402
+    _audit_external_background_pairs,
     _build_external_background_pairs,
     _build_time_shift_pairs,
     _filter_image_df,
@@ -36,6 +37,7 @@ from src.stages.stage_01_initial_detection import (  # noqa: E402
     select_background_frame,
 )
 from src.core import image_io_operations  # noqa: E402
+from src.utils.acquisition_metadata import METADATA_MISSING_VALUE  # noqa: E402
 from src.utils.common_exceptions import ConfigError, DataValidationError, ProcessingError  # noqa: E402
 from src.utils.config_loader import load_config_once  # noqa: E402
 
@@ -62,23 +64,54 @@ def _touch_frames(directory, prefix, frames, fd_of=_sweep_fd):
 
 # --- pairing --------------------------------------------------------------------
 
+def _bg_log_output_filenames(frames, lost_frames=()):
+    """BG metadata-log ``output_filename`` per frame: a saved path, or the lost-frame marker."""
+    return {
+        frame: METADATA_MISSING_VALUE if frame in lost_frames
+        else f"C:/run/{_frame_name('20261016_plate3_well7', frame, _sweep_fd(frame))}"
+        for frame in frames
+    }
+
+
 def test_external_pairs_match_by_frame_despite_renamed_filename_prefix(tmp_path):
     # Folders were renamed by hand: FG files still carry the acquisition's plate3_well7
     # prefix, the BG files another one. Pairing must not care.
     fg_df = _touch_frames(tmp_path / "fg", "20261016_plate3_well7", range(1, 10))
     bg_df = _touch_frames(tmp_path / "bg", "20261016_plate9_well1", range(0, 10))
 
-    pairs = _build_external_background_pairs(fg_df, bg_df)
+    # Nothing is missing, so the BG log (absent here) is never read.
+    pairs, fg_rows_with_bg_lost = _build_external_background_pairs(fg_df, bg_df, str(tmp_path / "bg" / "absent.csv"))
 
     assert [int(fg["frame"]) for fg, _ in pairs] == list(range(1, 10))
     assert all(int(fg["frame"]) == int(bg["frame"]) and fg["fd_mm"] == bg["fd_mm"] for fg, bg in pairs)
+    assert fg_rows_with_bg_lost == []
 
 
-def test_external_pairs_fail_on_missing_bg_frame(tmp_path):
+def test_external_pairs_fail_on_missing_bg_frame_the_log_lists_as_saved(tmp_path, write_metadata_log):
+    # The BG run saved frame 6, but its file is gone now (e.g. deleted by hand): not a known gap.
     fg_df = _touch_frames(tmp_path / "fg", "20261016_plate3_well7", range(1, 10))
     bg_df = _touch_frames(tmp_path / "bg", "20261016_plate3_well7", [f for f in range(1, 10) if f != 6])
+    bg_log = write_metadata_log(tmp_path / "bg", output_filenames=_bg_log_output_filenames(range(0, 10)))
     with pytest.raises(DataValidationError, match="no BG frame"):
-        _build_external_background_pairs(fg_df, bg_df)
+        _build_external_background_pairs(fg_df, bg_df, bg_log)
+
+
+def test_external_pairs_skip_fg_frame_whose_bg_frame_was_lost_at_acquisition(tmp_path, write_metadata_log):
+    fg_df = _touch_frames(tmp_path / "fg", "20261016_plate3_well7", range(1, 10))
+    bg_df = _touch_frames(tmp_path / "bg", "20261016_plate3_well7", [f for f in range(1, 10) if f != 6])
+    bg_log = write_metadata_log(tmp_path / "bg", output_filenames=_bg_log_output_filenames(range(0, 10), {6}))
+
+    pairs, fg_rows_with_bg_lost = _build_external_background_pairs(fg_df, bg_df, bg_log)
+
+    assert [int(fg["frame"]) for fg, _ in pairs] == [1, 2, 3, 4, 5, 7, 8, 9]
+    assert [int(fg_row["frame"]) for fg_row in fg_rows_with_bg_lost] == [6]
+
+
+def test_external_pairs_with_missing_bg_frame_need_the_bg_log(tmp_path):
+    fg_df = _touch_frames(tmp_path / "fg", "20261016_plate3_well7", range(1, 10))
+    bg_df = _touch_frames(tmp_path / "bg", "20261016_plate3_well7", [f for f in range(1, 10) if f != 6])
+    with pytest.raises(FileNotFoundError, match="metadata log"):
+        _build_external_background_pairs(fg_df, bg_df, str(tmp_path / "bg" / "metadata_log.csv"))
 
 
 def test_external_pairs_fail_on_focal_plane_mismatch(tmp_path):
@@ -86,7 +119,38 @@ def test_external_pairs_fail_on_focal_plane_mismatch(tmp_path):
     # BG recorded with a different scan step: same frame indices, other focal planes.
     bg_df = _touch_frames(tmp_path / "bg", "20261016_plate3_well7", range(1, 10), fd_of=lambda f: 2 * _sweep_fd(f))
     with pytest.raises(DataValidationError, match="focal-plane mismatch"):
-        _build_external_background_pairs(fg_df, bg_df)
+        _build_external_background_pairs(fg_df, bg_df, str(tmp_path / "bg" / "absent.csv"))
+
+
+def _pair_record(frame, subtraction_failed=False):
+    return {
+        "fg_filename": f"fg_{frame}.png", "bg_filename": f"bg_{frame}.png", "frame": frame, "dpt": -2.0,
+        "fd_mm": 0.0, "foreground_fraction": 0.001, "subtraction_failed": subtraction_failed, "fused_detections": 1,
+    }
+
+
+def _fg_row(frame):
+    return pd.Series({"filename": f"fg_{frame}.png", "frame": frame, "dpt": -2.0, "fd_mm": 0.0})
+
+
+def test_audit_lists_frames_with_bg_lost_and_counts_them_as_failed(tmp_path):
+    records = [_pair_record(frame) for frame in (1, 2, 4, 5, 6, 7, 8, 9, 10)]
+
+    _audit_external_background_pairs(records, [_fg_row(3)], 0.2, str(tmp_path), "s")
+
+    audit = pd.read_csv(tmp_path / "s_stage1_bg_pairing.csv")
+    assert audit["frame"].tolist() == list(range(1, 11))
+    lost = audit[audit["bg_lost_at_acquisition"]]
+    assert lost["frame"].tolist() == [3] and lost["subtraction_failed"].all()
+    assert lost["fused_detections"].tolist() == [0]
+    assert not audit.loc[~audit["bg_lost_at_acquisition"], "subtraction_failed"].any()
+
+
+def test_audit_fails_when_lost_and_guard_failed_frames_exceed_the_limit(tmp_path):
+    # 1 guard failure + 2 lost BG frames = 3 of 10 frames (30 %) > 20 %; either alone passes.
+    records = [_pair_record(frame, subtraction_failed=(frame == 1)) for frame in range(1, 9)]
+    with pytest.raises(ProcessingError, match=r"30\.0% of frames could not be subtracted"):
+        _audit_external_background_pairs(records, [_fg_row(9), _fg_row(10)], 0.2, str(tmp_path), "s")
 
 
 def test_filter_keeps_tail_only_without_cycle_trim(tmp_path):
@@ -224,6 +288,32 @@ def test_external_background_finds_static_specimen(tmp_path, repo_config, no_fla
     assert tracked["X"].between(270, 330).all() and tracked["Y"].between(245, 275).all()
     audit = pd.read_csv(os.path.join(output_dir, "20261016_plate14_well2_stage1_bg_pairing.csv"))
     assert len(audit) == 9 and not audit["subtraction_failed"].any()
+
+
+@pytest.mark.skipif(not HAVE_TRACKPY, reason="trackpy required for the Stage-1 tracking step.")
+def test_external_background_skips_frame_whose_bg_was_lost_at_acquisition(
+    tmp_path, repo_config, no_flat_field_confirmed, write_metadata_log
+):
+    rng = np.random.default_rng(4)
+    fg_dir, bg_dir = _write_sample(
+        str(tmp_path), "20261016_plate14_well2", range(0, 10),
+        make_fg=lambda f: _with_static_specimen(_flat_frame(rng)),
+        make_bg=lambda f: _flat_frame(rng),
+    )
+    # The BG camera lost frame 5: no image, and the BG log's row says so.
+    os.remove(os.path.join(bg_dir, _frame_name("20261016_plate3_well7", 5, _sweep_fd(5))))
+    write_metadata_log(bg_dir, output_filenames=_bg_log_output_filenames(range(0, 10), {5}))
+    output_dir = str(tmp_path / "out")
+
+    csv_path = run_stage_01_initial_detection(fg_dir, output_dir, "20261016_plate14_well2", repo_config, bg_image_dir_path=bg_dir)
+
+    tracked = pd.read_csv(csv_path)
+    assert tracked["track_id"].nunique() == 1
+    assert sorted(tracked["frame"].unique()) == [1, 2, 3, 4, 6, 7, 8, 9]
+    audit = pd.read_csv(os.path.join(output_dir, "20261016_plate14_well2_stage1_bg_pairing.csv"))
+    assert audit["frame"].tolist() == list(range(1, 10))
+    assert audit.loc[audit["bg_lost_at_acquisition"], "frame"].tolist() == [5]
+    assert audit["subtraction_failed"].tolist() == audit["bg_lost_at_acquisition"].tolist()
 
 
 @pytest.mark.skipif(not HAVE_TRACKPY, reason="trackpy required for the Stage-1 tracking step.")

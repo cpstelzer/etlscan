@@ -6,11 +6,13 @@ The acquisition writes a ``# Key: value`` header at the top of each run's
 pipeline uses it to verify, before any image is processed, that an external
 background run was recorded with the same image-defining settings as its foreground
 run, and that each sample matches its row in an optional experiment-design table.
+Below the header, the frame table holds one row per focus-pattern entry; the pipeline
+reads it to tell frames the camera lost during acquisition from files missing later.
 """
 import logging
 import os
 import re
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Set
 
 import numpy as np
 import pandas as pd
@@ -22,6 +24,15 @@ logger = logging.getLogger(__name__)
 
 _FRAME_DATA_SECTION = "Frame Data"
 _SECTION_BANNER = re.compile(r"(?:===|---)\s*(.+?)\s*(?:===|---)")
+
+# Frame-table values the acquisition writes for a frame it did not save: a field it could
+# not fill (e.g. output_filename of an exposure that never reached the PC) holds
+# METADATA_MISSING_VALUE, and a frame whose loop iteration raised has an output_filename
+# starting with METADATA_LOOP_ERROR_PREFIX followed by the error.
+METADATA_MISSING_VALUE = "Error/NA"
+METADATA_LOOP_ERROR_PREFIX = "ERROR_IN_LOOP:"
+_FRAME_INDEX_COLUMN = "frame_count"
+_OUTPUT_FILENAME_COLUMN = "output_filename"
 
 # Header fields that determine what each frame shows. A FG run and its external BG run
 # must agree on all of them: camera settings set the image formation, and the ETL scan
@@ -96,6 +107,36 @@ def read_acquisition_metadata_header(metadata_log_path: str) -> Dict[str, Dict[s
     if not sections:
         raise DataValidationError(f"No metadata header found in {metadata_log_path!r}")
     return sections
+
+
+def read_frames_lost_at_acquisition(metadata_log_path: str) -> Set[int]:
+    """Return the frame indices a run logged but saved no image for.
+
+    The acquisition writes a frame-table row for every focus-pattern entry, also when the
+    exposure never reached the PC or the frame loop raised; such a row's
+    ``output_filename`` is ``METADATA_MISSING_VALUE`` or a ``METADATA_LOOP_ERROR_PREFIX``
+    message instead of a file path.
+
+    Raises:
+        FileNotFoundError: the log file does not exist.
+        DataValidationError: the frame table lacks the frame-index or output-filename column.
+    """
+    if not os.path.isfile(metadata_log_path):
+        raise FileNotFoundError(f"Acquisition metadata log not found: {metadata_log_path}")
+    with open(metadata_log_path, "r", encoding="utf-8") as log_file:
+        lines = log_file.readlines()
+    header_line_count = next((i for i, line in enumerate(lines) if not line.startswith("#")), len(lines))
+    frame_table = pd.read_csv(metadata_log_path, skiprows=header_line_count, dtype=str, keep_default_na=False)
+    missing_columns = [
+        column for column in (_FRAME_INDEX_COLUMN, _OUTPUT_FILENAME_COLUMN) if column not in frame_table.columns
+    ]
+    if missing_columns:
+        raise DataValidationError(f"Frame table of {metadata_log_path!r} lacks columns: {missing_columns}")
+    output_filenames = frame_table[_OUTPUT_FILENAME_COLUMN]
+    lost_mask = (output_filenames == METADATA_MISSING_VALUE) | output_filenames.str.startswith(
+        METADATA_LOOP_ERROR_PREFIX
+    )
+    return {int(frame) for frame in frame_table.loc[lost_mask, _FRAME_INDEX_COLUMN]}
 
 
 def _get_header_field(header: Dict[str, Dict[str, str]], field: tuple, log_path: str) -> str:
