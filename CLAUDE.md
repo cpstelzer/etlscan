@@ -126,8 +126,12 @@ two modes; every step after FG/BG pairing is shared):
   *non-moving* (e.g. fixated) specimens are found too. `--input_batch_dir` is the
   experiment root holding `fg/` and `bg/` with identically named sample folders. Pairs
   match by frame index + focal plane (strict; filename plate/well tokens are not
-  trusted). Each BG frame first gets the FG's low-frequency illumination and the well rim
-  is excluded; a sample fails if too many frames trip the subtracted-foreground guard.
+  trusted). A missing BG frame is accepted only if the BG `metadata_log.csv` records it as
+  lost at acquisition (`output_filename` = `Error/NA` / `ERROR_IN_LOOP:`); that FG frame is
+  skipped and audited (`bg_lost_at_acquisition`), any other missing BG frame fails the sample.
+  Each BG frame first gets the FG's low-frequency illumination and the well rim
+  is excluded; a sample fails if more than `max_failed_frame_fraction` of its frames trip the
+  subtracted-foreground guard or lost their BG frame.
   Static specimens visible only near their focal plane reappear once per sweep pass, so
   tracking bridges one focus-sweep period (derived per sample from its fd == 0 frames;
   requires `track_in_2d`) and links within `static_search_range_mm`, instead of the movers'
@@ -244,6 +248,7 @@ both image and ML errors).
 | `get_scan_extent_mm` | `src/utils/config_loader.py` | Full (x, y, z) mm extent of the imaged volume — the fixed axis range for the Stage-1/Stage-2 tracking plots |
 | `create_well_mask_with_fallback` | `src/core/well_analysis.py` | Well mask with the full-frame bright-mask fallback (brightness matching + external-BG rim exclusion) |
 | `read_acquisition_metadata_header` | `src/utils/acquisition_metadata.py` | Parse the `# Key: value` header of a run's `metadata_log.csv` |
+| `read_frames_lost_at_acquisition` | `src/utils/acquisition_metadata.py` | Frame indices a run logged but saved no image for (markers shared with the acquisition writer) |
 | `figure_style` | `src/visualization/figure_style.py` | Context manager applying `config['figure_style']` to all figures created and saved inside it |
 
 ---

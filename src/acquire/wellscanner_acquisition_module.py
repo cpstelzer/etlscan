@@ -45,6 +45,7 @@ from .triggered_acquisition import (
     grab_timestamp_ticks,
     read_lens_temperature, restore_free_run, sample_camera_clock, summarize_grid_recording, summarize_recording,
 )
+from src.utils.acquisition_metadata import METADATA_LOOP_ERROR_PREFIX, METADATA_MISSING_VALUE
 
 # --- Global Mappings ---
 # Maps Pylon Bayer formats to OpenCV debayering codes
@@ -288,7 +289,7 @@ def _acquire_with_grid_trigger(camera, lens, full_focus_pattern, frame_output, e
             if future.exception() is None:
                 log_entry["image_processing_time_ms"] = future.result()
         elif trigger.error is not None:
-            log_entry["output_filename"] = f"ERROR_IN_LOOP: {trigger.error}"
+            log_entry["output_filename"] = f"{METADATA_LOOP_ERROR_PREFIX} {trigger.error}"
         log_data.append(log_entry)
     return log_data, frame_timing, recording, any_frames_skipped
 
@@ -429,7 +430,7 @@ def _acquire_with_free_run(camera, lens, full_focus_pattern, frame_output, execu
         except Exception as loop_e:
             print(f"ERROR in main loop for frame {frame_count}: {type(loop_e).__name__} - {loop_e}")
             traceback.print_exc(file=sys.stdout)
-            log_entry["output_filename"] = f"ERROR_IN_LOOP: {loop_e}"
+            log_entry["output_filename"] = f"{METADATA_LOOP_ERROR_PREFIX} {loop_e}"
             any_frames_skipped_in_well = True
             if grabResult and grabResult.IsReadable():
                 try: grabResult.Release()
@@ -599,7 +600,7 @@ def acquire_and_save_frames(camera, lens, full_focus_pattern,
         any_frames_skipped_in_well = True
     for log_entry in log_data:
         for field in log_fieldnames:
-            if field not in log_entry: log_entry[field] = "Error/NA"
+            if field not in log_entry: log_entry[field] = METADATA_MISSING_VALUE
 
     print(f"Writing {len(log_data)} log entries to {log_file_path}...")
     try:

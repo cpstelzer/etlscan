@@ -328,8 +328,10 @@ stage_01_initial_detection:
     illumination_match_median_kernel_px: 31
     # Inset (px) of the BG well mask: drops the slightly shifted well rim / meniscus edge.
     rim_exclusion_px: 60
-    # A sample fails when more of its frames than this trip the subtracted-foreground guard
-    # (the BG run does not show the same scene, e.g. a moved dish).
+    # A sample fails when more of its frames than this cannot be subtracted: they trip the
+    # subtracted-foreground guard (the BG run does not show the same scene, e.g. a moved
+    # dish), or their BG frame is missing and the BG metadata_log.csv records it as lost at
+    # acquisition (such FG frames are skipped; any other missing BG frame fails the sample).
     max_failed_frame_fraction: 0.2
     # Specimens here are static, and many are detectable only while the sweep passes their
     # focal plane, so tracking bridges one full focus-sweep period (derived per sample from
