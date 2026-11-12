@@ -214,27 +214,3 @@ def get_unified_segmentation_params(config: Dict[str, Any]) -> Dict[str, Any]:
 def get_pixel_to_mm_factor(tracking_config: Dict[str, Any]) -> float:
     """Millimetres per image pixel in the object plane, from the tracking optics."""
     return tracking_config["pixel_size_um"] / (tracking_config["magnification"] * 1000)
-
-
-def get_scan_extent_mm(config: Dict[str, Any]) -> Tuple[float, float, float]:
-    """Return the full (x, y, z) extent in mm a well scan can cover.
-
-    x/y are the frame footprint (camera ROI, at the tracking pixel scale) and z is
-    the ETL focus-sweep depth, so every detected coordinate falls inside this box
-    by construction. That makes it the fixed axis range for the tracking plots:
-    autoscaling instead zooms each figure onto the particles it happens to contain,
-    so a well whose organisms sit in one corner is silently magnified and can no
-    longer be compared by eye against a well whose organisms roam.
-
-    The three values are spread across the system view, the stage-1 tracking
-    optics, and the acquisition focus sweep; assembling them here keeps the stages
-    from each having to know that layout. Required keys must be present; missing
-    keys raise KeyError.
-    """
-    system_cfg = config["system"]
-    pixel_to_mm_factor = get_pixel_to_mm_factor(config["stage_01_initial_detection"]["tracking"])
-    return (
-        system_cfg["image_width_px"] * pixel_to_mm_factor,
-        system_cfg["image_height_px"] * pixel_to_mm_factor,
-        float(config["acquisition"]["focusing"]["scan_height_mm"]),
-    )

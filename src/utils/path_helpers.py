@@ -4,7 +4,15 @@ import re
 import logging
 from typing import Any, Dict, Optional, Tuple, Union, List
 
+import pandas as pd
+
 logger = logging.getLogger(__name__)
+
+# Raw frame written by the acquisition: <date>_plate<p>_well<w>_f<frame>_dpt<diopter>_fd<focal distance>mm.png
+_FRAME_FILENAME_PATTERN = re.compile(
+    r"^(?P<date>\d{8})_plate(?P<plate>\d+)_well(?P<well>\d+)_f(?P<frame>\d{5})"
+    r"_dpt(?P<dpt>[-+]?[0-9]*\.?[0-9]+)_fd(?P<fd_mm>[-+]?[0-9]*\.?[0-9]+)mm\.png$"
+)
 
 
 def get_project_base_dir(config: Dict[str, Any]) -> str:
@@ -121,6 +129,45 @@ def get_valid_sample_subdirectories(batch_input_dir: str) -> List[str]:
     else:
         logger.info(f"Found {len(valid_sample_dirs)} valid sample subdirectories in '{batch_input_dir}'.")
     return valid_sample_dirs
+
+
+def parse_frame_filenames(image_dir_path: str) -> Optional[pd.DataFrame]:
+    """Parse a sample's raw frame filenames into one row per frame, sorted by frame.
+
+    Columns: ``filename``, ``date``, ``plate``, ``well``, ``frame``, ``dpt``, ``fd_mm``
+    (focal distance of the frame's plane from the sweep's start plane) and ``full_path``.
+    Files not named like an acquisition frame are ignored. Returns None for an invalid or
+    missing directory and an empty DataFrame when no filename matches.
+    """
+    if not image_dir_path or not isinstance(image_dir_path, str):
+        logger.error(f"Invalid image_dir_path: {image_dir_path}")
+        return None
+    if not os.path.isdir(image_dir_path):
+        logger.error(f"Image directory not found: {image_dir_path}")
+        return None
+    parsed_file_data = []
+    for filename in sorted(os.listdir(image_dir_path)):
+        if not filename.lower().endswith(".png"):
+            continue
+        match = _FRAME_FILENAME_PATTERN.match(filename)
+        if not match:
+            continue
+        try:
+            groups = match.groupdict()
+            parsed_file_data.append({
+                "filename": filename, "date": groups["date"], "plate": int(groups["plate"]),
+                "well": int(groups["well"]), "frame": int(groups["frame"]),
+                "dpt": float(groups["dpt"]), "fd_mm": float(groups["fd_mm"]),
+                "full_path": os.path.join(image_dir_path, filename),
+            })
+        except ValueError as e:
+            logger.warning(f"Parse error for '{filename}': {e}")
+    if not parsed_file_data:
+        logger.warning(f"No matching images in {image_dir_path}")
+        return pd.DataFrame()
+    df = pd.DataFrame(parsed_file_data).sort_values(by="frame").reset_index(drop=True)
+    logger.info(f"Parsed {len(df)} images from {image_dir_path}.")
+    return df
 
 
 def extract_frame_from_filename(filename: str) -> Optional[int]:

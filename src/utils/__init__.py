@@ -8,6 +8,7 @@ from .path_helpers import (
     get_models_dir,
     get_training_data_dir,
     parse_date_plate_well,
+    parse_frame_filenames,
     extract_frame_from_filename,
     parse_sharp_crop_filename
 )

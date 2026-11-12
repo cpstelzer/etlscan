@@ -28,6 +28,8 @@ STYLE_CONFIG = {
         'marker_edge_width': 0.9,
         'axes_line_width': 1.4,
         'tick_length': 5.5,
+        'track_line_width': 1.3,
+        'track_marker_size': 3.5,
     }
 }
 

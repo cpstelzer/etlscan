@@ -76,7 +76,7 @@ Reuse:
 - local refinement (`refine_with_local_otsu`)
 
 Replace/omit:
-- filename parsing/filtering (`_parse_image_filenames`, `_filter_image_df`) → replaced by acquisition metadata created at capture time
+- filename parsing/filtering (`parse_frame_filenames`, `_filter_image_df`) → replaced by acquisition metadata created at capture time
 - offline FG/BG selector (`select_background_frame`) → replaced by time-aged RAM background buffer
 - `prepare_masked_foreground` in realtime → skipped
 - fusion step (`_compare_and_fuse_particle_dfs`) → optional bypass; default is single subtraction path output

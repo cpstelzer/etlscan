@@ -29,7 +29,6 @@ from src.stages.stage_01_initial_detection import (  # noqa: E402
     _build_external_background_pairs,
     _build_time_shift_pairs,
     _filter_image_df,
-    _parse_image_filenames,
     _drop_lint_detections,
     _prepare_external_background,
     _sweep_period_frames,
@@ -40,6 +39,7 @@ from src.core import image_io_operations  # noqa: E402
 from src.utils.acquisition_metadata import METADATA_MISSING_VALUE  # noqa: E402
 from src.utils.common_exceptions import ConfigError, DataValidationError, ProcessingError  # noqa: E402
 from src.utils.config_loader import load_config_once  # noqa: E402
+from src.utils.path_helpers import parse_frame_filenames  # noqa: E402
 
 FD_STEP_MM = 0.25
 
@@ -59,7 +59,7 @@ def _touch_frames(directory, prefix, frames, fd_of=_sweep_fd):
     os.makedirs(directory, exist_ok=True)
     for frame in frames:
         open(os.path.join(directory, _frame_name(prefix, frame, fd_of(frame))), "wb").close()
-    return _parse_image_filenames(str(directory))
+    return parse_frame_filenames(str(directory))
 
 
 # --- pairing --------------------------------------------------------------------

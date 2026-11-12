@@ -15,11 +15,11 @@ from sklearn.neighbors import BallTree
 
 from src.utils import (
     load_dataframe_from_csv, save_dataframe_to_csv,
-    parse_date_plate_well, extract_frame_from_filename
+    parse_date_plate_well, parse_frame_filenames, extract_frame_from_filename
 )
 from src.utils.common_exceptions import ProcessingError, ImageProcessingError, ConfigError, DataValidationError
-from src.utils.acquisition_metadata import read_frames_lost_at_acquisition
-from src.utils.config_loader import get_pixel_to_mm_factor, get_scan_extent_mm
+from src.utils.acquisition_metadata import get_scan_extent_mm, read_frames_lost_at_acquisition
+from src.utils.config_loader import get_pixel_to_mm_factor
 from src.core.image_io_operations import (
     load_image,
     load_flat_field_assets,
@@ -29,7 +29,7 @@ from src.core.image_enhancement import subtract_images, apply_blur
 from src.core.masking_operations import mask_well_area, apply_mask
 from src.core.region_props_calculator import find_contours, calculate_contour_measurements, filter_contours_by_area
 from src.core.segmentation import generate_binary_mask_from_float_image, assess_subtracted_foreground
-from src.visualization.figure_style import figure_style
+from src.visualization.figure_style import draw_floor_shadow, plot_track_line, track_figure_style
 from src.core.well_analysis import (
     create_well_mask_black_plate,
     create_well_mask_with_fallback,
@@ -362,34 +362,8 @@ def process_frame_pair(
     return fused_df_frame, pair_diagnostics
 
 
-# --- _parse_image_filenames, _filter_image_df, _analyze_single_subtracted_image_global_thresh, _analyze_unsubtracted_locally, _compare_and_fuse_particle_dfs ---
+# --- _filter_image_df, _analyze_single_subtracted_image_global_thresh, _analyze_unsubtracted_locally, _compare_and_fuse_particle_dfs ---
 # These helper functions remain unchanged.
-def _parse_image_filenames(image_dir_path: str) -> Optional[pd.DataFrame]: # Unchanged
-    """Parse image filenames into a dataframe of metadata needed for Stage 1 processing."""
-    if not image_dir_path or not isinstance(image_dir_path, str):
-        logger.error(f"Invalid image_dir_path: {image_dir_path}"); return None
-    if not os.path.isdir(image_dir_path):
-        logger.error(f"Image directory not found: {image_dir_path}"); return None
-    pattern = re.compile(
-        r"^(?P<date>\d{8})_plate(?P<plate>\d+)_well(?P<well>\d+)_f(?P<frame>\d{5})_dpt(?P<dpt>[-+]?[0-9]*\.?[0-9]+)_fd(?P<fd_mm>[-+]?[0-9]*\.?[0-9]+)mm\.png$")
-    parsed_file_data = []
-    for filename in sorted(os.listdir(image_dir_path)):
-        if filename.lower().endswith(".png"):
-            match = pattern.match(filename)
-            if match:
-                try:
-                    groups = match.groupdict()
-                    parsed_file_data.append({
-                        "filename": filename, "date": groups["date"], "plate": int(groups["plate"]),
-                        "well": int(groups["well"]), "frame": int(groups["frame"]),
-                        "dpt": float(groups["dpt"]), "fd_mm": float(groups["fd_mm"]),
-                        "full_path": os.path.join(image_dir_path, filename)})
-                except ValueError as e: logger.warning(f"Parse error for '{filename}': {e}")
-    if not parsed_file_data: logger.warning(f"No matching images in {image_dir_path}"); return pd.DataFrame()
-    df = pd.DataFrame(parsed_file_data).sort_values(by="frame").reset_index(drop=True)
-    logger.info(f"Parsed {len(df)} images from {image_dir_path}.")
-    return df
-
 def _filter_image_df(df: pd.DataFrame, *, trim_to_last_fd0: bool) -> pd.DataFrame:
     """Trim the parsed image table to frames usable for pairing foreground/background.
 
@@ -958,7 +932,9 @@ def _build_tracking_figure(
 
     Axes are pinned to ``extent_mm`` (the full imaged volume) rather than
     autoscaled to the tracks, so the plot always shows the whole field of view
-    and Z sweep and stays comparable across samples.
+    and Z sweep and stays comparable across samples. Each track's grey copy on
+    the floor shows its x/y position. Build and save inside
+    :func:`track_figure_style`, which sets the line sizes.
     """
     if tracked_df.empty:
         return None
@@ -969,8 +945,11 @@ def _build_tracking_figure(
     ax.set_xlabel("x (mm)", labelpad=14)
     ax.set_ylabel("y (mm)", labelpad=14)
     ax.set_zlabel("z (mm)", labelpad=14)
-    for _, track in tracked_df.groupby('track_id'):
-        ax.plot(track['x_mm'], track['y_mm'], track['z_mm'])
+    tracks = [track for _, track in tracked_df.groupby('track_id')]
+    for track in tracks:
+        draw_floor_shadow(ax, track['x_mm'].values, track['y_mm'].values)
+    for rank, track in enumerate(tracks):
+        plot_track_line(ax, (track['x_mm'], track['y_mm'], track['z_mm']), rank)
     ax.set_xlim(0, x_max_mm)
     ax.set_ylim(0, y_max_mm)
     ax.set_zlim(0, z_max_mm)
@@ -992,7 +971,8 @@ def _build_tracking_xy_figure(
 
     Axes are pinned to the full field of view from ``extent_mm``; the aspect is
     adjusted via the axes box because the ``datalim`` alternative would stretch
-    those fixed limits back out to fill the box.
+    those fixed limits back out to fill the box. Tracks keep the colours they
+    have in the 3D view.
     """
     if tracked_df.empty:
         return None
@@ -1002,8 +982,8 @@ def _build_tracking_xy_figure(
     ax.set_title("XY projection of particle tracks")
     ax.set_xlabel("x (mm)")
     ax.set_ylabel("y (mm)")
-    for _, track in tracked_df.groupby('track_id'):
-        ax.plot(track['x_mm'], track['y_mm'])
+    for rank, (_, track) in enumerate(tracked_df.groupby('track_id')):
+        plot_track_line(ax, (track['x_mm'], track['y_mm']), rank)
     ax.set_xlim(0, x_max_mm)
     ax.set_ylim(0, y_max_mm)
     ax.set_aspect('equal', adjustable='box')
@@ -1144,7 +1124,7 @@ def run_stage_01_initial_detection(
 
     general_well_masking_cfg = config_s1['well_masking']
 
-    images_df = _parse_image_filenames(image_dir_path)
+    images_df = parse_frame_filenames(image_dir_path)
     if images_df is None or images_df.empty: return None
 
     if bg_image_dir_path is None:
@@ -1162,7 +1142,7 @@ def run_stage_01_initial_detection(
         external_background_config = config_s1['external_background']
         images_df_filtered = _filter_image_df(images_df.copy(), trim_to_last_fd0=False)
         if images_df_filtered.empty: return None
-        bg_images_df = _parse_image_filenames(bg_image_dir_path)
+        bg_images_df = parse_frame_filenames(bg_image_dir_path)
         if bg_images_df is None or bg_images_df.empty:
             raise DataValidationError(f"No background images found in {bg_image_dir_path!r} for sample {sample_id}.")
         frame_pairs, fg_rows_with_bg_lost = _build_external_background_pairs(
@@ -1272,7 +1252,6 @@ def run_stage_01_initial_detection(
             else:
                 memory_frames = tracking_config.get('memory_frames')
                 search_range_mm = tracking_config.get('search_range_mm')
-            extent_mm = get_scan_extent_mm(config)
             tracked_df = run_particle_tracking(
                 final_sample_df, sample_id, tracking_config, memory_frames, search_range_mm
             )
@@ -1290,7 +1269,9 @@ def run_stage_01_initial_detection(
         tracks_for_figures_df = (
             tracked_df.dropna(subset=['track_id']) if 'track_id' in tracked_df.columns else pd.DataFrame()
         )
-        with figure_style(config):
+        # Outside the tracking try-block: a frame that cannot be read must not pass as a tracking failure.
+        extent_mm = get_scan_extent_mm(config, image_dir_path)
+        with track_figure_style(config):
             tracking_fig = _build_tracking_figure(tracks_for_figures_df, extent_mm) if not tracks_for_figures_df.empty else None
             tracking_xy_fig = _build_tracking_xy_figure(tracks_for_figures_df, extent_mm) if not tracks_for_figures_df.empty else None
             if tracking_fig is not None:
