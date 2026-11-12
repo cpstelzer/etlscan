@@ -8,17 +8,21 @@ background run was recorded with the same image-defining settings as its foregro
 run, and that each sample matches its row in an optional experiment-design table.
 Below the header, the frame table holds one row per focus-pattern entry; the pipeline
 reads it to tell frames the camera lost during acquisition from files missing later.
+The volume a recording covers is read from its frames themselves (frame size and the
+focal planes in their filenames), which every recording has, log or not.
 """
 import logging
 import os
 import re
-from typing import Any, Dict, List, Set
+from typing import Any, Dict, List, Set, Tuple
 
 import numpy as np
 import pandas as pd
+from PIL import Image
 
 from src.utils.common_exceptions import DataValidationError
-from src.utils.path_helpers import parse_date_plate_well
+from src.utils.config_loader import get_pixel_to_mm_factor
+from src.utils.path_helpers import parse_date_plate_well, parse_frame_filenames
 
 logger = logging.getLogger(__name__)
 
@@ -137,6 +141,40 @@ def read_frames_lost_at_acquisition(metadata_log_path: str) -> Set[int]:
         METADATA_LOOP_ERROR_PREFIX
     )
     return {int(frame) for frame in frame_table.loc[lost_mask, _FRAME_INDEX_COLUMN]}
+
+
+def get_scan_extent_mm(config: Dict[str, Any], image_dir_path: str) -> Tuple[float, float, float]:
+    """Return the (x, y, z) extent in mm that the recording in ``image_dir_path`` covers.
+
+    x/y are its frame size (from the header of its first frame) at the tracking pixel
+    scale, the factor that converts detections to x_mm/y_mm; z is the deepest focal plane
+    (fd_mm) in its frame filenames, the token that becomes z_mm. All three count from 0
+    (image corner, sweep start plane), so every detected coordinate falls inside this box
+    by construction. That makes it the fixed axis range for the tracking plots:
+    autoscaling instead zooms each figure onto the particles it happens to contain, so a
+    well whose organisms sit in one corner is silently magnified and can no longer be
+    compared by eye against a well whose organisms roam.
+
+    Taken from the recording rather than the acquisition config, which describes the rig
+    as set up now: a recording made with another camera ROI or scan height would otherwise
+    be drawn in a box that does not fit it. The deepest plane is used rather than the
+    logged scan height because a scan step that does not divide the scan height ends the
+    sweep above or below it.
+
+    Raises:
+        DataValidationError: the directory holds no frame named like an acquisition frame.
+    """
+    frames_df = parse_frame_filenames(image_dir_path)
+    if frames_df is None or frames_df.empty:
+        raise DataValidationError(f"No acquisition frames in {image_dir_path!r}: the recording's extent is unknown.")
+    pixel_to_mm_factor = get_pixel_to_mm_factor(config["stage_01_initial_detection"]["tracking"])
+    with Image.open(frames_df["full_path"].iloc[0]) as first_frame:  # reads the header only
+        width_px, height_px = first_frame.size
+    return (
+        width_px * pixel_to_mm_factor,
+        height_px * pixel_to_mm_factor,
+        float(frames_df["fd_mm"].max()),
+    )
 
 
 def _get_header_field(header: Dict[str, Dict[str, str]], field: tuple, log_path: str) -> str:

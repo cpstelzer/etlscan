@@ -23,7 +23,8 @@ from scipy.interpolate import UnivariateSpline
 from src.utils import (
     load_dataframe_from_csv, save_dataframe_to_csv, build_crop_filename
 )
-from src.utils.config_loader import get_scan_extent_mm, get_unified_segmentation_params
+from src.utils.acquisition_metadata import get_scan_extent_mm
+from src.utils.config_loader import get_unified_segmentation_params
 from src.utils.path_helpers import extract_frame_from_filename
 from src.utils.common_exceptions import ConfigError, DataValidationError
 from src.core.image_io_operations import load_image, convert_to_grayscale
@@ -175,7 +176,7 @@ def run_stage_02_characterization(
             normalized_cropping,
             image_dir_path,
             focus_cfg,
-            get_scan_extent_mm(config),
+            get_scan_extent_mm(config, image_dir_path),
             bool(cropping_config['save_all_particle_crops']),
         )
 

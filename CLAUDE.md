@@ -86,7 +86,7 @@ well_plate_analyzer/
 │   │   ├── stage_03_filtering_and_classification.py
 │   │   └── stage_04_biological_analysis.py
 │   ├── utils/
-│   │   ├── acquisition_metadata.py # metadata_log header reader; FG/BG run + experiment-design checks
+│   │   ├── acquisition_metadata.py # metadata_log header reader; FG/BG run + experiment-design checks; recording extent
 │   │   ├── filename_helpers.py # build_crop_filename()
 │   │   ├── common_exceptions.py
 │   │   ├── config_loader.py
@@ -245,7 +245,8 @@ both image and ML errors).
 | `float01_to_uint8` | `src/core/image_enhancement.py` | Clip-and-scale float [0,1] → uint8 [0,255] |
 | `calculate_posterior_attributes` | `src/core/feature_calculators/bio_features_calculator.py` | Annotate RegionProperties with posterior axis vector (used by Stage 4 + visualisation) |
 | `load_config_once` | `src/utils/config_loader.py` | Load and cache the YAML config |
-| `get_scan_extent_mm` | `src/utils/config_loader.py` | Full (x, y, z) mm extent of the imaged volume — the fixed axis range for the Stage-1/Stage-2 tracking plots |
+| `get_scan_extent_mm` | `src/utils/acquisition_metadata.py` | (x, y, z) mm extent a recording covers — its frame size × tracking pixel scale, and its deepest `fd` plane (not the config's ROI / scan height); the fixed axis range for the Stage-1/Stage-2 tracking plots |
+| `parse_frame_filenames` | `src/utils/path_helpers.py` | One row per raw frame of a sample dir (frame, dpt, fd_mm, path), parsed from the acquisition filenames |
 | `create_well_mask_with_fallback` | `src/core/well_analysis.py` | Well mask with the full-frame bright-mask fallback (brightness matching + external-BG rim exclusion) |
 | `read_acquisition_metadata_header` | `src/utils/acquisition_metadata.py` | Parse the `# Key: value` header of a run's `metadata_log.csv` |
 | `read_frames_lost_at_acquisition` | `src/utils/acquisition_metadata.py` | Frame indices a run logged but saved no image for (markers shared with the acquisition writer) |

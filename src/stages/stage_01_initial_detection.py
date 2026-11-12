@@ -15,11 +15,11 @@ from sklearn.neighbors import BallTree
 
 from src.utils import (
     load_dataframe_from_csv, save_dataframe_to_csv,
-    parse_date_plate_well, extract_frame_from_filename
+    parse_date_plate_well, parse_frame_filenames, extract_frame_from_filename
 )
 from src.utils.common_exceptions import ProcessingError, ImageProcessingError, ConfigError, DataValidationError
-from src.utils.acquisition_metadata import read_frames_lost_at_acquisition
-from src.utils.config_loader import get_pixel_to_mm_factor, get_scan_extent_mm
+from src.utils.acquisition_metadata import get_scan_extent_mm, read_frames_lost_at_acquisition
+from src.utils.config_loader import get_pixel_to_mm_factor
 from src.core.image_io_operations import (
     load_image,
     load_flat_field_assets,
@@ -362,34 +362,8 @@ def process_frame_pair(
     return fused_df_frame, pair_diagnostics
 
 
-# --- _parse_image_filenames, _filter_image_df, _analyze_single_subtracted_image_global_thresh, _analyze_unsubtracted_locally, _compare_and_fuse_particle_dfs ---
+# --- _filter_image_df, _analyze_single_subtracted_image_global_thresh, _analyze_unsubtracted_locally, _compare_and_fuse_particle_dfs ---
 # These helper functions remain unchanged.
-def _parse_image_filenames(image_dir_path: str) -> Optional[pd.DataFrame]: # Unchanged
-    """Parse image filenames into a dataframe of metadata needed for Stage 1 processing."""
-    if not image_dir_path or not isinstance(image_dir_path, str):
-        logger.error(f"Invalid image_dir_path: {image_dir_path}"); return None
-    if not os.path.isdir(image_dir_path):
-        logger.error(f"Image directory not found: {image_dir_path}"); return None
-    pattern = re.compile(
-        r"^(?P<date>\d{8})_plate(?P<plate>\d+)_well(?P<well>\d+)_f(?P<frame>\d{5})_dpt(?P<dpt>[-+]?[0-9]*\.?[0-9]+)_fd(?P<fd_mm>[-+]?[0-9]*\.?[0-9]+)mm\.png$")
-    parsed_file_data = []
-    for filename in sorted(os.listdir(image_dir_path)):
-        if filename.lower().endswith(".png"):
-            match = pattern.match(filename)
-            if match:
-                try:
-                    groups = match.groupdict()
-                    parsed_file_data.append({
-                        "filename": filename, "date": groups["date"], "plate": int(groups["plate"]),
-                        "well": int(groups["well"]), "frame": int(groups["frame"]),
-                        "dpt": float(groups["dpt"]), "fd_mm": float(groups["fd_mm"]),
-                        "full_path": os.path.join(image_dir_path, filename)})
-                except ValueError as e: logger.warning(f"Parse error for '{filename}': {e}")
-    if not parsed_file_data: logger.warning(f"No matching images in {image_dir_path}"); return pd.DataFrame()
-    df = pd.DataFrame(parsed_file_data).sort_values(by="frame").reset_index(drop=True)
-    logger.info(f"Parsed {len(df)} images from {image_dir_path}.")
-    return df
-
 def _filter_image_df(df: pd.DataFrame, *, trim_to_last_fd0: bool) -> pd.DataFrame:
     """Trim the parsed image table to frames usable for pairing foreground/background.
 
@@ -1144,7 +1118,7 @@ def run_stage_01_initial_detection(
 
     general_well_masking_cfg = config_s1['well_masking']
 
-    images_df = _parse_image_filenames(image_dir_path)
+    images_df = parse_frame_filenames(image_dir_path)
     if images_df is None or images_df.empty: return None
 
     if bg_image_dir_path is None:
@@ -1162,7 +1136,7 @@ def run_stage_01_initial_detection(
         external_background_config = config_s1['external_background']
         images_df_filtered = _filter_image_df(images_df.copy(), trim_to_last_fd0=False)
         if images_df_filtered.empty: return None
-        bg_images_df = _parse_image_filenames(bg_image_dir_path)
+        bg_images_df = parse_frame_filenames(bg_image_dir_path)
         if bg_images_df is None or bg_images_df.empty:
             raise DataValidationError(f"No background images found in {bg_image_dir_path!r} for sample {sample_id}.")
         frame_pairs, fg_rows_with_bg_lost = _build_external_background_pairs(
@@ -1272,7 +1246,6 @@ def run_stage_01_initial_detection(
             else:
                 memory_frames = tracking_config.get('memory_frames')
                 search_range_mm = tracking_config.get('search_range_mm')
-            extent_mm = get_scan_extent_mm(config)
             tracked_df = run_particle_tracking(
                 final_sample_df, sample_id, tracking_config, memory_frames, search_range_mm
             )
@@ -1290,6 +1263,8 @@ def run_stage_01_initial_detection(
         tracks_for_figures_df = (
             tracked_df.dropna(subset=['track_id']) if 'track_id' in tracked_df.columns else pd.DataFrame()
         )
+        # Outside the tracking try-block: a frame that cannot be read must not pass as a tracking failure.
+        extent_mm = get_scan_extent_mm(config, image_dir_path)
         with figure_style(config):
             tracking_fig = _build_tracking_figure(tracks_for_figures_df, extent_mm) if not tracks_for_figures_df.empty else None
             tracking_xy_fig = _build_tracking_xy_figure(tracks_for_figures_df, extent_mm) if not tracks_for_figures_df.empty else None

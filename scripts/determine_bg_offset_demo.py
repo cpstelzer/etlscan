@@ -31,8 +31,8 @@ if str(REPO_ROOT) not in sys.path:
 from src.stages.stage_01_initial_detection import (
     _determine_bg_offset_for_fg_bg_pairs,
     _filter_image_df,
-    _parse_image_filenames,
 )
+from src.utils.path_helpers import parse_frame_filenames
 
 LOGGER = logging.getLogger(__name__)
 
@@ -47,7 +47,7 @@ def _configure_logging(verbose: bool) -> None:
 def _load_image_dataframe(image_dir: Path) -> pd.DataFrame:
     """Parse and filter the image metadata for the provided directory."""
 
-    parsed_df = _parse_image_filenames(str(image_dir))
+    parsed_df = parse_frame_filenames(str(image_dir))
     if parsed_df is None:
         raise RuntimeError("Failed to parse image filenames; see log for details.")
 

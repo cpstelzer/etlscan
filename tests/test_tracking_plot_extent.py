@@ -4,15 +4,19 @@
 Matplotlib autoscales to the data it is given, so a well whose organisms sit in
 one corner and barely move rendered zoomed onto that corner: the particle-free
 part of the arena was cropped away and no two wells shared a scale. The plots now
-pin their axes to the scan extent derived from config instead.
+pin their axes to the extent of the recording, read from its own frames.
 """
+import os
+
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 import pandas as pd
 import pytest
+from PIL import Image
 
-from src.utils.config_loader import get_scan_extent_mm
+from src.utils.acquisition_metadata import get_scan_extent_mm
+from src.utils.common_exceptions import DataValidationError
 from src.stages.stage_01_initial_detection import (
     _build_tracking_figure,
     _build_tracking_xy_figure,
@@ -48,17 +52,31 @@ def _limits_at_draw(ax):
     return ax.get_xlim(), ax.get_ylim()
 
 
-def test_scan_extent_derived_from_roi_optics_and_sweep():
-    config = {
-        'system': {'image_width_px': 1000, 'image_height_px': 500},
-        'stage_01_initial_detection': {
-            'tracking': {'pixel_size_um': 2.0, 'magnification': 0.5}
-        },
-        'acquisition': {'focusing': {'scan_height_mm': 3.2}},
-    }
+# Only the tracking optics: the config's camera ROI and scan height describe the rig as
+# set up now, not the recording, and must not be read (they would raise KeyError here).
+OPTICS_ONLY_CONFIG = {
+    'stage_01_initial_detection': {'tracking': {'pixel_size_um': 2.0, 'magnification': 0.5}}
+}
 
-    # 2.0 um at 0.5x = 4 um = 0.004 mm per pixel, over a 1000x500 px ROI.
-    assert get_scan_extent_mm(config) == pytest.approx((4.0, 2.0, 3.2))
+
+def _write_frame(directory, frame, fd_mm, width_px, height_px):
+    name = f"20251007_plate0_well19_f{frame:05d}_dpt{-2.0 + fd_mm / 2.25:.3f}_fd{fd_mm:.2f}mm.png"
+    Image.new('L', (width_px, height_px)).save(os.path.join(directory, name))
+
+
+def test_scan_extent_derived_from_recorded_frames(tmp_path):
+    # Zigzag sweep: the deepest plane is reached mid-run, not at the last frame.
+    for frame, fd_mm in enumerate([0.0, 0.6, 1.2, 0.6, 0.0]):
+        _write_frame(tmp_path, frame, fd_mm, width_px=1000, height_px=500)
+    (tmp_path / 'metadata_log.csv').write_text('# not a frame\n')
+
+    # 2.0 um at 0.5x = 4 um = 0.004 mm per pixel, over 1000x500 px frames; deepest plane 1.2 mm.
+    assert get_scan_extent_mm(OPTICS_ONLY_CONFIG, str(tmp_path)) == pytest.approx((4.0, 2.0, 1.2))
+
+
+def test_scan_extent_without_frames_fails(tmp_path):
+    with pytest.raises(DataValidationError, match="No acquisition frames"):
+        get_scan_extent_mm(OPTICS_ONLY_CONFIG, str(tmp_path))
 
 
 def test_stage1_3d_figure_spans_full_extent(corner_tracks_df):
