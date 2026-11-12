@@ -66,6 +66,11 @@ figure_style:
   marker_edge_width: 1.0
   axes_line_width: 1.5    # axes frame and tick marks
   tick_length: 6
+  # Track maps (Stage-1/2 tracks_3d/xy, reconstructed_trajectories_3d/xy) draw dozens of
+  # overlapping trajectories and ~10 in-focus points per track: at line_width/marker_size
+  # the points bury the lines. Thinner lines and small open rings keep each track legible.
+  track_line_width: 1.6
+  track_marker_size: 4
 
 # -----------------------------------------------------------------------------
 # Imaging geometry (frame dimensions + illumination source)

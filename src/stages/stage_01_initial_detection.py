@@ -29,7 +29,7 @@ from src.core.image_enhancement import subtract_images, apply_blur
 from src.core.masking_operations import mask_well_area, apply_mask
 from src.core.region_props_calculator import find_contours, calculate_contour_measurements, filter_contours_by_area
 from src.core.segmentation import generate_binary_mask_from_float_image, assess_subtracted_foreground
-from src.visualization.figure_style import figure_style
+from src.visualization.figure_style import draw_floor_shadow, plot_track_line, track_figure_style
 from src.core.well_analysis import (
     create_well_mask_black_plate,
     create_well_mask_with_fallback,
@@ -932,7 +932,9 @@ def _build_tracking_figure(
 
     Axes are pinned to ``extent_mm`` (the full imaged volume) rather than
     autoscaled to the tracks, so the plot always shows the whole field of view
-    and Z sweep and stays comparable across samples.
+    and Z sweep and stays comparable across samples. Each track's grey copy on
+    the floor shows its x/y position. Build and save inside
+    :func:`track_figure_style`, which sets the line sizes.
     """
     if tracked_df.empty:
         return None
@@ -943,8 +945,11 @@ def _build_tracking_figure(
     ax.set_xlabel("x (mm)", labelpad=14)
     ax.set_ylabel("y (mm)", labelpad=14)
     ax.set_zlabel("z (mm)", labelpad=14)
-    for _, track in tracked_df.groupby('track_id'):
-        ax.plot(track['x_mm'], track['y_mm'], track['z_mm'])
+    tracks = [track for _, track in tracked_df.groupby('track_id')]
+    for track in tracks:
+        draw_floor_shadow(ax, track['x_mm'].values, track['y_mm'].values)
+    for rank, track in enumerate(tracks):
+        plot_track_line(ax, (track['x_mm'], track['y_mm'], track['z_mm']), rank)
     ax.set_xlim(0, x_max_mm)
     ax.set_ylim(0, y_max_mm)
     ax.set_zlim(0, z_max_mm)
@@ -966,7 +971,8 @@ def _build_tracking_xy_figure(
 
     Axes are pinned to the full field of view from ``extent_mm``; the aspect is
     adjusted via the axes box because the ``datalim`` alternative would stretch
-    those fixed limits back out to fill the box.
+    those fixed limits back out to fill the box. Tracks keep the colours they
+    have in the 3D view.
     """
     if tracked_df.empty:
         return None
@@ -976,8 +982,8 @@ def _build_tracking_xy_figure(
     ax.set_title("XY projection of particle tracks")
     ax.set_xlabel("x (mm)")
     ax.set_ylabel("y (mm)")
-    for _, track in tracked_df.groupby('track_id'):
-        ax.plot(track['x_mm'], track['y_mm'])
+    for rank, (_, track) in enumerate(tracked_df.groupby('track_id')):
+        plot_track_line(ax, (track['x_mm'], track['y_mm']), rank)
     ax.set_xlim(0, x_max_mm)
     ax.set_ylim(0, y_max_mm)
     ax.set_aspect('equal', adjustable='box')
@@ -1265,7 +1271,7 @@ def run_stage_01_initial_detection(
         )
         # Outside the tracking try-block: a frame that cannot be read must not pass as a tracking failure.
         extent_mm = get_scan_extent_mm(config, image_dir_path)
-        with figure_style(config):
+        with track_figure_style(config):
             tracking_fig = _build_tracking_figure(tracks_for_figures_df, extent_mm) if not tracks_for_figures_df.empty else None
             tracking_xy_fig = _build_tracking_xy_figure(tracks_for_figures_df, extent_mm) if not tracks_for_figures_df.empty else None
             if tracking_fig is not None:

@@ -34,7 +34,13 @@ from src.core.particle_operations import (
     normalized_crop_config,
 )
 from src.core.segmentation import segment_main_body_from_image_float
-from src.visualization.figure_style import figure_style
+from src.visualization.figure_style import (
+    draw_floor_shadow,
+    figure_style,
+    plot_focus_points,
+    plot_track_line,
+    track_figure_style,
+)
 from src.core.feature_calculators.quality_calculator import calculate_quality_features
 from src.core.feature_calculators.morphology_calculator import calculate_detailed_body_morphology
 from src.core.feature_calculators.shape_descriptors import calculate_shape_descriptors
@@ -163,7 +169,8 @@ def run_stage_02_characterization(
             area_col='main_area_filled'
         )
 
-    # save (figure_style governs the focus-diagnostic plots written here)
+    # save (figure_style governs the focus-diagnostic plots written here; the
+    # reconstructed-trajectory maps inside switch to track_figure_style)
     with figure_style(config):
         saved_csv_path = emit_stage2_artifacts(
             comprehensive_df,
@@ -178,6 +185,7 @@ def run_stage_02_characterization(
             focus_cfg,
             get_scan_extent_mm(config, image_dir_path),
             bool(cropping_config['save_all_particle_crops']),
+            config,
         )
 
     logger.info(f"--- Stage 2: Characterization for {sample_id} COMPLETED ---")
@@ -388,9 +396,14 @@ def emit_focus_artifacts(
     extent_mm: Tuple[float, float, float],
     crops_dir: Optional[str],
     sample_id: str,
-    output_dir_stage2: str
+    output_dir_stage2: str,
+    config: Dict[str, Any]
 ) -> None:
-    """Save focus-filtered CSVs and optional visual diagnostics."""
+    """Save focus-filtered CSVs and optional visual diagnostics.
+
+    The reconstructed-trajectory maps are drawn in ``config``'s track-map style
+    (:func:`track_figure_style`), shared with the Stage-1 track maps.
+    """
     if filtered_df is None or diagnostics_df is None:
         return
 
@@ -416,28 +429,29 @@ def emit_focus_artifacts(
             max_tracks
         )
 
-        plot_3d_reconstructed(
-            comprehensive_df,
-            filtered_df,
-            focus_cfg.get('track_column', 'track_id'),
-            focus_cfg.get('frame_column', 'frame'),
-            FOCUS_Z_COLUMN,
-            os.path.join(focus_plots_dir, 'reconstructed_trajectories_3d.png'),
-            max_tracks,
-            focus_cfg.get('trajectory_smoothing_factor', 0.5),
-            focus_cfg.get('min_points_for_spline', 5),
-            extent_mm
-        )
+        with track_figure_style(config):
+            plot_3d_reconstructed(
+                comprehensive_df,
+                filtered_df,
+                focus_cfg.get('track_column', 'track_id'),
+                focus_cfg.get('frame_column', 'frame'),
+                FOCUS_Z_COLUMN,
+                os.path.join(focus_plots_dir, 'reconstructed_trajectories_3d.png'),
+                max_tracks,
+                focus_cfg.get('trajectory_smoothing_factor', 0.5),
+                focus_cfg.get('min_points_for_spline', 5),
+                extent_mm
+            )
 
-        plot_xy_reconstructed(
-            comprehensive_df,
-            filtered_df,
-            focus_cfg.get('track_column', 'track_id'),
-            focus_cfg.get('frame_column', 'frame'),
-            os.path.join(focus_plots_dir, 'reconstructed_trajectories_xy.png'),
-            max_tracks,
-            extent_mm
-        )
+            plot_xy_reconstructed(
+                comprehensive_df,
+                filtered_df,
+                focus_cfg.get('track_column', 'track_id'),
+                focus_cfg.get('frame_column', 'frame'),
+                os.path.join(focus_plots_dir, 'reconstructed_trajectories_xy.png'),
+                max_tracks,
+                extent_mm
+            )
 
         plot_diagnostics_summary(
             diagnostics_df,
@@ -491,7 +505,8 @@ def emit_stage2_artifacts(
     image_dir_path: str,
     focus_cfg: Dict[str, Any],
     extent_mm: Tuple[float, float, float],
-    save_all_particle_crops_flag: bool
+    save_all_particle_crops_flag: bool,
+    config: Dict[str, Any]
 ) -> Optional[str]:
     """Persist Stage 2 outputs, including crops, focus artifacts, and summary CSVs."""
     os.makedirs(output_dir_stage2, exist_ok=True)
@@ -505,7 +520,7 @@ def emit_stage2_artifacts(
 
     emit_focus_artifacts(
         filtered_df, diagnostics_df, comprehensive_df, focus_cfg, extent_mm,
-        crops_dir, sample_id, output_dir_stage2
+        crops_dir, sample_id, output_dir_stage2, config
     )
     emit_final_particle_crops(final_particles_df, image_dir_path, crop_config, sample_id, output_dir_stage2)
 
@@ -1085,9 +1100,11 @@ def plot_3d_reconstructed(
     The trajectory line follows a continuous depth estimate: the precomputed
     ``z_reconstructed`` column when present (so the figure matches the saved
     CSV), otherwise an on-the-fly reconstruction from the in-focus knots via
-    :func:`reconstruct_track_depth`. In-focus points are scattered at their
-    measured depth. ``smoothing_factor`` and ``min_points_for_spline`` control
-    the fallback reconstruction.
+    :func:`reconstruct_track_depth`. In-focus points are marked as open rings at
+    their measured depth, and each track's grey copy on the floor shows its x/y
+    position. ``smoothing_factor`` and ``min_points_for_spline`` control the
+    fallback reconstruction. Call inside :func:`track_figure_style`, which sets
+    the line and marker sizes.
 
     Axes are pinned to ``extent_mm`` (the full imaged volume) rather than
     autoscaled to the tracks, so the plot always shows the whole field of view
@@ -1106,22 +1123,12 @@ def plot_3d_reconstructed(
     if track_lengths.empty:
         return None
 
-    from mpl_toolkits.mplot3d import Axes3D  # noqa: F401
-    fig = plt.figure(figsize=(7.5, 7))
-    ax = fig.add_subplot(111, projection='3d')
-
-    cmap = plt.get_cmap('tab20')
-    ncol = max(1, min(20, len(track_ids)))
-    plotted = 0
-
-    for idx, tid in enumerate(track_ids):
+    tracks = []
+    for tid in track_ids:
         track_df = df[df[track_col] == tid].sort_values(frame_col)
         selected_df = filtered_df[filtered_df[track_col] == tid]
         if track_df.empty or selected_df.empty:
             continue
-
-        x_vals = track_df[x_mm_col].values
-        y_vals = track_df[y_mm_col].values
 
         # Depth line: prefer the persisted per-frame reconstruction so the figure
         # matches the saved CSV; fall back to reconstructing from the in-focus
@@ -1138,23 +1145,28 @@ def plot_3d_reconstructed(
                 smoothing_factor,
                 min_points_for_spline
             )
+        tracks.append((track_df, selected_df, z_line))
 
-        color = cmap(idx % ncol)
-        ax.plot(x_vals, y_vals, z_line, alpha=0.8, color=color)
-        ax.plot(
-            selected_df[x_mm_col].values,
-            selected_df[y_mm_col].values,
-            selected_df[z_col].values,
-            marker='o',
-            linestyle='none',
-            color=color,
-            markeredgecolor='k'
-        )
-        plotted += 1
-
-    if plotted == 0:
-        plt.close(fig)
+    if not tracks:
         return None
+
+    from mpl_toolkits.mplot3d import Axes3D  # noqa: F401
+    fig = plt.figure(figsize=(7.5, 7))
+    ax = fig.add_subplot(111, projection='3d')
+
+    # Floor shadows first, then every line, then every in-focus ring, so no later
+    # track's line covers an earlier track's rings.
+    for track_df, _, _ in tracks:
+        draw_floor_shadow(ax, track_df[x_mm_col].values, track_df[y_mm_col].values)
+    for rank, (track_df, _, z_line) in enumerate(tracks):
+        plot_track_line(ax, (track_df[x_mm_col].values, track_df[y_mm_col].values, z_line), rank)
+    for rank, (_, selected_df, _) in enumerate(tracks):
+        plot_focus_points(
+            ax,
+            (selected_df[x_mm_col].values, selected_df[y_mm_col].values, selected_df[z_col].values),
+            rank
+        )
+    plotted = len(tracks)
 
     x_max_mm, y_max_mm, z_max_mm = extent_mm
     ax.set_xlim(0, x_max_mm)
@@ -1189,7 +1201,8 @@ def plot_xy_reconstructed(
     and in-focus selections on the true XY plane. The 3D view is subject to
     perspective distortion (a point's screen position depends on its Z), which
     can make the XY layout look shifted versus Stage 1; this projection removes
-    that ambiguity so the two stages can be compared point-for-point.
+    that ambiguity so the two stages can be compared point-for-point. Tracks keep
+    the colours they have in the 3D view.
 
     Axes are pinned to the full field of view from ``extent_mm``; the aspect is
     adjusted via the axes box because the ``datalim`` alternative would stretch
@@ -1208,39 +1221,25 @@ def plot_xy_reconstructed(
     if track_lengths.empty:
         return None
 
+    tracks = []
+    for tid in track_ids:
+        track_df = df[df[track_col] == tid].sort_values(frame_col)
+        selected_df = filtered_df[filtered_df[track_col] == tid]
+        if not track_df.empty and not selected_df.empty:
+            tracks.append((track_df, selected_df))
+
+    if not tracks:
+        return None
+
     fig = plt.figure(figsize=(7, 7))
     ax = fig.add_subplot(111)
 
-    cmap = plt.get_cmap('tab20')
-    ncol = max(1, min(20, len(track_ids)))
-    plotted = 0
-
-    for idx, tid in enumerate(track_ids):
-        track_df = df[df[track_col] == tid].sort_values(frame_col)
-        selected_df = filtered_df[filtered_df[track_col] == tid]
-        if track_df.empty or selected_df.empty:
-            continue
-
-        color = cmap(idx % ncol)
-        ax.plot(
-            track_df[x_mm_col].values,
-            track_df[y_mm_col].values,
-            alpha=0.8,
-            color=color
-        )
-        ax.plot(
-            selected_df[x_mm_col].values,
-            selected_df[y_mm_col].values,
-            marker='o',
-            linestyle='none',
-            color=color,
-            markeredgecolor='k'
-        )
-        plotted += 1
-
-    if plotted == 0:
-        plt.close(fig)
-        return None
+    # Same ranks, hence colours, as the 3D view; rings drawn after every line.
+    for rank, (track_df, _) in enumerate(tracks):
+        plot_track_line(ax, (track_df[x_mm_col].values, track_df[y_mm_col].values), rank)
+    for rank, (_, selected_df) in enumerate(tracks):
+        plot_focus_points(ax, (selected_df[x_mm_col].values, selected_df[y_mm_col].values), rank)
+    plotted = len(tracks)
 
     x_max_mm, y_max_mm, _ = extent_mm
     ax.set_xlim(0, x_max_mm)
