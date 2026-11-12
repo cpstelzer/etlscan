@@ -32,6 +32,7 @@ from src.core.segmentation import generate_binary_mask_from_float_image, assess_
 from src.visualization.figure_style import draw_floor_shadow, plot_track_line, track_figure_style
 from src.core.well_analysis import (
     create_well_mask_black_plate,
+    create_rim_excluded_well_mask,
     create_well_mask_with_fallback,
     match_low_frequency_illumination,
     match_well_brightness
@@ -63,20 +64,51 @@ def prepare_masked_foreground(
     bg_img_uint8: np.ndarray,
     *,
     enable_brightness_adjustment: bool,
-    brightness_config: Dict[str, Any],
+    well_analysis_config: Dict[str, Any],
     well_masking_cfg: Dict[str, Any],
     system_cfg: Dict[str, Any],
     source_illumination: str
 ) -> Dict[str, Any]:
-    """Prepare FG/BG images and reusable masks for subtraction and local analysis."""
+    """Prepare FG/BG images and reusable masks for subtraction and local analysis.
+
+    Shared by the batch (both background sources) and the realtime Stage 1.
+    ``well_analysis_config`` is ``stage_01_initial_detection.black_plate_well_analysis``.
+    Each frame's well mask (:func:`create_well_mask_with_fallback`) serves the brightness
+    matching and the well-rim exclusion. ``subtraction_roi_mask`` is where the subtracted
+    analysis searches: inside both frames' wells, ``rim_exclusion_px`` away from either
+    rim (:func:`create_rim_excluded_well_mask`), and inside ``well_mask``. ``well_mask``
+    is the optional circular mask of ``well_masking`` (None unless ``create_mask``),
+    which also shapes the unsubtracted frame.
+
+    Raises:
+        ImageProcessingError: a frame has no well mask (well detection failed and the
+            full-frame fallback is disabled).
+    """
     fg_for_sub = fg_img_uint8.copy()
     bg_for_sub = bg_img_uint8.copy()
+
+    well_identification_config = well_analysis_config['well_identification']
+    fg_well_mask_uint8 = create_well_mask_with_fallback(fg_img_uint8, well_identification_config)
+    bg_well_mask_uint8 = create_well_mask_with_fallback(bg_img_uint8, well_identification_config)
+    if fg_well_mask_uint8 is None or bg_well_mask_uint8 is None:
+        raise ImageProcessingError(
+            "No well mask could be built for the "
+            f"{'FG' if fg_well_mask_uint8 is None else 'BG'} frame (well detection failed and "
+            "well_identification.fallback_full_frame_on_failure is disabled), so the well rim "
+            "cannot be excluded."
+        )
+    rim_excluded_well_mask_uint8 = create_rim_excluded_well_mask(
+        [fg_well_mask_uint8, bg_well_mask_uint8],
+        float(well_analysis_config['rim_exclusion_px']),
+    )
 
     if enable_brightness_adjustment:
         _, bg_for_sub = match_well_brightness(
             fg_img_uint8,
             bg_img_uint8,
-            brightness_config
+            well_analysis_config,
+            fg_well_mask_uint8=fg_well_mask_uint8,
+            bg_well_mask_uint8=bg_well_mask_uint8,
         )
 
     well_mask_uint8 = None
@@ -106,6 +138,10 @@ def prepare_masked_foreground(
         "fg_for_sub": fg_for_sub,
         "bg_for_sub": bg_for_sub,
         "well_mask": well_mask_uint8,
+        "subtraction_roi_mask": (
+            rim_excluded_well_mask_uint8 if well_mask_uint8 is None
+            else cv2.bitwise_and(rim_excluded_well_mask_uint8, well_mask_uint8)
+        ),
         "unsub_prepared": unsub_prepared
     }
 
@@ -230,36 +266,22 @@ def _prepare_external_background(
     fg_img_uint8: np.ndarray,
     bg_img_uint8: np.ndarray,
     external_background_config: Dict[str, Any],
-    well_identification_config: Dict[str, Any],
-) -> Tuple[np.ndarray, np.ndarray]:
-    """Adapt an external (separately recorded, specimen-free) BG frame to its FG frame.
+) -> np.ndarray:
+    """Give an external (separately recorded, specimen-free) BG frame its FG frame's illumination.
 
     External BG runs are recorded minutes to an hour apart from the FG run, so the
-    illumination drifts as a smooth spatial gradient and the well rim / meniscus edge
-    shifts slightly; both would flood the shared subtracted-foreground gate. Returns
-    the BG with the FG's low-frequency illumination, and the BG well mask (shared
-    well-mask helper, built on the specimen-free BG) inset by ``rim_exclusion_px``.
+    illumination drifts as a smooth spatial gradient that would flood the shared
+    subtracted-foreground gate. Returns the BG with the FG's low-frequency illumination.
+    The slight shift of the well rim / meniscus edge between the runs is covered by the
+    well-rim exclusion shared with the time-shift mode (:func:`prepare_masked_foreground`).
     Time-shift pairs come from the same recording and never take this step.
     """
-    well_mask_uint8 = create_well_mask_with_fallback(bg_img_uint8, well_identification_config)
-    if well_mask_uint8 is None:
-        raise ImageProcessingError(
-            "External background: no well mask could be built from the BG frame "
-            "(well detection failed and the full-frame fallback is disabled)."
-        )
-    # A distance transform is an erosion by a Euclidean disk; on full-resolution frames it is
-    # ~14x faster than an elliptical erosion kernel of this size.
-    distance_to_edge_float = cv2.distanceTransform((well_mask_uint8 > 0).astype(np.uint8), cv2.DIST_L2, 5)
-    rim_excluded_mask_uint8 = np.where(
-        distance_to_edge_float > float(external_background_config['rim_exclusion_px']), 255, 0
-    ).astype(np.uint8)
-    bg_matched_uint8 = match_low_frequency_illumination(
+    return match_low_frequency_illumination(
         fg_img_uint8,
         bg_img_uint8,
         int(external_background_config['illumination_match_downsample']),
         int(external_background_config['illumination_match_median_kernel_px']),
     )
-    return bg_matched_uint8, rim_excluded_mask_uint8
 
 
 def process_frame_pair(
@@ -274,8 +296,8 @@ def process_frame_pair(
     The diagnostics (None when an image could not be loaded) record the FG/BG files and
     the shared foreground gate's verdict for the per-sample pairing audit. With
     ``config['external_background_config']`` set, the BG is first adapted by
-    :func:`_prepare_external_background` and the subtracted analysis is restricted to
-    its rim-excluded well mask.
+    :func:`_prepare_external_background`. In both modes the subtracted analysis is
+    restricted to the rim-excluded well area of :func:`prepare_masked_foreground`.
     """
     masks = masks or {}
     fg_filepath = fg_row['full_path']
@@ -293,41 +315,31 @@ def process_frame_pair(
         fg_img_ffc = fg_img
         bg_img_ffc = bg_img
 
-    rim_excluded_mask_uint8 = None
     external_background_config = config['external_background_config']
     if external_background_config is not None:
-        bg_img_ffc, rim_excluded_mask_uint8 = _prepare_external_background(
-            fg_img_ffc,
-            bg_img_ffc,
-            external_background_config,
-            config['config_black_plate_well']['well_identification'],
-        )
+        bg_img_ffc = _prepare_external_background(fg_img_ffc, bg_img_ffc, external_background_config)
 
     prep_data = prepare_masked_foreground(
         fg_img_ffc,
         bg_img_ffc,
         enable_brightness_adjustment=config['enable_brightness_adjustment'],
-        brightness_config=config['config_black_plate_well'],
+        well_analysis_config=config['config_black_plate_well'],
         well_masking_cfg=config['well_masking'],
         system_cfg=config['system_cfg'],
         source_illumination=config['source_image_illumination']
     )
-    general_well_mask_for_roi_uint8 = prep_data["well_mask"]
-    if general_well_mask_for_roi_uint8 is None:
-        general_well_mask_for_roi_uint8 = masks.get("well_mask")
-    elif masks.get("well_mask") is None:
-        masks["well_mask"] = general_well_mask_for_roi_uint8
-    if rim_excluded_mask_uint8 is not None:
-        general_well_mask_for_roi_uint8 = (
-            rim_excluded_mask_uint8 if general_well_mask_for_roi_uint8 is None
-            else cv2.bitwise_and(general_well_mask_for_roi_uint8, rim_excluded_mask_uint8)
-        )
+    subtraction_roi_mask_uint8 = prep_data["subtraction_roi_mask"]
+    if prep_data["well_mask"] is not None:
+        masks.setdefault("well_mask", prep_data["well_mask"])
+    elif masks.get("well_mask") is not None:
+        # This frame's circular well mask failed: keep the sample's earlier one.
+        subtraction_roi_mask_uint8 = cv2.bitwise_and(subtraction_roi_mask_uint8, masks["well_mask"])
     # Subtract the prepared background from the prepared foreground to isolate particles
     # absent from the background (moving ones for time-shift pairs, all for external BG).
     subtracted_img_uint8 = subtract_images(prep_data["fg_for_sub"], prep_data["bg_for_sub"])
     sub_analysis = analyze_subtracted_image(
         subtracted_img_uint8,
-        general_well_mask_for_roi_uint8,
+        subtraction_roi_mask_uint8,
         config['particle_analysis_subtracted_config'],
         config['global_threshold_config'],
         config['sample_id'],

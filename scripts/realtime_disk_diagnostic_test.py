@@ -195,7 +195,7 @@ def run() -> int:
         fg_ffc,
         bg_ffc,
         enable_brightness_adjustment=bool(cfg.stage1_config["enable_brightness_adjustment"]),
-        brightness_config=cfg.stage1_config["config_black_plate_well"],
+        well_analysis_config=cfg.stage1_config["config_black_plate_well"],
         well_masking_cfg=cfg.stage1_config["well_masking"],
         system_cfg=cfg.stage1_config["system_cfg"],
         source_illumination=str(cfg.stage1_config["source_image_illumination"]).strip().lower(),

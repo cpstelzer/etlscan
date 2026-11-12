@@ -8,6 +8,7 @@ import pytest
 cv2 = pytest.importorskip("cv2", reason="OpenCV required.", exc_type=ImportError)
 
 from src.core.well_analysis import (
+    create_rim_excluded_well_mask,
     create_well_mask_black_plate,
     create_well_mask_with_fallback,
     create_full_frame_bright_mask,
@@ -207,6 +208,65 @@ def test_create_well_mask_with_fallback_uses_full_frame_mask(full_frame_fg, full
 def test_create_well_mask_with_fallback_disabled_returns_none(full_frame_fg, full_analysis_config):
     well_identification = dict(full_analysis_config["well_identification"], fallback_full_frame_on_failure=False)
     assert create_well_mask_with_fallback(full_frame_fg, well_identification) is None
+
+
+def test_match_well_brightness_with_given_masks_equals_own_masks(fg_image, bg_image_brighter, full_analysis_config):
+    well_identification = full_analysis_config["well_identification"]
+    own = match_well_brightness(fg_image, bg_image_brighter, full_analysis_config)
+    given = match_well_brightness(
+        fg_image, bg_image_brighter, full_analysis_config,
+        fg_well_mask_uint8=create_well_mask_with_fallback(fg_image, well_identification),
+        bg_well_mask_uint8=create_well_mask_with_fallback(bg_image_brighter, well_identification),
+    )
+    assert np.array_equal(own[1], given[1])
+    assert not np.array_equal(given[1], bg_image_brighter)  # the BG was in fact adjusted
+
+
+# --- Well-rim exclusion (Stage 1, both background sources) ----------------------
+
+def _disk_mask(radius, shape=(400, 400), center=(200, 200)):
+    mask = np.zeros(shape, dtype=np.uint8)
+    cv2.circle(mask, center, radius, 255, -1)
+    return mask
+
+
+def test_rim_excluded_well_mask_insets_the_rim():
+    rim_mask = create_rim_excluded_well_mask([_disk_mask(150)], 20)
+    assert rim_mask.dtype == np.uint8
+    assert rim_mask[200, 200] == 255           # well interior kept
+    assert rim_mask[200, 200 + 140] == 0       # 10 px inside the rim: excluded
+    assert rim_mask[200, 200 + 125] == 255     # 25 px inside the rim: kept
+
+
+def test_rim_excluded_well_mask_excludes_the_rim_of_every_frame():
+    # FG and BG show different focal planes, so focus breathing puts their rims at
+    # different radii; the inset counts from whichever rim lies further in.
+    rim_mask = create_rim_excluded_well_mask([_disk_mask(150), _disk_mask(130)], 20)
+    assert rim_mask[200, 200 + 115] == 0       # 15 px inside the smaller (BG) rim
+    assert rim_mask[200, 200 + 105] == 255     # 25 px inside it
+
+
+def test_rim_excluded_well_mask_ignores_dark_specimens_inside_the_well():
+    # A full-frame bright-pixel fallback mask leaves out a dark specimen: it is no rim.
+    well_mask = np.full((400, 400), 255, dtype=np.uint8)
+    well_mask[:, :50] = 0                      # dark border on the left
+    well_mask[190:210, 190:210] = 0            # dark specimen in the middle
+    rim_mask = create_rim_excluded_well_mask([well_mask], 30)
+    assert rim_mask[200, 215] == 255           # next to the specimen: kept
+    assert rim_mask[200, 70] == 0              # 20 px from the dark border: excluded
+    assert rim_mask[200, 100] == 255
+
+
+def test_rim_excluded_well_mask_without_rim_keeps_everything():
+    whole_frame_mask = np.full((100, 100), 255, dtype=np.uint8)
+    assert np.all(create_rim_excluded_well_mask([whole_frame_mask], 60) == 255)
+
+
+def test_rim_excluded_well_mask_rejects_invalid_input():
+    with pytest.raises(ImageProcessingError):
+        create_rim_excluded_well_mask([], 20)
+    with pytest.raises(ImageProcessingError):
+        create_rim_excluded_well_mask([_disk_mask(50, (200, 200), (100, 100)), _disk_mask(150)], 20)
 
 
 # --- Low-frequency illumination match (external background) --------------------
