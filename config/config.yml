@@ -321,9 +321,9 @@ stage_01_initial_detection:
   # --input_batch_dir is the experiment root holding <fg_subdir>/ and <bg_subdir>/ with
   # identically named sample folders. Pairs match by frame index + focal plane (strict) and
   # the two runs' image-defining metadata must agree. Because the runs lie minutes apart,
-  # each BG frame first gets the FG's low-frequency illumination and the well rim is excluded;
-  # everything else (segmentation.subtracted_foreground gate, detection, tracking) is shared
-  # with the time-shift mode. Read only in external mode.
+  # each BG frame first gets the FG's low-frequency illumination; everything else (well-rim
+  # exclusion, segmentation.subtracted_foreground gate, detection, tracking) is shared with
+  # the time-shift mode. Read only in external mode.
   external_background:
     fg_subdir: "fg"
     bg_subdir: "bg"
@@ -331,8 +331,6 @@ stage_01_initial_detection:
     illumination_match_downsample: 8
     # ... with this odd kernel (downsampled px; 31 x 8 = 248 px full-res, >> organism size).
     illumination_match_median_kernel_px: 31
-    # Inset (px) of the BG well mask: drops the slightly shifted well rim / meniscus edge.
-    rim_exclusion_px: 60
     # A sample fails when more of its frames than this cannot be subtracted: they trip the
     # subtracted-foreground guard (the BG run does not show the same scene, e.g. a moved
     # dish), or their BG frame is missing and the BG metadata_log.csv records it as lost at
@@ -357,6 +355,15 @@ stage_01_initial_detection:
     radius_fraction: 0.75
   black_plate_well_analysis:
     enable_brightness_adjustment: true
+    # Well-rim exclusion (both background sources, batch and realtime): particles are
+    # searched only inside the FG and the BG well mask, at least this far (px) from the
+    # rim. The rim's image position moves with the focal plane (focus breathing: the well
+    # radius grows ~100 px from fd 0 to 11.2 mm on 3600 px frames) and differs between
+    # an FG frame and its time-shifted BG frame, and the rim edge is sharp near the sweep
+    # start. Without the inset the rim survives the subtraction, is linked into animal
+    # tracks and yields false Stage-2 focus peaks; with external BG it also drops the
+    # slightly shifted rim / meniscus edge between the two runs.
+    rim_exclusion_px: 60
     well_identification:
       morph_kernel_size: 9
       low_threshold_value: 10
@@ -463,6 +470,18 @@ stage_02_characterization:
     max_tracks_to_plot: 15
     trajectory_smoothing_factor: 0.5   # 3D depth spline: 0 interpolates, larger smooths more (unitless)
     min_points_for_spline: 5           # tracks with fewer in-focus points get a constant mean depth
+    # Depth knots (the z of each in-focus selection) that disagree with every neighbouring
+    # knot of their track by more than tolerance_planes focal planes plus
+    # max_vertical_speed_mm_s times the time between them stay out of the depth spline
+    # (flagged depth_knot_speed_outlier in filtered_in_focus.csv). Such a lone knot is a
+    # focus peak of another object (e.g. the well rim) or an identity swap, not a dive:
+    # animals here swim ~1 mm/s in xy (90th percentile 1.5 mm/s), while false knots implied
+    # 6-10 mm/s. tolerance_planes covers the plane quantisation of two knots (a peak can sit
+    # one plane off its object). Time comes from acquisition.camera.fps, as in Stage 1.
+    # Tracks with fewer than 3 knots are not gated (no neighbour majority).
+    depth_knot_speed_gate:
+      max_vertical_speed_mm_s: 1.5
+      tolerance_planes: 2
     save_plots: true
     crop_filename_prefix: null
 

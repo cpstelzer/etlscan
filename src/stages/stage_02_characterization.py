@@ -153,6 +153,11 @@ def run_stage_02_characterization(
     # focus filter
     filtered_df, diagnostics_df = select_focused_tracks(comprehensive_df, focus_cfg)
 
+    # flag in-focus depths that no neighbouring knot of their track supports (same
+    # recording frame rate source as the Stage-1 background offset)
+    filtered_df = flag_depth_knot_speed_outliers(
+        filtered_df, comprehensive_df, focus_cfg, float(config['acquisition']['camera']['fps'])
+    )
     # reconstruct continuous per-frame depth (z) from the sparse in-focus points
     comprehensive_df = add_reconstructed_depth(comprehensive_df, filtered_df, focus_cfg)
     # carry that per-frame depth onto the in-focus selections so it also reaches
@@ -999,6 +1004,133 @@ def reconstruct_track_depth(
     return np.full(frames.shape, float(np.mean(knot_z)), dtype=float)
 
 
+DEPTH_KNOT_SPEED_GATE_KEYS = ('max_vertical_speed_mm_s', 'tolerance_planes')
+DEPTH_KNOT_SPEED_OUTLIER_COLUMN = 'depth_knot_speed_outlier'
+
+
+def _depth_knot_speed_gate_settings(focus_cfg: Dict[str, Any]) -> Dict[str, float]:
+    """Return the validated ``focussed_particles.depth_knot_speed_gate`` settings (fail fast)."""
+    gate_cfg = focus_cfg.get('depth_knot_speed_gate')
+    if not isinstance(gate_cfg, dict):
+        raise ConfigError(
+            "stage_02_characterization.focussed_particles.depth_knot_speed_gate must be a mapping "
+            f"with the keys {', '.join(DEPTH_KNOT_SPEED_GATE_KEYS)}."
+        )
+    missing = [key for key in DEPTH_KNOT_SPEED_GATE_KEYS if key not in gate_cfg]
+    if missing:
+        raise ConfigError(f"Missing focussed_particles.depth_knot_speed_gate keys: {', '.join(missing)}")
+    settings = {key: float(gate_cfg[key]) for key in DEPTH_KNOT_SPEED_GATE_KEYS}
+    if not settings['max_vertical_speed_mm_s'] > 0:
+        raise ConfigError(
+            f"depth_knot_speed_gate.max_vertical_speed_mm_s must be > 0, got {gate_cfg['max_vertical_speed_mm_s']!r}"
+        )
+    if not settings['tolerance_planes'] >= 0:
+        raise ConfigError(f"depth_knot_speed_gate.tolerance_planes must be >= 0, got {gate_cfg['tolerance_planes']!r}")
+    return settings
+
+
+def find_depth_knot_speed_outliers(
+    knot_frames: np.ndarray,
+    knot_z: np.ndarray,
+    frame_rate_fps: float,
+    focal_step_mm: float,
+    focus_cfg: Dict[str, Any]
+) -> np.ndarray:
+    """Flag the depth knots of one track that no neighbouring knot supports.
+
+    ``knot_frames`` (strictly increasing) and ``knot_z`` hold one knot per frame. Two
+    neighbouring knots disagree when their depths differ by more than
+    ``tolerance_planes`` focal planes plus ``max_vertical_speed_mm_s`` times the time
+    between them (``focussed_particles.depth_knot_speed_gate``). A knot that disagrees
+    with each of its neighbours (an end knot has one) is flagged: such a lone depth is a
+    focus peak of another object in the crop, e.g. the well rim, or a frame of another
+    animal after a Stage-1 identity swap, not a dive and return of the tracked animal.
+    Consecutive knots that agree with each other are kept, so a swapped segment of two
+    or more knots stays; the knots alone cannot tell it from a real excursion. Tracks
+    with fewer than 3 knots have no neighbour majority and get no flag.
+
+    Returns a boolean array aligned with ``knot_z`` (True = outlier).
+
+    Raises:
+        DataValidationError: mismatched inputs, frames not strictly increasing, or a
+            non-positive frame rate or focal step.
+    """
+    settings = _depth_knot_speed_gate_settings(focus_cfg)
+    knot_frames = np.asarray(knot_frames, dtype=float)
+    knot_z = np.asarray(knot_z, dtype=float)
+    if knot_frames.shape != knot_z.shape or knot_z.ndim != 1:
+        raise DataValidationError(
+            f"knot_frames and knot_z must be 1D arrays of one length, got {knot_frames.shape} and {knot_z.shape}"
+        )
+    if not (np.isfinite(frame_rate_fps) and frame_rate_fps > 0):
+        raise DataValidationError(f"frame_rate_fps must be a positive number, got {frame_rate_fps!r}")
+    if not (np.isfinite(focal_step_mm) and focal_step_mm > 0):
+        raise DataValidationError(f"focal_step_mm must be a positive number, got {focal_step_mm!r}")
+    if np.any(np.diff(knot_frames) <= 0):
+        raise DataValidationError("Depth knots must be sorted by frame, one knot per frame.")
+
+    outlier = np.zeros(knot_z.shape, dtype=bool)
+    if knot_z.size < 3:
+        return outlier
+    allowed_change_mm = (
+        settings['tolerance_planes'] * focal_step_mm
+        + settings['max_vertical_speed_mm_s'] * np.diff(knot_frames) / frame_rate_fps
+    )
+    gap_disagrees = np.abs(np.diff(knot_z)) > allowed_change_mm   # gap i lies between knots i and i + 1
+    disagrees_with_previous = np.concatenate([[True], gap_disagrees])  # a missing neighbour cannot support
+    disagrees_with_next = np.concatenate([gap_disagrees, [True]])
+    return disagrees_with_previous & disagrees_with_next
+
+
+def flag_depth_knot_speed_outliers(
+    filtered_df: Optional[pd.DataFrame],
+    comprehensive_df: pd.DataFrame,
+    focus_cfg: Dict[str, Any],
+    frame_rate_fps: float
+) -> Optional[pd.DataFrame]:
+    """Return the in-focus selections with ``depth_knot_speed_outlier`` added (a copy).
+
+    A track's depth knots are its selected frames, each at the mean ``z_mm`` of that
+    frame's selections (as in :func:`add_reconstructed_depth`); every selection of a
+    frame whose knot :func:`find_depth_knot_speed_outliers` flags is marked True. The
+    plane spacing is the recording's own (:func:`focus_sweep_geometry` over all frames of
+    ``comprehensive_df``); ``frame_rate_fps`` is the recording frame rate. Flagged
+    selections stay in the selection (they are still focus peaks) but are left out of
+    the depth spline. Returns ``filtered_df`` unchanged when it is None or empty.
+    """
+    if filtered_df is None or filtered_df.empty:
+        return filtered_df
+    track_col = focus_cfg['track_column']
+    frame_col = focus_cfg['frame_column']
+    focal_step_mm = focus_sweep_geometry(comprehensive_df, frame_col, FOCUS_Z_COLUMN).step_mm
+
+    flagged_df = filtered_df.copy()
+    flagged_df[DEPTH_KNOT_SPEED_OUTLIER_COLUMN] = False
+    for _, track_group in flagged_df.groupby(track_col):
+        z_knots = track_group.groupby(frame_col)[FOCUS_Z_COLUMN].mean()
+        outlier = find_depth_knot_speed_outliers(
+            z_knots.index.to_numpy(dtype=float),
+            z_knots.to_numpy(dtype=float),
+            frame_rate_fps,
+            focal_step_mm,
+            focus_cfg
+        )
+        outlier_rows = track_group.index[track_group[frame_col].isin(z_knots.index[outlier])]
+        flagged_df.loc[outlier_rows, DEPTH_KNOT_SPEED_OUTLIER_COLUMN] = True
+
+    outliers_df = flagged_df[flagged_df[DEPTH_KNOT_SPEED_OUTLIER_COLUMN]]
+    if not outliers_df.empty:
+        listed = ', '.join(
+            f"track {row[track_col]} frame {row[frame_col]:g} z={row[FOCUS_Z_COLUMN]:g} mm"
+            for _, row in outliers_df.iterrows()
+        )
+        logger.info(
+            f"Depth spline: {len(outliers_df)} in-focus selection(s) disagree with every neighbouring depth "
+            f"knot of their track by more than the speed gate allows and are left out: {listed}"
+        )
+    return flagged_df
+
+
 def add_reconstructed_depth(
     comprehensive_df: pd.DataFrame,
     filtered_df: Optional[pd.DataFrame],
@@ -1008,9 +1140,14 @@ def add_reconstructed_depth(
 
     The in-focus selections (``filtered_df``) provide sparse depth knots; depth
     between them is reconstructed per track with :func:`reconstruct_track_depth`
-    and evaluated at every frame of the track. In-plane (x, y) coordinates are
-    left unaltered. When focus analysis produced no selections, or required
-    columns are missing, the input is returned unchanged (no column added).
+    and evaluated at every frame of the track. Selections flagged by
+    :func:`flag_depth_knot_speed_outliers` are not knots; a track whose knots are all
+    flagged gets no depth. In-plane (x, y) coordinates are left unaltered. When focus
+    analysis produced no selections, or required columns are missing, the input is
+    returned unchanged (no column added).
+
+    Raises:
+        DataValidationError: the selections lack ``depth_knot_speed_outlier``.
     """
     if filtered_df is None or filtered_df.empty:
         return comprehensive_df
@@ -1026,10 +1163,15 @@ def add_reconstructed_depth(
         missing = required - (set(comprehensive_df.columns) & set(filtered_df.columns))
         logger.warning("Skipping z reconstruction; required columns missing: %s", ', '.join(sorted(missing)))
         return comprehensive_df
+    if DEPTH_KNOT_SPEED_OUTLIER_COLUMN not in filtered_df.columns:
+        raise DataValidationError(
+            f"In-focus selections lack '{DEPTH_KNOT_SPEED_OUTLIER_COLUMN}'; flag them with "
+            "flag_depth_knot_speed_outliers before reconstructing depth."
+        )
 
     result_df = comprehensive_df.copy()
     result_df[FOCUS_Z_RECONSTRUCTED_COLUMN] = np.nan
-    knots_by_track = filtered_df.groupby(track_col)
+    knots_by_track = filtered_df[~filtered_df[DEPTH_KNOT_SPEED_OUTLIER_COLUMN].astype(bool)].groupby(track_col)
 
     for tid, track_group in result_df.groupby(track_col):
         if tid not in knots_by_track.groups:

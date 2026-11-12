@@ -3,8 +3,9 @@
 The external BG mode exists to find NON-moving specimens, which a time-shifted BG from
 the same recording subtracts away. Covers the strict frame pairing (frame index + focal
 plane, never the plate/well tokens of renamed folders), the frame trimming, the BG
-adaptation (illumination match + rim exclusion), the sample-level failed-subtraction
-check, and an end-to-end run on synthetic frames.
+adaptation (illumination match; the rim exclusion is shared with the time-shift mode,
+see test_stage01_rim_exclusion.py), the sample-level failed-subtraction check, and an
+end-to-end run on synthetic frames.
 """
 import copy
 import os
@@ -220,22 +221,18 @@ def repo_config():
     return copy.deepcopy(load_config_once(os.path.join(os.path.dirname(__file__), "..", "config", "config.yml")))
 
 
-def test_prepare_external_background_insets_well_mask(repo_config):
-    bg = np.zeros((400, 400), dtype=np.uint8)
-    cv2.circle(bg, (200, 200), 150, 180, -1)  # lit well, dark plate around it
-    fg = bg.copy()
-    external_cfg = dict(repo_config["stage_01_initial_detection"]["external_background"], rim_exclusion_px=20)
-    well_identification = dict(
-        repo_config["stage_01_initial_detection"]["black_plate_well_analysis"]["well_identification"],
-        min_expected_diameter_px=200, max_expected_diameter_px=400,
+def test_prepare_external_background_takes_fg_illumination(repo_config):
+    # The BG run drifted darker towards the bottom; the adapted BG carries the FG's level.
+    fg = np.full((400, 400), 180, dtype=np.uint8)
+    drift = np.linspace(0, 30, 400, dtype=np.float32)[:, None]
+    bg = np.clip(fg.astype(np.float32) - drift, 0, 255).astype(np.uint8)
+
+    bg_matched = _prepare_external_background(
+        fg, bg, repo_config["stage_01_initial_detection"]["external_background"]
     )
 
-    bg_matched, rim_mask = _prepare_external_background(fg, bg, external_cfg, well_identification)
-
     assert bg_matched.shape == bg.shape
-    assert rim_mask[200, 200] == 255           # well interior kept
-    assert rim_mask[200, 200 + 140] == 0       # 10 px inside the rim: excluded
-    assert rim_mask[200, 200 + 125] == 255     # 25 px inside the rim: kept
+    assert np.abs(bg_matched.astype(int) - fg.astype(int)).max() < 10
 
 
 # --- end to end -----------------------------------------------------------------

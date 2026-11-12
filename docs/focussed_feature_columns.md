@@ -84,7 +84,20 @@ tracks receive a constant depth (their mean in-focus `z_mm`); the estimate is
 clamped to the measured frame span. This drives the
 `reconstructed_trajectories_3d.png` figure.
 
+Before the fit, a speed gate (`flag_depth_knot_speed_outliers`, configured by
+`focussed_particles.depth_knot_speed_gate`) drops depth knots that no neighbouring
+knot of the track supports: a knot whose depth differs from each neighbour by more
+than `tolerance_planes` focal planes plus `max_vertical_speed_mm_s` times the time
+between them (frame rate `acquisition.camera.fps`). Such a lone depth is a focus peak
+of another object in the crop or a frame of another animal after a Stage-1 identity
+swap. Tracks with fewer than 3 knots are not gated; two or more consecutive knots
+that agree are kept.
+
 - `z_reconstructed` — reconstructed depth (mm).
+- `depth_knot_speed_outlier` (in-focus selections only) — True when the speed gate
+  left this selection's depth out of the spline. The row stays a selection (it is
+  still a focus peak) and keeps its own `z_mm`; like `focus_peak_at_track_edge` it is
+  a flag, not an ML feature.
 
 It is written per frame to `<sample_id>_stage2_all_particle_features.csv`, and the
 value at each in-focus frame is also carried onto the selected particles

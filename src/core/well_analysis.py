@@ -3,7 +3,7 @@ import cv2
 import numpy as np
 import skimage.measure
 import logging
-from typing import Optional, Tuple, Dict, Any
+from typing import Optional, Sequence, Tuple, Dict, Any
 from skimage.exposure import rescale_intensity
 
 from src.utils.common_exceptions import ImageProcessingError, ConfigError, DataValidationError
@@ -151,8 +151,8 @@ def create_well_mask_with_fallback(
     Falls back to ``create_full_frame_bright_mask`` when no discrete circular well is
     found (e.g. no multi-well plate; the well fills or exceeds the frame), so callers
     keep a usable well area. Controlled by ``fallback_full_frame_on_failure``. Returns
-    None when no mask could be built. Shared by brightness matching and the external-
-    background rim exclusion (Stage 1).
+    None when no mask could be built. Shared by brightness matching and the Stage-1
+    well-rim exclusion (:func:`create_rim_excluded_well_mask`).
     """
     well_mask, _ = create_well_mask_black_plate(image_gray_uint8, config_well_identification)
     if well_mask is not None:
@@ -165,6 +165,40 @@ def create_well_mask_with_fallback(
     if bright_mask is not None:
         logger.info("create_well_mask_with_fallback: No discrete well found; using full-frame bright-pixel fallback mask.")
     return bright_mask
+
+
+def create_rim_excluded_well_mask(
+    well_masks_uint8: Sequence[np.ndarray],
+    rim_exclusion_px: float,
+) -> np.ndarray:
+    """Return the area inside every given well mask and more than ``rim_exclusion_px`` from its rim.
+
+    Stage 1 passes the well masks of an FG frame and its BG frame. Their rims lie at
+    different image positions when the two frames show different focal planes (focus
+    breathing), and the subtraction leaves the rim of both. The masks are intersected,
+    and the holes of the intersection are filled, so only its outer boundary counts as
+    rim: a dark specimen that a full-frame bright-pixel fallback mask leaves out is not
+    ringed by an exclusion zone. A mask without any excluded pixel (a fallback mask of a
+    frame the sample fills) has no rim and stays whole. The inset is a Euclidean distance
+    transform, i.e. an erosion by a disk; on full-resolution frames that is ~14x faster
+    than an elliptical erosion kernel of this size.
+
+    Raises:
+        ImageProcessingError: no mask given, or masks of different shapes.
+    """
+    if not well_masks_uint8:
+        raise ImageProcessingError("create_rim_excluded_well_mask needs at least one well mask.")
+    mask_shapes = {well_mask_uint8.shape for well_mask_uint8 in well_masks_uint8}
+    if len(mask_shapes) != 1:
+        raise ImageProcessingError(f"Well masks must share one shape; got {sorted(mask_shapes)}.")
+
+    intersection_mask = np.logical_and.reduce([well_mask_uint8 > 0 for well_mask_uint8 in well_masks_uint8])
+    filled_mask_uint8 = np.zeros(intersection_mask.shape, dtype=np.uint8)
+    outer_contours = find_contours(intersection_mask.astype(np.uint8) * 255, mode="external", method="simple")
+    if outer_contours:
+        cv2.drawContours(filled_mask_uint8, outer_contours, -1, 255, thickness=cv2.FILLED)
+    distance_to_rim_float = cv2.distanceTransform((filled_mask_uint8 > 0).astype(np.uint8), cv2.DIST_L2, 5)
+    return np.where(distance_to_rim_float > float(rim_exclusion_px), 255, 0).astype(np.uint8)
 
 
 def match_low_frequency_illumination(
@@ -273,6 +307,9 @@ def match_well_brightness(
     config_well_analysis: Dict[str, Any], # Contains 'well_identification', 'brightness_peak_calculation', 'brightness_matching'
     # target_avg_well_brightness: Optional[float] = None # Alternative: adjust both to a global target
     # For now, we adjust one to match the other, or both towards a midpoint/target
+    *,
+    fg_well_mask_uint8: Optional[np.ndarray] = None,
+    bg_well_mask_uint8: Optional[np.ndarray] = None,
 ) -> Tuple[np.ndarray, np.ndarray]:
     """
     Adjusts brightness of FG and/or BG images so their well background brightness is similar.
@@ -284,6 +321,9 @@ def match_well_brightness(
         fg_img_uint8 (np.ndarray): Foreground image.
         bg_img_uint8 (np.ndarray): Background image.
         config_well_analysis (Dict[str, Any]): Configuration.
+        fg_well_mask_uint8, bg_well_mask_uint8: The frames' well masks
+            (:func:`create_well_mask_with_fallback`) when the caller has already built
+            them (Stage 1 also needs them for the rim exclusion); built here when None.
 
     Returns:
         Tuple[np.ndarray, np.ndarray]: Adjusted FG and BG images (uint8).
@@ -296,8 +336,14 @@ def match_well_brightness(
         logger.error("match_well_brightness: Missing required configuration sections. Returning original images.")
         return fg_img_uint8, bg_img_uint8
 
-    fg_mask = create_well_mask_with_fallback(fg_img_uint8, cfg_well_id)
-    bg_mask = create_well_mask_with_fallback(bg_img_uint8, cfg_well_id)
+    fg_mask = (
+        fg_well_mask_uint8 if fg_well_mask_uint8 is not None
+        else create_well_mask_with_fallback(fg_img_uint8, cfg_well_id)
+    )
+    bg_mask = (
+        bg_well_mask_uint8 if bg_well_mask_uint8 is not None
+        else create_well_mask_with_fallback(bg_img_uint8, cfg_well_id)
+    )
     if fg_mask is None or bg_mask is None:
         logger.warning("match_well_brightness: Could not create well masks for FG or BG. Returning original images.")
         return fg_img_uint8, bg_img_uint8

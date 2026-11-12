@@ -16,6 +16,7 @@
 # masking_operations    : create_circular_mask, apply_mask, mask_well_area,
 #                         detect_black_mask_artifact
 # well_analysis         : create_well_mask_black_plate, create_well_mask_with_fallback,
+#                         create_rim_excluded_well_mask,
 #                         calculate_well_brightness_peak, match_well_brightness,
 #                         match_low_frequency_illumination
 # sharpness_assessment  : calculate_sharpness_metrics,

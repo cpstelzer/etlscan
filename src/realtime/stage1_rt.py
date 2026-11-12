@@ -58,7 +58,7 @@ def run_stage1_realtime(
         fg_img_uint8,
         bg_img_uint8,
         enable_brightness_adjustment=enable_brightness_adjustment,
-        brightness_config=brightness_cfg,
+        well_analysis_config=brightness_cfg,
         well_masking_cfg=config["well_masking"],
         system_cfg=config["system_cfg"],
         source_illumination=source_illumination,
@@ -78,7 +78,7 @@ def run_stage1_realtime(
     # when a poorly-subtracted frame would flood with false positives.
     sub_analysis = analyze_subtracted_image(
         subtracted_img_uint8,
-        well_mask_uint8=prep.get("well_mask"),
+        well_mask_uint8=prep["subtraction_roi_mask"],
         particle_analysis_config=sub_cfg,
         global_threshold_config=global_cfg,
         sample_id="REALTIME",

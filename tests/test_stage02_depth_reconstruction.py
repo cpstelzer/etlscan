@@ -2,18 +2,24 @@
 """Tests for Stage-2 3D depth (z) reconstruction from sparse in-focus points.
 
 Covers the cubic-smoothing-spline reconstruction (restored from the
-publication-3d-plot-experimental branch) and its persistence as a per-frame
-``z_reconstructed`` column.
+publication-3d-plot-experimental branch), its persistence as a per-frame
+``z_reconstructed`` column, and the speed gate that keeps lone implausible depth
+knots (false focus peaks, identity swaps) out of the spline.
 """
 import numpy as np
 import pandas as pd
+import pytest
 
 from src.stages.stage_02_characterization import (
     reconstruct_track_depth,
     add_reconstructed_depth,
     attach_reconstructed_depth_to_subset,
+    find_depth_knot_speed_outliers,
+    flag_depth_knot_speed_outliers,
+    DEPTH_KNOT_SPEED_OUTLIER_COLUMN,
     FOCUS_Z_RECONSTRUCTED_COLUMN,
 )
+from src.utils.common_exceptions import ConfigError, DataValidationError
 
 
 def test_rising_depth_yields_rising_reconstruction():
@@ -67,7 +73,13 @@ def _cfg():
         'frame_column': 'frame',
         'trajectory_smoothing_factor': 0.5,
         'min_points_for_spline': 5,
+        'depth_knot_speed_gate': {'max_vertical_speed_mm_s': 1.5, 'tolerance_planes': 2},
     }
+
+
+def _unflagged(knots_df):
+    """In-focus selections as flag_depth_knot_speed_outliers leaves knots it keeps."""
+    return knots_df.assign(**{DEPTH_KNOT_SPEED_OUTLIER_COLUMN: False})
 
 
 def test_add_reconstructed_depth_adds_per_frame_column():
@@ -80,7 +92,7 @@ def test_add_reconstructed_depth_adds_per_frame_column():
              for f, z in zip([10, 20, 30, 40, 50, 60], [0.5, 0.9, 1.3, 1.8, 2.3, 2.8])]
     knots += [{'track_id': 2, 'frame': f, 'z_mm': z}
               for f, z in zip([10, 20, 30], [1.0, 2.0, 3.0])]
-    filtered = pd.DataFrame(knots)
+    filtered = _unflagged(pd.DataFrame(knots))
 
     out = add_reconstructed_depth(comp, filtered, _cfg())
 
@@ -102,9 +114,9 @@ def test_add_reconstructed_depth_leaves_xy_unaltered():
     rows = [{'track_id': 1, 'frame': f, 'z_mm': np.nan, 'x_mm': 5.0 + f, 'y_mm': 7.0 - f}
             for f in range(10, 61)]
     comp = pd.DataFrame(rows)
-    knots = pd.DataFrame([{'track_id': 1, 'frame': f, 'z_mm': z}
-                          for f, z in zip([10, 20, 30, 40, 50, 60],
-                                          [0.5, 0.9, 1.3, 1.8, 2.3, 2.8])])
+    knots = _unflagged(pd.DataFrame([{'track_id': 1, 'frame': f, 'z_mm': z}
+                                     for f, z in zip([10, 20, 30, 40, 50, 60],
+                                                     [0.5, 0.9, 1.3, 1.8, 2.3, 2.8])]))
     out = add_reconstructed_depth(comp, knots, _cfg())
     pd.testing.assert_series_equal(out['x_mm'], comp['x_mm'])
     pd.testing.assert_series_equal(out['y_mm'], comp['y_mm'])
@@ -113,12 +125,12 @@ def test_add_reconstructed_depth_leaves_xy_unaltered():
 def test_attach_reconstructed_depth_to_subset_carries_column():
     # per-frame table with reconstructed depth already computed
     comp = pd.DataFrame([{'track_id': 1, 'frame': f, 'z_mm': np.nan} for f in range(10, 61)])
-    knots = pd.DataFrame([{'track_id': 1, 'frame': f, 'z_mm': z}
-                          for f, z in zip([10, 20, 30, 40, 50, 60],
-                                          [0.5, 0.9, 1.3, 1.8, 2.3, 2.8])])
+    knots = _unflagged(pd.DataFrame([{'track_id': 1, 'frame': f, 'z_mm': z}
+                                     for f, z in zip([10, 20, 30, 40, 50, 60],
+                                                     [0.5, 0.9, 1.3, 1.8, 2.3, 2.8])]))
     comp = add_reconstructed_depth(comp, knots, _cfg())
 
-    subset = knots.copy()  # the in-focus selections, lacking the column
+    subset = knots.drop(columns=DEPTH_KNOT_SPEED_OUTLIER_COLUMN)  # in-focus selections, lacking the column
     assert FOCUS_Z_RECONSTRUCTED_COLUMN not in subset.columns
 
     out = attach_reconstructed_depth_to_subset(subset, comp, 'track_id', 'frame')
@@ -138,3 +150,91 @@ def test_attach_reconstructed_depth_noop_when_column_absent():
     out = attach_reconstructed_depth_to_subset(subset, comp, 'track_id', 'frame')
     assert FOCUS_Z_RECONSTRUCTED_COLUMN not in out.columns
     assert len(out) == 1
+
+
+# --- depth-knot speed gate -------------------------------------------------------
+
+FPS = 25.0
+STEP_MM = 0.4
+
+
+def _outliers(frames, z):
+    return find_depth_knot_speed_outliers(
+        np.asarray(frames, dtype=float), np.asarray(z, dtype=float), FPS, STEP_MM, _cfg()
+    ).tolist()
+
+
+def test_lone_end_knot_is_flagged():
+    # Track starts on the sharp well rim near the sweep start, then follows an animal at ~9 mm.
+    assert _outliers([4, 34, 80, 89, 137], [1.6, 8.8, 9.6, 9.2, 10.0]) == [True, False, False, False, False]
+
+
+def test_lone_interior_knot_is_flagged():
+    # One knot 7 mm off its neighbours 30 frames (1.2 s) away on either side.
+    assert _outliers([22, 35, 78, 108, 138, 145], [8.8, 8.4, 8.8, 1.6, 10.4, 9.2]) == [
+        False, False, False, True, False, False
+    ]
+
+
+def test_slow_drift_and_turnaround_pairs_are_kept():
+    # 0.3 mm/s drift, and knot pairs one plane-pair apart across a sweep turnaround.
+    frames = np.arange(0, 301, 30)
+    assert not any(_outliers(frames, 2.0 + 0.3 * frames / FPS))
+    assert not any(_outliers([137, 145, 193, 201], [10.0, 9.2, 10.0, 9.2]))
+
+
+def test_agreeing_knots_are_kept_even_far_from_the_rest():
+    # Two consecutive knots support each other (e.g. a swapped segment): the gate cannot tell.
+    assert not any(_outliers([100, 130, 160, 170, 200, 230], [4.8, 4.8, 9.6, 9.6, 4.8, 4.8]))
+
+
+def test_tracks_with_fewer_than_three_knots_are_not_gated():
+    assert _outliers([4, 34], [1.6, 8.8]) == [False, False]
+
+
+def test_speed_gate_validates_input():
+    with pytest.raises(DataValidationError):
+        _outliers([34, 4, 80], [8.8, 1.6, 9.6])                     # not sorted by frame
+    with pytest.raises(DataValidationError):
+        find_depth_knot_speed_outliers(np.arange(3.0), np.ones(3), 0.0, STEP_MM, _cfg())
+    with pytest.raises(ConfigError):
+        find_depth_knot_speed_outliers(np.arange(3.0), np.ones(3), FPS, STEP_MM, {})
+    with pytest.raises(ConfigError):
+        bad_cfg = dict(_cfg(), depth_knot_speed_gate={'max_vertical_speed_mm_s': 0, 'tolerance_planes': 2})
+        find_depth_knot_speed_outliers(np.arange(3.0), np.ones(3), FPS, STEP_MM, bad_cfg)
+
+
+def _zigzag_track(frames):
+    """Per-frame table of one track on a 0.4 mm zigzag sweep 0..11.2 mm (period 56 frames)."""
+    z = STEP_MM * (28 - np.abs(np.asarray(frames) % 56 - 28))
+    return pd.DataFrame({'track_id': 1, 'frame': frames, 'z_mm': z})
+
+
+def test_flagged_knot_stays_selected_but_does_not_bend_the_depth():
+    comp = _zigzag_track(np.arange(1, 200))
+    # In focus at 4.8 mm on every pass, plus one frame on the rim at the sweep start (z 0).
+    knot_frames = [12, 44, 68, 100, 112, 124, 156]
+    filtered = comp[comp['frame'].isin(knot_frames)].copy()
+
+    flagged = flag_depth_knot_speed_outliers(filtered, comp, _cfg(), FPS)
+    out = add_reconstructed_depth(comp, flagged, _cfg())
+
+    assert flagged.loc[flagged['frame'] == 112, DEPTH_KNOT_SPEED_OUTLIER_COLUMN].tolist() == [True]
+    assert flagged[DEPTH_KNOT_SPEED_OUTLIER_COLUMN].sum() == 1
+    assert len(flagged) == len(filtered)                         # still an in-focus selection
+    z_line = out.set_index('frame')[FOCUS_Z_RECONSTRUCTED_COLUMN]
+    assert abs(z_line.loc[112] - 4.8) < 0.1
+    assert np.allclose(z_line.loc[12:156], 4.8, atol=0.1)
+
+
+def test_flag_passes_empty_selections_through():
+    comp = _zigzag_track(np.arange(1, 60))
+    assert flag_depth_knot_speed_outliers(None, comp, _cfg(), FPS) is None
+    empty = comp.iloc[0:0]
+    assert flag_depth_knot_speed_outliers(empty, comp, _cfg(), FPS) is empty
+
+
+def test_add_reconstructed_depth_requires_the_speed_flag():
+    comp = _zigzag_track(np.arange(1, 60))
+    with pytest.raises(DataValidationError, match=DEPTH_KNOT_SPEED_OUTLIER_COLUMN):
+        add_reconstructed_depth(comp, comp.iloc[[5, 10, 20]], _cfg())
