@@ -4,9 +4,9 @@
 All sizes come from ``config['figure_style']``; plot code sets no font sizes, line
 widths, marker sizes or dpi of its own, so every figure follows the same style.
 
-The track maps (Stage-1 ``*_tracks_3d/xy``, Stage-2 ``reconstructed_trajectories_3d/xy``)
+The track maps (Stage-1 ``*_tracks_3d/xy``, Stage-2 ``reconstructed_trajectories_3d/xy/xz/yz``)
 use :func:`track_figure_style` instead and draw through the ``plot_track_line`` /
-``plot_focus_points`` / ``draw_floor_shadow`` helpers below, so all four look alike.
+``plot_focus_points`` / ``draw_floor_shadow`` helpers below, so they all look alike.
 """
 from contextlib import contextmanager
 from typing import Any, Dict, Iterator, Sequence

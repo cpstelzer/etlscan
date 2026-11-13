@@ -23,6 +23,7 @@ from src.stages.stage_01_initial_detection import (
 )
 from src.stages.stage_02_characterization import (
     plot_3d_reconstructed,
+    plot_side_view_reconstructed,
     plot_xy_reconstructed,
 )
 
@@ -136,3 +137,17 @@ def test_stage2_xy_reconstructed_spans_full_extent(corner_tracks_df, drawn_limit
     xlim, ylim = drawn_limits[0]
     assert xlim == pytest.approx((0.0, 15.0))
     assert ylim == pytest.approx((0.0, 12.0))
+
+
+@pytest.mark.parametrize("horizontal_axis, horizontal_max_mm", [('x', 15.0), ('y', 12.0)])
+def test_stage2_side_views_span_full_extent(corner_tracks_df, drawn_limits, tmp_path,
+                                            horizontal_axis, horizontal_max_mm):
+    plot_side_view_reconstructed(
+        corner_tracks_df, corner_tracks_df, 'track_id', 'frame', 'z_mm',
+        str(tmp_path / f'tracks_{horizontal_axis}z.png'), None, 0.5, 5, EXTENT_MM, horizontal_axis
+    )
+
+    # Equal x/z scale is set via the box, so the fixed limits survive the draw.
+    xlim, ylim = drawn_limits[0]
+    assert xlim == pytest.approx((0.0, horizontal_max_mm))
+    assert ylim == pytest.approx((0.0, 3.2))
