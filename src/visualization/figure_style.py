@@ -18,7 +18,7 @@ from matplotlib.axes import Axes
 from src.utils.common_exceptions import ConfigError
 
 _FIGURE_STYLE_KEYS = (
-    'dpi', 'font_family', 'font_size', 'tick_label_size', 'title_size', 'line_width',
+    'dpi', 'font_family', 'font_size', 'tick_label_size', 'title_size', 'annotation_size', 'line_width',
     'marker_size', 'marker_edge_width', 'axes_line_width', 'tick_length',
     'track_line_width', 'track_marker_size',
 )
@@ -50,7 +50,8 @@ def _figure_style_rc_params(config: Dict[str, Any]) -> Dict[str, Any]:
         'savefig.bbox': 'tight',
         'font.family': 'sans-serif',
         'font.sans-serif': list(style_config['font_family']),
-        'font.size': style_config['font_size'],
+        # font.size is the size of free text placed with ax.text / ax.annotate.
+        'font.size': style_config['annotation_size'],
         'axes.labelsize': style_config['font_size'],
         'axes.titlesize': style_config['title_size'],
         'xtick.labelsize': style_config['tick_label_size'],

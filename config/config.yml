@@ -52,15 +52,19 @@ logging:
 # Figure style (every plot the pipeline writes: Stage-1/2 track maps, Stage-2 focus
 # diagnostics, Stage-4 overlays, RF feature-importance chart). Sizes are points at the
 # saved figure size; figures are ~7-8 in wide, so at single-column width (85 mm, ~50 %)
-# text prints at >= 7 pt and data lines at >= 1 pt. Applied by
+# text prints at >= 9 pt and data lines at >= 1 pt. Applied by
 # src/visualization/figure_style.figure_style -- plot code sets none of these itself.
 # -----------------------------------------------------------------------------
 figure_style:
   dpi: 300
   font_family: ["Arial", "DejaVu Sans"]  # first installed family is used
-  font_size: 16           # axis labels and in-plot annotations
-  tick_label_size: 14     # tick labels and legends
-  title_size: 18
+  font_size: 20           # axis labels
+  tick_label_size: 18     # tick labels and legends
+  title_size: 20
+  # Text placed inside a plot (Stage-2 peak numbers, crop-collage labels). Kept below the
+  # axis-label size: these sit between data a few frames apart and on small crops, which
+  # larger labels would merge or cover.
+  annotation_size: 16
   line_width: 2.5         # data lines and outlines
   marker_size: 7          # point markers
   marker_edge_width: 1.0
@@ -69,8 +73,8 @@ figure_style:
   # Track maps (Stage-1 tracks_3d/xy, Stage-2 reconstructed_trajectories_3d/xy/xz/yz) draw dozens of
   # overlapping trajectories and ~10 in-focus points per track: at line_width/marker_size
   # the points bury the lines. Thinner lines and small open rings keep each track legible.
-  track_line_width: 1.6
-  track_marker_size: 4
+  track_line_width: 2.2
+  track_marker_size: 5.5
 
 # -----------------------------------------------------------------------------
 # Imaging geometry (frame dimensions + illumination source)
