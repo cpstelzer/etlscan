@@ -3,7 +3,7 @@
 #SBATCH --cpus-per-task=4
 #SBATCH --mem=48G
 #SBATCH --time=8:00:00
-#SBATCH --job-name=well_plate_analyzer
+#SBATCH --job-name=etlscan
 #SBATCH --mail-type=BEGIN,END,FAIL
 #SBATCH --mail-user=claus-peter.stelzer@uibk.ac.at
 #SBATCH --output=%x_%j.out
@@ -26,7 +26,8 @@ if [[ ! -d "$INPUT_DIR" ]]; then
 fi
 
 # Derive paths
-REPO_ROOT="${SCRATCH}/wellscanner/well_plate_analyzer"
+# Override with REPO_ROOT=/path/to/clone sbatch ... if the clone lives elsewhere.
+REPO_ROOT="${REPO_ROOT:-${SCRATCH}/wellscanner/etlscan}"
 PIPELINE_SCRIPT="${REPO_ROOT}/scripts/run_pipeline.py"
 CONFIG_FILE="${REPO_ROOT}/config/config.yml"
 

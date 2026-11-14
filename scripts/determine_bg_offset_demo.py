@@ -6,7 +6,7 @@ frames using the same logic as the stage 01 processing pipeline, and then calls
 chosen background offset(s).  It is intended to help diagnose issues with the
 background pairing heuristics.
 
-To run this script, navigate to well_plate_analyzer/scripts and execute:
+To run this script, navigate to etlscan/scripts and execute:
 python determine_bg_offset_demo.py --input-batch-directory /path/to/image_directory
 
 """
