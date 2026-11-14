@@ -1,5 +1,5 @@
 # config/config.yml
-# Single source of truth for the well_plate_analyzer pipeline.
+# Single source of truth for the etlscan pipeline.
 # Consolidates the former config/pipeline_config.yml, src/acquire/ws_config.yaml,
 # and src/acquire/ws_config_S5VPJ6415.yaml.
 #

@@ -1,4 +1,4 @@
-# Well Plate Analyzer — Developer Guide
+# etlscan — Developer Guide
 
 ## What this project does
 
@@ -28,7 +28,7 @@ and start coding:
 ## Repository layout
 
 ```
-well_plate_analyzer/
+etlscan/
 ├── config/
 │   └── config.yml              # Single YAML config for the entire pipeline
 ├── data/

@@ -1,7 +1,7 @@
 # Coding Conventions
 
 This document defines the naming and style conventions for the
-`well_plate_analyzer` codebase.  All new code and refactoring work
+`etlscan` codebase.  All new code and refactoring work
 **must** follow these conventions.  PRs that introduce violations
 should be rejected at review time.
 

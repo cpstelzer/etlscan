@@ -1,4 +1,4 @@
-# Well Plate Analyzer
+# etlscan
 
 Automated pipeline for processing well-plate microscopy batches. The system ingests raw frame sequences, tracks organisms, measures morphology, and produces curated review packages. The runtime flow is organized into four stages that can be executed independently or sequentially via the pipeline runner.
 
@@ -53,7 +53,7 @@ This copies matching run folders into `data/input/<batch_name>/...` without chan
 ## Project structure
 
 ```
-well_plate_analyzer/
+etlscan/
 ├── config/
 │   └── config.yml                # Global runtime configuration
 ├── data/

@@ -411,7 +411,7 @@ def run_stage(stage_id: str, sample_paths: SamplePaths, config: dict) -> Optiona
 
 def main():
     """Parse CLI arguments and orchestrate the staged pipeline for a batch run."""
-    parser = argparse.ArgumentParser(description="Run the Well Plate Analyzer pipeline.")
+    parser = argparse.ArgumentParser(description="Run the etlscan pipeline.")
     parser.add_argument(
         "--config",
         type=str,
