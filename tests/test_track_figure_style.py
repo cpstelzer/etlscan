@@ -1,5 +1,5 @@
 # tests/test_track_figure_style.py
-"""Tests for the shared track-map style (Stage-1 tracks_3d/xy, Stage-2 reconstructed_trajectories_3d/xy).
+"""Tests for the shared track-map style (Stage-1 tracks_3d/xy, Stage-2 reconstructed_trajectories_3d/xy/xz/yz).
 
 Dozens of overlapping trajectories with ~10 in-focus points each read as clutter at the
 general figure sizes, so the track maps draw thinner lines, small open rings and a grey
@@ -12,7 +12,11 @@ import pandas as pd
 import pytest
 
 from src.stages.stage_01_initial_detection import _build_tracking_figure, _build_tracking_xy_figure
-from src.stages.stage_02_characterization import plot_3d_reconstructed, plot_xy_reconstructed
+from src.stages.stage_02_characterization import (
+    plot_3d_reconstructed,
+    plot_side_view_reconstructed,
+    plot_xy_reconstructed,
+)
 from src.visualization.figure_style import track_figure_style
 from tests.test_figure_style import STYLE_CONFIG
 
@@ -97,6 +101,56 @@ def test_reconstructed_xy_keeps_the_3d_colours(tracks_df, saved_axes, tmp_path):
     colours_3d = [line.get_color() for line in saved_axes[0].lines[3:6]]
     colours_xy = [line.get_color() for line in saved_axes[1].lines[:3]]
     assert colours_xy == colours_3d
+
+
+def _plot_side_view(tracks_df, selected_df, tmp_path, horizontal_axis):
+    plot_side_view_reconstructed(
+        tracks_df, selected_df, 'track_id', 'frame', 'z_mm',
+        str(tmp_path / f'tracks_{horizontal_axis}z.png'), None, 0.5, 5, EXTENT_MM, horizontal_axis
+    )
+
+
+def test_side_views_plot_depth_against_x_and_y_in_the_3d_colours(tracks_df, saved_axes, tmp_path):
+    selected_df = tracks_df[tracks_df['frame'] % 3 == 0]
+    with track_figure_style(STYLE_CONFIG):
+        plot_3d_reconstructed(
+            tracks_df, selected_df, 'track_id', 'frame', 'z_mm',
+            str(tmp_path / 'tracks_3d.png'), None, 0.5, 5, EXTENT_MM
+        )
+        _plot_side_view(tracks_df, selected_df, tmp_path, 'x')
+        _plot_side_view(tracks_df, selected_df, tmp_path, 'y')
+
+    colours_3d = [line.get_color() for line in saved_axes[0].lines[3:6]]
+    for ax, horizontal_col in zip(saved_axes[1:], ('x_mm', 'y_mm')):
+        track_lines, rings = ax.lines[:3], ax.lines[3:]
+        assert [line.get_color() for line in track_lines] == colours_3d
+        for track_id, (line, ring) in enumerate(zip(track_lines, rings)):
+            track = tracks_df[tracks_df['track_id'] == track_id]
+            selected = selected_df[selected_df['track_id'] == track_id]
+            # Line: the persisted depth line; rings: the measured in-focus depths, drawn after every line.
+            assert list(line.get_xdata()) == pytest.approx(list(track[horizontal_col]))
+            assert list(line.get_ydata()) == pytest.approx(list(track['z_reconstructed']))
+            assert _is_ring(ring) and ring.get_markeredgecolor() == line.get_color()
+            assert list(ring.get_ydata()) == pytest.approx(list(selected['z_mm']))
+
+
+def test_side_view_draws_no_depth_line_where_the_speed_gate_left_none(tracks_df, saved_axes, tmp_path):
+    """A track whose depth knots were all gated has NaN z_reconstructed: no line, not a refit of those knots."""
+    tracks_df.loc[tracks_df['track_id'] == 0, 'z_reconstructed'] = float('nan')
+    selected_df = tracks_df[tracks_df['frame'] % 3 == 0].copy()
+    selected_df['depth_knot_speed_outlier'] = selected_df['track_id'] == 0
+
+    with track_figure_style(STYLE_CONFIG):
+        _plot_side_view(tracks_df, selected_df, tmp_path, 'x')
+
+    gated_line, gated_rings = saved_axes[0].lines[0], saved_axes[0].lines[3]
+    assert pd.isna(list(gated_line.get_ydata())).all()
+    assert len(gated_rings.get_ydata()) == 3  # its in-focus selections are still shown
+
+
+def test_side_view_rejects_an_unknown_axis(tracks_df, tmp_path):
+    with pytest.raises(ValueError, match="horizontal_axis"):
+        _plot_side_view(tracks_df, tracks_df, tmp_path, 'z')
 
 
 def test_stage1_track_maps_share_the_track_style(tracks_df):

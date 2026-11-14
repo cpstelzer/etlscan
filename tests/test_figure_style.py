@@ -23,6 +23,7 @@ STYLE_CONFIG = {
         'font_size': 17,
         'tick_label_size': 13,
         'title_size': 19,
+        'annotation_size': 11,
         'line_width': 2.7,
         'marker_size': 6.5,
         'marker_edge_width': 0.9,
@@ -43,6 +44,7 @@ def test_figure_style_applies_config_inside_block_and_restores_after():
         assert plt.rcParams['xtick.labelsize'] == 13
         assert plt.rcParams['legend.fontsize'] == 13
         assert plt.rcParams['axes.titlesize'] == 19
+        assert plt.rcParams['font.size'] == 11  # in-plot text, independent of the axis labels
         assert plt.rcParams['lines.linewidth'] == 2.7
         assert plt.rcParams['lines.markersize'] == 6.5
         assert plt.rcParams['lines.markeredgewidth'] == 0.9
