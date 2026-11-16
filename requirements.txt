@@ -5,6 +5,7 @@ PyYAML
 scikit-learn
 scikit-image
 scipy
+trackpy
 matplotlib
 joblib
 pytest

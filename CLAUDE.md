@@ -2,10 +2,15 @@
 
 ## What this project does
 
-Automated pipeline for processing well-plate microscopy image sequences.
-Raw PNG frame sequences are ingested, organisms are tracked, morphology is
-measured, and a curated review package is produced.  A real-time mirror of
-the first three stages runs frame-by-frame during live acquisition.
+Acquisition and analysis software for depth-resolved imaging with electronically
+tunable lenses (ETLs).  An ETL objective steps its focal plane through the sample,
+one plane per camera frame; the acquisition records these focal scans as PNG frame
+sequences.  The offline pipeline detects and tracks organisms in XY, recovers each
+track's depth from its focus peaks (depth-from-focus) to reconstruct 3D trajectories,
+measures morphology on the in-focus frames, and produces a curated review package.
+A real-time mirror of the first three stages runs frame-by-frame during live
+acquisition and stores only sharp crops.  See `README.md` for the user-facing
+overview and the accompanying paper.
 
 ---
 

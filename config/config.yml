@@ -1,5 +1,6 @@
 # config/config.yml
-# Single source of truth for the etlscan pipeline.
+# Single source of truth for etlscan (depth-resolved imaging with electronically
+# tunable lenses): acquisition, offline analysis pipeline and realtime mode.
 # Consolidates the former config/pipeline_config.yml, src/acquire/ws_config.yaml,
 # and src/acquire/ws_config_S5VPJ6415.yaml.
 #

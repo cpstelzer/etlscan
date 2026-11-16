@@ -1,0 +1,52 @@
+cff-version: 1.2.0
+message: >-
+  If you use this software, please cite the article given under
+  preferred-citation. The supplementary data are archived at Zenodo
+  (see identifiers).
+type: software
+title: "etlscan: acquisition and analysis software for depth-resolved imaging with electronically tunable lenses"
+abstract: >-
+  Acquisition and analysis software for imaging systems built around an
+  electronically tunable lens (ETL). The acquisition steps the focal plane
+  through a water column, one plane per camera frame. The analysis tracks
+  multiple individuals, recovers their depth from focus peaks
+  (depth-from-focus), reconstructs three-dimensional trajectories and
+  measures in-focus specimens. A realtime mode stores sharp crops during
+  acquisition.
+authors:
+  - family-names: Stelzer
+    given-names: Claus-Peter
+    affiliation: "Research Institute for Limnology, Mondsee, University of Innsbruck, Austria"
+  - family-names: Brunner
+    given-names: Martina
+    affiliation: "Research Institute for Limnology, Mondsee, University of Innsbruck, Austria"
+  - family-names: Pichler
+    given-names: Maria
+    affiliation: "Research Institute for Limnology, Mondsee, University of Innsbruck, Austria"
+repository-code: "https://github.com/cpstelzer/etlscan"
+license: MIT
+keywords:
+  - electronically tunable lens
+  - depth-from-focus
+  - plankton imaging
+  - three-dimensional tracking
+  - volumetric imaging
+  - zooplankton
+identifiers:
+  - type: doi
+    value: 10.5281/zenodo.20396908
+    description: "Supplementary data for: Depth-resolved imaging of live plankton with electronically tunable lenses"
+preferred-citation:
+  type: article
+  title: "Depth-resolved imaging of live plankton with electronically tunable lenses"
+  authors:
+    - family-names: Stelzer
+      given-names: Claus-Peter
+    - family-names: Brunner
+      given-names: Martina
+    - family-names: Pichler
+      given-names: Maria
+  journal: "Limnology and Oceanography: Methods"
+  year: 2026
+  status: submitted
+  notes: "In revision."
