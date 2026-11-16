@@ -279,4 +279,5 @@ both image and ML errors).
 
 ## Branching convention
 
-Active refactoring work lives on `claude/code-simplifier-3aXsn`.
+Changes go to `main` through a feature branch and a pull request. Releases are
+tagged `v<major>.<minor>.<patch>`; `v2.0.0` is the version archived with the paper.

@@ -61,7 +61,7 @@ conda activate wellscan24_env
 pip install -r wellscan24_env_files/pip-requirements.txt
 ```
 
-PyTorch and the two Optotune SDK wheels are installed afterwards as described in the how-to file. For the offline analysis alone, `pip install -r requirements.txt` into a Python 3.9 environment is sufficient.
+PyTorch is installed afterwards as described in the how-to file. The Optotune Python SDK, which only the acquisition needs, is not distributed with this repository; obtain it from Optotune and install it as described there. For the offline analysis alone, `pip install -r requirements.txt` into a Python 3.9 environment is sufficient.
 
 ## Quick start
 

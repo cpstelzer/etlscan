@@ -24,7 +24,10 @@ conda install pytorch torchvision cpuonly -c pytorch
 # Install pip requiring packages
 pip install -r pip-requirements.txt
 
-# Install Optotune Python SDK from locally stored files
+# Install the Optotune Python SDK (needed for acquisition only).
+# The SDK is not distributed with this repository. Obtain the ICC-4C Python SDK
+# from Optotune (version 2.0.4922 was used here) and install its two wheels from
+# the folder you saved them in:
 python -m pip install --no-user optoKummenberg-1.0.4894-py3-none-any.whl
 python -m pip install --no-user optoICC-2.0.4922-py3-none-any.whl
 
