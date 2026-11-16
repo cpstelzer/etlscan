@@ -31,6 +31,6 @@
 #
 # feature_calculators/  (subpackage — see feature_calculators/__init__.py)
 #   morphology_calculator   : calculate_detailed_body_morphology
-#   quality_calculator      : calculate_quality_features
+#   quality_calculator      : calculate_quality_features, apply_quality_flag_filters
 #   shape_descriptors       : calculate_shape_descriptors
-#   bio_features_calculator : extract_ml_features, calculate_posterior_attributes
+#   bio_features_calculator : calculate_posterior_attributes

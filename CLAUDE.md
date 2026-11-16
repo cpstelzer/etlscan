@@ -255,6 +255,7 @@ both image and ML errors).
 |----------|----------|---------|
 | `build_crop_filename` | `src/utils/filename_helpers.py` | Single canonical crop filename builder used by both batch and realtime pipelines |
 | `float01_to_uint8` | `src/core/image_enhancement.py` | Clip-and-scale float [0,1] → uint8 [0,255] |
+| `apply_quality_flag_filters` | `src/core/feature_calculators/quality_calculator.py` | Drop particles flagged `has_black_mask_artifact` / `is_on_crop_boundary` per `stage_03_filtering_and_classification.quality_flags_filter`; the one implementation for batch and realtime Stage 3 |
 | `calculate_posterior_attributes` | `src/core/feature_calculators/bio_features_calculator.py` | Annotate RegionProperties with posterior axis vector (used by Stage 4 + visualisation) |
 | `load_config_once` | `src/utils/config_loader.py` | Load and cache the YAML config |
 | `get_scan_extent_mm` | `src/utils/acquisition_metadata.py` | (x, y, z) mm extent a recording covers — its frame size × tracking pixel scale, and its deepest `fd` plane (not the config's ROI / scan height); the fixed axis range for the Stage-1/Stage-2 tracking plots |

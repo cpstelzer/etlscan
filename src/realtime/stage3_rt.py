@@ -5,6 +5,8 @@ from typing import Dict
 
 import pandas as pd
 
+from src.core.feature_calculators.quality_calculator import apply_quality_flag_filters
+
 
 @dataclass
 class Stage3Result:
@@ -14,25 +16,22 @@ class Stage3Result:
 
 
 def run_stage3_realtime(df: pd.DataFrame, config: Dict[str, bool]) -> Stage3Result:
+    """Apply the quality-flag filters to one frame's Stage-2 particles.
+
+    ``config`` holds ``enable_artifact_filter`` and ``enable_boundary_filter`` (from
+    ``stage_03_filtering_and_classification.quality_flags_filter``); the filtering itself is
+    the batch pipeline's :func:`apply_quality_flag_filters`.
+    """
     if df is None or df.empty:
         return Stage3Result(accepted_df=pd.DataFrame())
 
-    filtered = df.copy()
-    rejected_artifact = 0
-    rejected_boundary = 0
-
-    if config.get("enable_artifact_filter", True) and "has_black_mask_artifact" in filtered.columns:
-        artifact_mask = filtered["has_black_mask_artifact"].fillna(False).astype(bool)
-        rejected_artifact = int(artifact_mask.sum())
-        filtered = filtered[~artifact_mask]
-
-    if config.get("enable_boundary_filter", True) and "is_on_crop_boundary" in filtered.columns:
-        boundary_mask = filtered["is_on_crop_boundary"].fillna(False).astype(bool)
-        rejected_boundary = int(boundary_mask.sum())
-        filtered = filtered[~boundary_mask]
-
+    accepted_df, rejected_artifact, rejected_boundary = apply_quality_flag_filters(
+        df.copy(),
+        filter_black_mask=config["enable_artifact_filter"],
+        filter_on_boundary=config["enable_boundary_filter"],
+    )
     return Stage3Result(
-        accepted_df=filtered.reset_index(drop=True),
+        accepted_df=accepted_df,
         rejected_artifact_count=rejected_artifact,
         rejected_boundary_count=rejected_boundary,
     )

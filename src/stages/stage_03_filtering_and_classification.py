@@ -27,6 +27,7 @@ from src.utils import (
     save_dataframe_to_csv,
 )
 from src.utils.common_exceptions import DataValidationError, MLModelError
+from src.core.feature_calculators.quality_calculator import apply_quality_flag_filters
 
 logger = logging.getLogger(__name__)
 
@@ -583,9 +584,9 @@ def run_stage_03_filtering_and_classification(
     sample_id: str,
     config: dict,
 ) -> Optional[str]:
-    """Apply quality flag filters to Stage 2 final particles."""
+    """Apply the configured quality-flag filters to Stage 2 final particles, then classify them."""
     logger.info(
-        "--- Stage 3: Filtering & Classification (quality filters only) for Sample ID: %s ---",
+        "--- Stage 3: Filtering & Classification for Sample ID: %s ---",
         sample_id,
     )
 
@@ -608,25 +609,20 @@ def run_stage_03_filtering_and_classification(
     logger.info("Loaded %d particles from Stage 2 final output.", len(final_particles_df))
 
     initial_particle_count = len(final_particles_df)
-    quality_filtered_df = final_particles_df.copy()
-
-    if 'has_black_mask_artifact' in quality_filtered_df.columns:
-        mask = quality_filtered_df['has_black_mask_artifact'].fillna(False).astype(bool)
-        removed = int(mask.sum())
-        quality_filtered_df = quality_filtered_df.loc[~mask]
-        logger.info("Removed %d particles with black mask artifacts.", removed)
-    else:
-        logger.warning("Column 'has_black_mask_artifact' missing; skipping that filter.")
-
-    if 'is_on_crop_boundary' in quality_filtered_df.columns:
-        mask = quality_filtered_df['is_on_crop_boundary'].fillna(False).astype(bool)
-        removed = int(mask.sum())
-        quality_filtered_df = quality_filtered_df.loc[~mask]
-        logger.info("Removed %d particles touching crop boundaries.", removed)
-    else:
-        logger.warning("Column 'is_on_crop_boundary' missing; skipping boundary filter.")
-
-    quality_filtered_df = quality_filtered_df.reset_index(drop=True)
+    quality_flags_config = s3_config['quality_flags_filter']
+    filter_black_mask = bool(quality_flags_config['filter_black_mask'])
+    filter_on_boundary = bool(quality_flags_config['filter_on_boundary'])
+    quality_filtered_df, removed_black_mask, removed_on_boundary = apply_quality_flag_filters(
+        final_particles_df.copy(), filter_black_mask, filter_on_boundary
+    )
+    logger.info(
+        "Removed %d particles with black mask artifacts (filter_black_mask=%s).",
+        removed_black_mask, filter_black_mask,
+    )
+    logger.info(
+        "Removed %d particles touching crop boundaries (filter_on_boundary=%s).",
+        removed_on_boundary, filter_on_boundary,
+    )
 
     quality_removed_count = initial_particle_count - len(quality_filtered_df)
 

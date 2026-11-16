@@ -35,6 +35,8 @@ The script will look for `good/` and `bad/` subdirectories inside the provided r
 
 ## Outputs
 
+The training settings are read from `stage_03_filtering_and_classification.training_params` in `config/config.yml`: `test_split_size`, `random_state`, `exclude_feature_prefixes` (feature columns left out of training, e.g. `["lbp_"]`) and `rf_param_grid` (the values `GridSearchCV` searches; one value per parameter trains a single forest). A missing key stops the script.
+
 Successful training writes the refreshed artifacts to `models/` (or the `models_dir` configured in the YAML):
 
 - `rf_fem_classifier.joblib` — trained RandomForest model

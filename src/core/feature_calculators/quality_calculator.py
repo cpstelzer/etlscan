@@ -2,12 +2,16 @@
 import numpy as np
 import pandas as pd
 import logging
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, Tuple
 
 from src.core.sharpness_assessment import calculate_sharpness_metrics
 from src.core.masking_operations import detect_black_mask_artifact
+from src.utils.common_exceptions import DataValidationError
 
 logger = logging.getLogger(__name__)
+
+BLACK_MASK_FLAG_COLUMN = 'has_black_mask_artifact'
+CROP_BOUNDARY_FLAG_COLUMN = 'is_on_crop_boundary'
 
 
 def _resolve_black_mask_check_config(config: Dict[str, Any]) -> Dict[str, Any]:
@@ -79,3 +83,44 @@ def calculate_quality_features(
     # but we could add a preliminary check here if needed in the future.
     
     return features
+
+
+def _drop_flagged_particles(particles_df: pd.DataFrame, flag_column: str) -> Tuple[pd.DataFrame, int]:
+    """Return the particles without ``flag_column`` set, and how many were dropped."""
+    if flag_column not in particles_df.columns:
+        raise DataValidationError(
+            f"Quality-flag filter needs the Stage-2 column {flag_column!r}, which is missing. "
+            "Re-run Stage 2 or disable the filter in stage_03_filtering_and_classification.quality_flags_filter."
+        )
+    flagged_mask = particles_df[flag_column].fillna(False).astype(bool)
+    return particles_df.loc[~flagged_mask], int(flagged_mask.sum())
+
+
+def apply_quality_flag_filters(
+    particles_df: pd.DataFrame,
+    filter_black_mask: bool,
+    filter_on_boundary: bool,
+) -> Tuple[pd.DataFrame, int, int]:
+    """Drop particles that carry an enabled Stage-2 quality flag.
+
+    The single implementation of ``stage_03_filtering_and_classification.quality_flags_filter``,
+    used by batch Stage 3 and realtime Stage 3. The black-mask filter runs first, so the
+    boundary count covers only particles that passed it.
+
+    Returns:
+        (kept particles with a fresh index, removed for a black-mask artifact,
+        removed for touching the crop boundary).
+
+    Raises:
+        DataValidationError: an enabled filter's flag column is missing.
+    """
+    kept_df = particles_df
+    removed_black_mask = 0
+    removed_on_boundary = 0
+    if particles_df.empty:
+        return kept_df.reset_index(drop=True), removed_black_mask, removed_on_boundary
+    if filter_black_mask:
+        kept_df, removed_black_mask = _drop_flagged_particles(kept_df, BLACK_MASK_FLAG_COLUMN)
+    if filter_on_boundary:
+        kept_df, removed_on_boundary = _drop_flagged_particles(kept_df, CROP_BOUNDARY_FLAG_COLUMN)
+    return kept_df.reset_index(drop=True), removed_black_mask, removed_on_boundary

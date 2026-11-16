@@ -28,7 +28,7 @@ def _reset_config():
     config_loader._config = {}
 
 
-def _write_config(tmp_path: Path) -> Path:
+def _write_config(tmp_path: Path, filter_on_boundary: bool = False) -> Path:
     """Write a minimal pipeline config for Stage 3 tests and return its path."""
     config_path = tmp_path / "config.yml"
     config_data = {
@@ -43,11 +43,8 @@ def _write_config(tmp_path: Path) -> Path:
             },
             'ml_filter': {'min_probability_threshold': 0.5},
             'quality_flags_filter': {
-                'filter_on_boundary': False,
+                'filter_on_boundary': filter_on_boundary,
                 'filter_black_mask': False,
-            },
-            'sharpness_filter': {
-                'enabled': False,
             },
         },
     }
@@ -142,3 +139,33 @@ def test_stage3_writes_ml_columns(tmp_path: Path):
     assert legacy_files
     assert filtered_files
     assert set(filtered_files).issubset(set(legacy_files))
+
+
+@pytest.mark.parametrize("filter_on_boundary, expected_kept", [(False, 4), (True, 3)])
+def test_stage3_obeys_quality_flags_filter(tmp_path: Path, filter_on_boundary: bool, expected_kept: int):
+    """A particle on the crop boundary is dropped only when filter_on_boundary is switched on."""
+    config_path = _write_config(tmp_path, filter_on_boundary=filter_on_boundary)
+    _write_dummy_model_artifacts(tmp_path)
+    config = config_loader.load_config_once(str(config_path))
+
+    stage2_df = pd.concat([pd.read_csv(FIXTURE_STAGE2)] * 4, ignore_index=True)
+    stage2_df['final_crop_filename'] = [f'crop{i}.png' for i in range(len(stage2_df))]
+    stage2_df['feature_a'] = [0.05, 0.15, 0.85, 0.95]
+    stage2_df['feature_b'] = [0.05, 0.15, 0.75, 0.85]
+    stage2_df['is_on_crop_boundary'] = [False, False, False, True]
+
+    input_csv = tmp_path / 'stage2_final.csv'
+    stage2_df.to_csv(input_csv, index=False)
+    crops_dir = tmp_path / 'stage2_crops'
+    crops_dir.mkdir()
+    for crop_name in stage2_df['final_crop_filename']:
+        (crops_dir / crop_name).write_bytes(b'00')
+    stage3_output_dir = tmp_path / 'stage3'
+    stage3_output_dir.mkdir()
+
+    run_stage_03_filtering_and_classification(
+        str(input_csv), str(stage3_output_dir), str(crops_dir), sample_id='sample_A', config=config,
+    )
+
+    quality_filtered_df = pd.read_csv(stage3_output_dir / 'focussed_and_filtered.csv')
+    assert len(quality_filtered_df) == expected_kept
