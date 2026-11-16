@@ -26,7 +26,10 @@ from src.core.segmentation import assess_subtracted_foreground  # noqa: E402
 from src.stages.stage_01_initial_detection import analyze_subtracted_image  # noqa: E402
 
 OTSU_CFG = {"thresholding_mode": "otsu", "otsu_threshold_multiplier": 0.7, "fixed_threshold_value": 70}
-PARTICLE_CFG = {"min_microorganism_area": 500, "microorganism_blur_kernel": 5, "apply_convolution": False}
+PARTICLE_CFG = {
+    "min_microorganism_area": 500, "microorganism_blur_kernel": 5,
+    "apply_convolution": False, "convolution_kernel": None,
+}
 SUBFG_CFG = {"foreground_diff_threshold": 10, "max_foreground_fraction": 0.08}
 
 

@@ -16,7 +16,7 @@ except Exception:  # noqa: BLE001 - keep optional dependency for headless envs
     cv2 = None  # type: ignore
 
 from src.utils.common_exceptions import ImageProcessingError
-from src.utils.config_loader import load_config_once
+from src.utils.config_loader import load_config_once, require_config_keys
 
 logger = logging.getLogger(__name__)
 
@@ -54,14 +54,18 @@ def load_flat_field_assets(sample_dir_path: str, mode: str = 'gray') -> Optional
     while the dark image captures baseline sensor signal. We reuse both for every
     frame from the same sample to keep correction consistent and efficient.
     """
-    ffc_cfg = load_config_once().get('flat_field_calibration', {})
-    if not ffc_cfg.get('enabled', True):
+    loaded_config = require_config_keys(load_config_once(), ('flat_field_calibration',), 'config')
+    ffc_cfg = require_config_keys(
+        loaded_config['flat_field_calibration'], ('enabled', 'subdir', 'flat_filename', 'dark_filename'),
+        'flat_field_calibration',
+    )
+    if not ffc_cfg['enabled']:
         logger.info("Flat-field correction is disabled in config. Skipping calibration load.")
         return None
 
-    subdir = ffc_cfg.get('subdir', '1_flat_field')
-    flat_filename = ffc_cfg.get('flat_filename', 'flat.png')
-    dark_filename = ffc_cfg.get('dark_filename', 'dark.png')
+    subdir = ffc_cfg['subdir']
+    flat_filename = ffc_cfg['flat_filename']
+    dark_filename = ffc_cfg['dark_filename']
 
     candidate_dirs = _get_flat_field_candidate_dirs(sample_dir_path, subdir)
     attempted_dirs: list[str] = []

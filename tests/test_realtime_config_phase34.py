@@ -59,17 +59,40 @@ def _base_unified_config(**overrides):
         "stage_01_initial_detection": {
             "black_plate_well_analysis": {
                 "enable_brightness_adjustment": True,
+                "rim_exclusion_px": 60,
                 "well_identification": {
+                    "morph_kernel_size": 9,
                     "low_threshold_value": 10,
                     "min_expected_diameter_px": 1500,
                     "max_expected_diameter_px": 4000,
-                    "min_circularity": 0.6,
+                    "min_fill_ratio_to_enclosing_circle": 0.8,
+                    "center_offset_fraction_threshold": 0.1,
+                    "fallback_full_frame_on_failure": True,
+                },
+                "brightness_peak_calculation": {"min_well_pixels": 100, "percentile_for_peak_proxy": 75},
+                "brightness_matching": {
+                    "max_peak_difference_allowed": 15,
+                    "adjustment_method": "global_shift",
+                    "target_peak_offset_after_shift": 3,
                 },
             },
-            "well_masking": {},
-            "particle_analysis": {},
-            "particle_comparison": {},
-            "unsubtracted_particle_analysis": {"local_otsu_roi_size": 150},
+            "well_masking": {
+                "create_mask": False, "auto_center_mask": True, "radius_px": 2000, "radius_fraction": 0.75,
+            },
+            "particle_analysis": {
+                "apply_convolution": False,
+                "convolution_kernel": None,
+                "min_microorganism_area": 300,
+                "microorganism_blur_kernel": 5,
+            },
+            "particle_comparison": {"search_radius_factor": 2.0, "default_particle_area": 2000},
+            "unsubtracted_particle_analysis": {
+                "local_otsu_roi_size": 150,
+                "min_particle_area": 600,
+                "adaptive_padding_factor": 0.2,
+                "background_floor_percentile": 25,
+                "max_roi_foreground_fraction": 0.85,
+            },
         },
         "stage_02_characterization": {
             "cropping": {"mode": "rotational_rectangle", "rotational_padding": 30, "adaptive_padding_factor": 0.2},
@@ -94,8 +117,6 @@ def _base_unified_config(**overrides):
                 "egg_max_area": 5000,
                 "egg_min_solidity": 0.60,
                 "egg_max_solidity": 0.99,
-                "egg_min_eccentricity": 0.2,
-                "orientation_diff_tolerance_deg": 85,
             }
         },
         "realtime_mode": {
@@ -211,3 +232,11 @@ def test_realtime_loader_requires_grid_settings_only_for_the_grid_loop(tmp_path:
     cfg["acquisition"]["camera"]["trigger_mode"] = "free_run"
     (tmp_path / "free_run").mkdir()   # load_config_once caches by path
     mod.load_realtime_config(str(_write_config(tmp_path / "free_run", cfg)))
+
+
+def test_realtime_loader_requires_the_stage1_detection_keys(tmp_path: Path) -> None:
+    mod = _load_rt_config_module()
+    cfg = _base_unified_config()
+    del cfg["stage_01_initial_detection"]["black_plate_well_analysis"]["brightness_matching"]["adjustment_method"]
+    with pytest.raises(Exception, match="brightness_matching.adjustment_method"):
+        mod.load_realtime_config(str(_write_config(tmp_path, cfg)))

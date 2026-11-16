@@ -7,6 +7,7 @@ from typing import Dict, Any, Optional, Tuple
 from src.core.sharpness_assessment import calculate_sharpness_metrics
 from src.core.masking_operations import detect_black_mask_artifact
 from src.utils.common_exceptions import DataValidationError
+from src.utils.config_loader import require_config_sections
 
 logger = logging.getLogger(__name__)
 
@@ -14,33 +15,16 @@ BLACK_MASK_FLAG_COLUMN = 'has_black_mask_artifact'
 CROP_BOUNDARY_FLAG_COLUMN = 'is_on_crop_boundary'
 
 
+_BLACK_MASK_CHECK_KEYS = ("min_area_ratio", "max_black_pixel_value", "min_edge_thickness_fraction")
+
+
 def _resolve_black_mask_check_config(config: Dict[str, Any]) -> Dict[str, Any]:
-    """Resolve and validate black-mask config from Stage-2 shared config."""
-    quality_features_cfg = config.get("quality_features")
-    if not isinstance(quality_features_cfg, dict):
-        raise ValueError(
-            "Stage-2 config must define 'quality_features' as a mapping with "
-            "'black_mask_check' values."
-        )
-
-    black_mask_cfg = quality_features_cfg.get("black_mask_check")
-    if not isinstance(black_mask_cfg, dict):
-        raise ValueError(
-            "Stage-2 config must define 'quality_features.black_mask_check' as a mapping."
-        )
-
-    required_keys = (
-        "min_area_ratio",
-        "max_black_pixel_value",
-        "min_edge_thickness_fraction",
+    """Return ``quality_features.black_mask_check`` of the Stage-2 config (ConfigError if incomplete)."""
+    require_config_sections(
+        config, {"quality_features.black_mask_check": _BLACK_MASK_CHECK_KEYS}, "stage_02_characterization"
     )
-    missing = [key for key in required_keys if key not in black_mask_cfg]
-    if missing:
-        raise ValueError(
-            "Missing required Stage-2 black-mask config keys: "
-            + ", ".join(missing)
-        )
-    return black_mask_cfg
+    return config["quality_features"]["black_mask_check"]
+
 
 def calculate_quality_features(
     image_crop_gray: np.ndarray,

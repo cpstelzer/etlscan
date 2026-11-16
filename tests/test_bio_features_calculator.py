@@ -3,6 +3,7 @@ import numpy as np
 import pytest
 
 from src.core.feature_calculators.bio_features_calculator import calculate_posterior_attributes
+from src.utils.common_exceptions import ConfigError
 
 
 # ---------------------------------------------------------------------------
@@ -52,8 +53,8 @@ def test_calculate_posterior_attributes_missing_orientation_defaults():
     assert coords is None
 
 
-def test_calculate_posterior_attributes_out_of_range_fraction_clamps():
+def test_calculate_posterior_attributes_out_of_range_fraction_fails():
     props = _FakeProps()
-    # fraction > 1 should be clamped to 0.45 without raising
-    annotated, ratio, coords = calculate_posterior_attributes(props, (20, 20), 1.5)
-    assert 0.0 <= ratio <= 1.0
+    # the fraction comes from config.yml; a value outside (0, 1) is not replaced by a default
+    with pytest.raises(ConfigError, match="egg_posterior_pixel_fraction"):
+        calculate_posterior_attributes(props, (20, 20), 1.5)

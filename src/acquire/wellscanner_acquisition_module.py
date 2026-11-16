@@ -46,6 +46,7 @@ from .triggered_acquisition import (
     read_lens_temperature, restore_free_run, sample_camera_clock, summarize_grid_recording, summarize_recording,
 )
 from src.utils.acquisition_metadata import METADATA_LOOP_ERROR_PREFIX, METADATA_MISSING_VALUE
+from src.utils.common_exceptions import ConfigError
 
 # --- Global Mappings ---
 # Maps Pylon Bayer formats to OpenCV debayering codes
@@ -91,15 +92,22 @@ def load_config(config_path=DEFAULT_CONFIG_PATH):
     # Plate geometry is already shaped as acquisition.plate.definitions in the
     # config, so get_plate_settings reads it directly -- no reshaping needed.
 
-    watermark_cfg = acq.get("watermark")
-    if watermark_cfg and "font" in watermark_cfg:
-        watermark_cfg["font"] = getattr(cv2, watermark_cfg["font"], cv2.FONT_HERSHEY_SIMPLEX)
+    # The config names the OpenCV font and the pylon grab strategy; resolve the names to the
+    # library constants once (the config is cached, so a second call finds them resolved).
+    watermark_cfg = acq["watermark"]
+    if isinstance(watermark_cfg["font"], str):
+        if not hasattr(cv2, watermark_cfg["font"]):
+            raise ConfigError(f"acquisition.watermark.font: OpenCV has no font {watermark_cfg['font']!r}.")
+        watermark_cfg["font"] = getattr(cv2, watermark_cfg["font"])
 
-    camera_cfg = acq.get("camera")
-    if camera_cfg and "grab_strategy" in camera_cfg:
-        camera_cfg["grab_strategy"] = getattr(
-            pylon, f"GrabStrategy_{camera_cfg['grab_strategy']}", pylon.GrabStrategy_OneByOne
-        )
+    camera_cfg = acq["camera"]
+    if isinstance(camera_cfg["grab_strategy"], str):
+        grab_strategy_name = f"GrabStrategy_{camera_cfg['grab_strategy']}"
+        if not hasattr(pylon, grab_strategy_name):
+            raise ConfigError(
+                f"acquisition.camera.grab_strategy: pylon has no grab strategy {camera_cfg['grab_strategy']!r}."
+            )
+        camera_cfg["grab_strategy"] = getattr(pylon, grab_strategy_name)
 
     return acq
 
@@ -624,7 +632,7 @@ def acquire_and_save_frames(camera, lens, full_focus_pattern,
             csvfile.write(f"# Pixel Format: {camera.PixelFormat.GetValue()}\n")
             csvfile.write(f"# Image Format: .{output_image_format}\n")
             csvfile.write(f"# Lens Controller Port: {config['focusing']['lens_controller_port']}\n")
-            csvfile.write(f"# Focusing Pattern: {config['focusing'].get('pattern', 'zigzag')}\n")
+            csvfile.write(f"# Focusing Pattern: {config['focusing']['pattern']}\n")
             csvfile.write(f"# Lens Settle Time (s): {lens_settle_time_sec}\n")
             csvfile.write(f"# Trigger Mode: {trigger_mode}\n")
             if trigger_mode == TRIGGER_MODE_SOFTWARE_GRID:
@@ -691,7 +699,7 @@ def run_acquisition(PLATE_ID, WELL_ID, START_DPT, config, process_as_color=False
             raise
 
         print("Calculating focusing pattern...")
-        focus_mode = config['focusing'].get('pattern', 'zigzag')
+        focus_mode = config['focusing']['pattern']
         scan_height_mm = config['focusing']['scan_height_mm']
         scan_step_um = config['focusing']['scan_step_um']
         scan_ratio = config['focusing']['scan_ratio']

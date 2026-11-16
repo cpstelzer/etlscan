@@ -13,20 +13,29 @@ import csv
 import sys
 
 from src.acquire.stage_controller import StageController
-from src.utils.config_loader import load_config_once
+from src.utils.config_loader import load_config_once, require_config_sections
 
 CSV_FILENAME = "wellscanner_coords.csv"
 
 
 def main():
-    sc_cfg = load_config_once().get('acquisition', {}).get('stage_controller', {})
+    acq_conf = load_config_once()['acquisition']
+    require_config_sections(
+        acq_conf,
+        {'stage_controller': (
+            'serial_port', 'device_x_number', 'device_y_number', 'microstep_size_um',
+            'position_tolerance_microsteps',
+        )},
+        'acquisition',
+    )
+    sc_cfg = acq_conf['stage_controller']
     controller = StageController(
-        serial_port=sc_cfg.get('serial_port', 'COM4'),
-        device_x_number=sc_cfg.get('device_x_number', 1),
-        device_y_number=sc_cfg.get('device_y_number', 2),
-        device_x_microstep_size=sc_cfg.get('microstep_size_um', 0.15625),
-        device_y_microstep_size=sc_cfg.get('microstep_size_um', 0.15625),
-        position_tolerance=sc_cfg.get('position_tolerance_microsteps', 10),
+        serial_port=sc_cfg['serial_port'],
+        device_x_number=sc_cfg['device_x_number'],
+        device_y_number=sc_cfg['device_y_number'],
+        device_x_microstep_size=sc_cfg['microstep_size_um'],
+        device_y_microstep_size=sc_cfg['microstep_size_um'],
+        position_tolerance=sc_cfg['position_tolerance_microsteps'],
     )
 
     port, device_x, device_y = controller.initialize()

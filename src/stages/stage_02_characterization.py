@@ -24,7 +24,7 @@ from src.utils import (
     load_dataframe_from_csv, save_dataframe_to_csv, build_crop_filename
 )
 from src.utils.acquisition_metadata import get_scan_extent_mm
-from src.utils.config_loader import get_unified_segmentation_params
+from src.utils.config_loader import get_unified_segmentation_params, require_config_keys
 from src.utils.path_helpers import extract_frame_from_filename
 from src.utils.common_exceptions import ConfigError, DataValidationError
 from src.core.image_io_operations import load_image, convert_to_grayscale
@@ -54,6 +54,13 @@ FOCUS_Y_PIXEL_COLUMN = 'Y'
 FOCUS_X_MM_COLUMN = 'x_mm'
 FOCUS_Y_MM_COLUMN = 'y_mm'
 FOCUS_SHOW_PLOTS = False
+FOCUS_CONFIG_PATH = 'stage_02_characterization.focussed_particles'
+# Keys of that section the batch stage reads (sharpness_min_threshold is the realtime gate).
+FOCUS_CONFIG_KEYS = (
+    'enabled', 'frame_column', 'track_column', 'sharpness_column', 'peak_detection',
+    'max_tracks_to_plot', 'trajectory_smoothing_factor', 'min_points_for_spline',
+    'depth_knot_speed_gate', 'save_plots', 'crop_filename_prefix',
+)
 
 def run_stage_02_characterization(
     input_s1_csv_path: str,
@@ -147,7 +154,7 @@ def run_stage_02_characterization(
     )
     comprehensive_df.drop(columns=['s1_original_index'], inplace=True, errors='ignore')
 
-    focus_cfg = s2_config['focussed_particles']
+    focus_cfg = require_config_keys(s2_config['focussed_particles'], FOCUS_CONFIG_KEYS, FOCUS_CONFIG_PATH)
     track_col = focus_cfg['track_column']
 
     # focus filter
@@ -163,7 +170,7 @@ def run_stage_02_characterization(
     # carry that per-frame depth onto the in-focus selections so it also reaches
     # filtered_in_focus.csv and final_particles.csv (a pass-through, not an ML feature)
     filtered_df = attach_reconstructed_depth_to_subset(
-        filtered_df, comprehensive_df, track_col, focus_cfg.get('frame_column', 'frame')
+        filtered_df, comprehensive_df, track_col, focus_cfg['frame_column']
     )
 
     final_particles_df = pd.DataFrame()
@@ -324,7 +331,7 @@ def compute_features(
 
         crop_float_orig = skimage.util.img_as_float(crop_gray)
         intensity_img_for_props = crop_float_orig.copy()
-        if segmentation_params.get('source_image_illumination_type') == 'collimated':
+        if segmentation_params['source_image_illumination_type'] == 'collimated':
             intensity_img_for_props = 1.0 - intensity_img_for_props
         morphology_features = calculate_detailed_body_morphology(raw_mask, filled_mask, intensity_img_for_props)
         renamed_morphology = {k.replace('_s4', ''): v for k, v in morphology_features.items()}
@@ -343,12 +350,12 @@ def select_focused_tracks(
     focus_cfg: Dict[str, Any]
 ) -> Tuple[Optional[pd.DataFrame], Optional[pd.DataFrame]]:
     """Limit each track to frames near sharpness peaks and emit diagnostics."""
-    if not focus_cfg.get('enabled', False):
+    if not focus_cfg['enabled']:
         return None, None
 
-    frame_col = focus_cfg.get('frame_column', 'frame')
-    track_col = focus_cfg.get('track_column', 'track_id')
-    sharp_col = focus_cfg.get('sharpness_column', 'variance_laplacian')
+    frame_col = focus_cfg['frame_column']
+    track_col = focus_cfg['track_column']
+    sharp_col = focus_cfg['sharpness_column']
     z_col = FOCUS_Z_COLUMN
 
     required_cols = {frame_col, track_col, sharp_col, z_col}
@@ -415,17 +422,22 @@ def emit_focus_artifacts(
     save_dataframe_to_csv(filtered_df, output_dir_stage2, 'filtered_in_focus.csv')
     save_dataframe_to_csv(diagnostics_df, output_dir_stage2, 'diagnostics_selected_peaks.csv')
 
-    if focus_cfg.get('save_plots', True):
+    track_col = focus_cfg['track_column']
+    frame_col = focus_cfg['frame_column']
+    smoothing_factor = focus_cfg['trajectory_smoothing_factor']
+    min_points_for_spline = focus_cfg['min_points_for_spline']
+
+    if focus_cfg['save_plots']:
         focus_plots_dir = os.path.join(output_dir_stage2, 'focussed_particles')
         os.makedirs(focus_plots_dir, exist_ok=True)
 
-        prefix = focus_cfg.get('crop_filename_prefix') or sample_id
-        max_tracks = focus_cfg.get('max_tracks_to_plot')
+        prefix = focus_cfg['crop_filename_prefix'] or sample_id
+        max_tracks = focus_cfg['max_tracks_to_plot']
         plot_example_tracks_with_collages(
             comprehensive_df,
-            focus_cfg.get('track_column', 'track_id'),
-            focus_cfg.get('frame_column', 'frame'),
-            focus_cfg.get('sharpness_column', 'variance_laplacian'),
+            track_col,
+            frame_col,
+            focus_cfg['sharpness_column'],
             FOCUS_Z_COLUMN,
             focus_cfg,
             crops_dir,
@@ -438,21 +450,21 @@ def emit_focus_artifacts(
             plot_3d_reconstructed(
                 comprehensive_df,
                 filtered_df,
-                focus_cfg.get('track_column', 'track_id'),
-                focus_cfg.get('frame_column', 'frame'),
+                track_col,
+                frame_col,
                 FOCUS_Z_COLUMN,
                 os.path.join(focus_plots_dir, 'reconstructed_trajectories_3d.png'),
                 max_tracks,
-                focus_cfg.get('trajectory_smoothing_factor', 0.5),
-                focus_cfg.get('min_points_for_spline', 5),
+                smoothing_factor,
+                min_points_for_spline,
                 extent_mm
             )
 
             plot_xy_reconstructed(
                 comprehensive_df,
                 filtered_df,
-                focus_cfg.get('track_column', 'track_id'),
-                focus_cfg.get('frame_column', 'frame'),
+                track_col,
+                frame_col,
                 os.path.join(focus_plots_dir, 'reconstructed_trajectories_xy.png'),
                 max_tracks,
                 extent_mm
@@ -462,13 +474,13 @@ def emit_focus_artifacts(
                 plot_side_view_reconstructed(
                     comprehensive_df,
                     filtered_df,
-                    focus_cfg.get('track_column', 'track_id'),
-                    focus_cfg.get('frame_column', 'frame'),
+                    track_col,
+                    frame_col,
                     FOCUS_Z_COLUMN,
                     os.path.join(focus_plots_dir, f'reconstructed_trajectories_{horizontal_axis}z.png'),
                     max_tracks,
-                    focus_cfg.get('trajectory_smoothing_factor', 0.5),
-                    focus_cfg.get('min_points_for_spline', 5),
+                    smoothing_factor,
+                    min_points_for_spline,
                     extent_mm,
                     horizontal_axis
                 )
@@ -568,15 +580,10 @@ class FocusSweep(NamedTuple):
 
 def _peak_detection_settings(focus_cfg: Dict[str, Any]) -> Dict[str, Any]:
     """Return the validated ``focussed_particles.peak_detection`` settings (fail fast)."""
-    peak_cfg = focus_cfg.get('peak_detection')
-    if not isinstance(peak_cfg, dict):
-        raise ConfigError(
-            "stage_02_characterization.focussed_particles.peak_detection must be a mapping "
-            f"with the keys {', '.join(PEAK_DETECTION_KEYS)}."
-        )
-    missing = [key for key in PEAK_DETECTION_KEYS if key not in peak_cfg]
-    if missing:
-        raise ConfigError(f"Missing focussed_particles.peak_detection keys: {', '.join(missing)}")
+    require_config_keys(focus_cfg, ('peak_detection',), FOCUS_CONFIG_PATH)
+    peak_cfg = require_config_keys(
+        focus_cfg['peak_detection'], PEAK_DETECTION_KEYS, f"{FOCUS_CONFIG_PATH}.peak_detection"
+    )
     if not isinstance(peak_cfg['one_peak_per_sweep_pass'], bool):
         raise ConfigError(
             "peak_detection.one_peak_per_sweep_pass must be true or false, "
@@ -1025,15 +1032,11 @@ DEPTH_KNOT_SPEED_OUTLIER_COLUMN = 'depth_knot_speed_outlier'
 
 def _depth_knot_speed_gate_settings(focus_cfg: Dict[str, Any]) -> Dict[str, float]:
     """Return the validated ``focussed_particles.depth_knot_speed_gate`` settings (fail fast)."""
-    gate_cfg = focus_cfg.get('depth_knot_speed_gate')
-    if not isinstance(gate_cfg, dict):
-        raise ConfigError(
-            "stage_02_characterization.focussed_particles.depth_knot_speed_gate must be a mapping "
-            f"with the keys {', '.join(DEPTH_KNOT_SPEED_GATE_KEYS)}."
-        )
-    missing = [key for key in DEPTH_KNOT_SPEED_GATE_KEYS if key not in gate_cfg]
-    if missing:
-        raise ConfigError(f"Missing focussed_particles.depth_knot_speed_gate keys: {', '.join(missing)}")
+    require_config_keys(focus_cfg, ('depth_knot_speed_gate',), FOCUS_CONFIG_PATH)
+    gate_cfg = require_config_keys(
+        focus_cfg['depth_knot_speed_gate'], DEPTH_KNOT_SPEED_GATE_KEYS,
+        f"{FOCUS_CONFIG_PATH}.depth_knot_speed_gate",
+    )
     settings = {key: float(gate_cfg[key]) for key in DEPTH_KNOT_SPEED_GATE_KEYS}
     if not settings['max_vertical_speed_mm_s'] > 0:
         raise ConfigError(
@@ -1167,11 +1170,11 @@ def add_reconstructed_depth(
     if filtered_df is None or filtered_df.empty:
         return comprehensive_df
 
-    track_col = focus_cfg.get('track_column', 'track_id')
-    frame_col = focus_cfg.get('frame_column', 'frame')
+    track_col = focus_cfg['track_column']
+    frame_col = focus_cfg['frame_column']
     z_col = FOCUS_Z_COLUMN
-    smoothing_factor = float(focus_cfg.get('trajectory_smoothing_factor', 0.5))
-    min_points_for_spline = int(focus_cfg.get('min_points_for_spline', 5))
+    smoothing_factor = float(focus_cfg['trajectory_smoothing_factor'])
+    min_points_for_spline = int(focus_cfg['min_points_for_spline'])
 
     required = {track_col, frame_col, z_col}
     if not required.issubset(comprehensive_df.columns) or not required.issubset(filtered_df.columns):

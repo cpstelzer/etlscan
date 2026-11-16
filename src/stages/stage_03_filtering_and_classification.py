@@ -27,6 +27,7 @@ from src.utils import (
     save_dataframe_to_csv,
 )
 from src.utils.common_exceptions import DataValidationError, MLModelError
+from src.utils.config_loader import require_config_sections
 from src.core.feature_calculators.quality_calculator import apply_quality_flag_filters
 
 logger = logging.getLogger(__name__)
@@ -83,17 +84,11 @@ SIZE_DEPENDENT_RAW_FEATURE_RULES = {
 def _get_lbp_feature_count_from_config(config: dict) -> int:
     """Return how many LBP columns Stage 2 should have produced."""
 
-    if config is None:
-        return 0
-    stage2_config = config.get('stage_02_characterization', {})
-    shape_config = stage2_config.get('shape_descriptors', {})
-    lbp_radii = shape_config.get('lbp_radii') or []
-    lbp_points = shape_config.get('lbp_points')
-
-    if not lbp_radii or lbp_points is None:
-        return 0
-
-    return len(lbp_radii) * (lbp_points + 2)
+    require_config_sections(
+        config, {'stage_02_characterization.shape_descriptors': ('lbp_radii', 'lbp_points')}, 'config'
+    )
+    shape_config = config['stage_02_characterization']['shape_descriptors']
+    return len(shape_config['lbp_radii']) * (shape_config['lbp_points'] + 2)
 
 
 def _get_expected_numeric_feature_columns(config: dict) -> List[str]:
@@ -179,7 +174,7 @@ def apply_size_invariant_feature_strategy(
 
 def _validate_required_feature_columns(
     df: pd.DataFrame,
-    config: dict = None,
+    config: dict,
 ) -> None:
     """Ensure Stage 3 receives the expected numeric feature set."""
 
@@ -290,9 +285,8 @@ def _load_ml_artifacts(s3_config: dict, config: dict) -> tuple:
     scaler_filename = rf_cfg['scaler_filename']
     model_path = os.path.join(models_dir, model_filename)
     scaler_path = os.path.join(models_dir, scaler_filename)
-    feature_names_filename = rf_cfg.get(
-        'feature_names_filename', f"{os.path.splitext(model_filename)[0]}_feature_names.txt"
-    )
+    # Written next to the model by scripts/train_model.py under this derived name.
+    feature_names_filename = f"{os.path.splitext(model_filename)[0]}_feature_names.txt"
     feature_names_path = os.path.join(models_dir, feature_names_filename)
 
     if not os.path.exists(model_path):

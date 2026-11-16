@@ -15,7 +15,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 from matplotlib.axes import Axes
 
-from src.utils.common_exceptions import ConfigError
+from src.utils.config_loader import require_config_keys
 
 _FIGURE_STYLE_KEYS = (
     'dpi', 'font_family', 'font_size', 'tick_label_size', 'title_size', 'annotation_size', 'line_width',
@@ -38,12 +38,8 @@ _TRANSPARENT = (1.0, 1.0, 1.0, 0.0)
 
 def _figure_style_rc_params(config: Dict[str, Any]) -> Dict[str, Any]:
     """Translate ``config['figure_style']`` into matplotlib rcParams (ConfigError if incomplete)."""
-    style_config = config.get('figure_style')
-    if style_config is None:
-        raise ConfigError("Config section 'figure_style' is missing.")
-    missing = [key for key in _FIGURE_STYLE_KEYS if key not in style_config]
-    if missing:
-        raise ConfigError(f"Config section 'figure_style' is missing keys: {missing}")
+    require_config_keys(config, ('figure_style',), 'config')
+    style_config = require_config_keys(config['figure_style'], _FIGURE_STYLE_KEYS, 'figure_style')
 
     return {
         'savefig.dpi': style_config['dpi'],

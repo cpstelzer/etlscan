@@ -31,7 +31,7 @@ gray_img = cv2.cvtColor(image_color, cv2.COLOR_BGR2GRAY)
 |------|---------|
 | Always `{scope}_config` | `mask_config`, `crop_config`, `well_analysis_config` |
 | Never use `cfg` abbreviation | ~~`cfg_well_id`~~, ~~`cfg`~~ |
-| Local aliases must also use the full form | `well_id_config = config_well_analysis.get(...)` |
+| Local aliases must also use the full form | `well_id_config = config_well_analysis['well_identification']` |
 
 ```python
 # Good
@@ -94,17 +94,34 @@ def compute_aabb(contour):               # public
 ## 6. Magic numbers and string literals
 
 All numeric thresholds, device IDs, filenames, and tuneable values
-**must** be defined in `src/utils/constants.py`.  Inline literals are
+**must** be defined in `config/config.yml`.  Inline literals are
 not permitted in business logic.
+
+`config.yml` is the only source of a parameter's value. Code never carries a
+second copy as a fallback:
+
+- Read a value by indexing its section (`section['key']`), never with
+  `section.get('key', default)`.
+- A function that receives a config section checks it once with
+  `require_config_keys(section, keys, 'dotted.section.path')`
+  (`src/utils/config_loader.py`); a stage checks all its sections at its start with
+  `require_config_sections` (see `validate_stage1_config`). A missing key raises
+  `ConfigError` naming its path in `config.yml`.
+- No function-signature defaults for values that come from the config.
+- A key nothing reads is removed from `config.yml`.
+
+`tests/test_config_key_coverage.py` enforces the first and last point.
 
 ```python
 # Good
-from src.utils.constants import MORPH_KERNEL_SIZE_LARGE
-kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE,
-                                   (MORPH_KERNEL_SIZE_LARGE, MORPH_KERNEL_SIZE_LARGE))
+require_config_keys(well_identification_config, ('morph_kernel_size',),
+                    'stage_01_initial_detection.black_plate_well_analysis.well_identification')
+morph_kernel_size = well_identification_config['morph_kernel_size']
+kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (morph_kernel_size, morph_kernel_size))
 
-# Bad
+# Bad: a literal, or a fallback that can drift from config.yml
 kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (9, 9))
+morph_kernel_size = well_identification_config.get('morph_kernel_size', 9)
 ```
 
 ---

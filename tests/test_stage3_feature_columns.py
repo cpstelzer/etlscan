@@ -13,20 +13,22 @@ from src.utils.common_exceptions import DataValidationError
 
 
 FIXTURE_PATH = 'tests/fixtures/sample_stage2_final.csv'
+# Stage-2 config that produces no LBP columns, so only the base features are required.
+NO_LBP_CONFIG = {'stage_02_characterization': {'shape_descriptors': {'lbp_radii': [], 'lbp_points': 8}}}
 
 
 def test_validate_required_feature_columns_passes_with_fixture():
     """Fixture CSV should satisfy required feature column validation."""
     df = pd.read_csv(FIXTURE_PATH)
     # Should not raise
-    _validate_required_feature_columns(df)
+    _validate_required_feature_columns(df, config=NO_LBP_CONFIG)
 
 
 def test_validate_required_feature_columns_raises_on_missing():
     """Validation should raise when key feature columns are absent."""
     df = pd.DataFrame({'frame': [1]})
     with pytest.raises(DataValidationError):
-        _validate_required_feature_columns(df)
+        _validate_required_feature_columns(df, config=NO_LBP_CONFIG)
 
 
 def test_metadata_columns_are_prefixed():

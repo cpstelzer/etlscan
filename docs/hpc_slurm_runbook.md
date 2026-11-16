@@ -11,7 +11,7 @@ Raw data, i.e., sample directories containing the image series (e.g., 20260212_p
 
 ## 2) Output placement (important)
 
-`run_pipeline.py` writes outputs relative to `paths.pipeline_base` from your config (the legacy top-level `project_base_dir` key is still accepted as a fallback):
+`run_pipeline.py` writes outputs relative to `paths.pipeline_base` from your config (required; the former top-level `project_base_dir` key is no longer read):
 
 - per-sample outputs: `<paths.pipeline_base>/data/output/<batch>/<sample>/...`
 - batch rollups: `<paths.pipeline_base>/<batch>.csv`, `<batch>_stage3_filtered_good.csv`, etc.

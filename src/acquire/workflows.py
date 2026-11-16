@@ -54,6 +54,7 @@ from .focus_pattern import build_focus_cycle_pattern, count_frames_for_plane_vis
 from .stage_controller import StageController
 from .well_selector_gui import well_selection_gui
 from src.utils.common_exceptions import ConfigError
+from src.utils.config_loader import require_config_keys
 
 
 def _get_acquisition_api():
@@ -91,7 +92,7 @@ def decide_color_mode(acq_conf):
     print("\nStep 2: Determining Acquisition Mode")
     process_images_in_color = False
     is_color_camera = check_camera_is_color()
-    color_mode_config = acq_conf.get('camera', {}).get('color_mode', 'Ask').capitalize()
+    color_mode_config = acq_conf['camera']['color_mode'].capitalize()
 
     if color_mode_config == 'Color':
         if not is_color_camera:
@@ -308,8 +309,8 @@ def run_multiwell_workflow(*, acquisition_config_path, csv_filename):
 
     process_images_in_color = decide_color_mode(acq_conf)
 
-    summary_log_fn = acq_conf.get('paths', {}).get('experiment_summary_log_filename', 'experiment_summary_log.csv')
-    base_out_dir = acq_conf.get('paths', {}).get('output_folder_base', '.')
+    summary_log_fn = acq_conf['paths']['experiment_summary_log_filename']
+    base_out_dir = acq_conf['paths']['output_folder_base']
     os.makedirs(base_out_dir, exist_ok=True)
     exp_summary_log_pth = os.path.join(base_out_dir, summary_log_fn)
     initialize_experiment_log(
@@ -454,12 +455,8 @@ def validate_experiment_sweep_settings(acq_conf: dict) -> dict:
     """
     required_keys = ('scan_steps_um_options', 'focusing_pattern_options',
                      'variable_recording_duration', 'plane_revisit_times')
-    sweep_conf = acq_conf.get('experiment_sweep')
-    if not isinstance(sweep_conf, dict):
-        raise ConfigError("acquisition.experiment_sweep is missing from the config.")
-    missing_keys = [key for key in required_keys if key not in sweep_conf]
-    if missing_keys:
-        raise ConfigError(f"acquisition.experiment_sweep is missing required keys: {missing_keys}")
+    require_config_keys(acq_conf, ('experiment_sweep',), 'acquisition')
+    sweep_conf = require_config_keys(acq_conf['experiment_sweep'], required_keys, 'acquisition.experiment_sweep')
 
     scan_steps = sweep_conf['scan_steps_um_options']
     if (not isinstance(scan_steps, list) or not scan_steps
