@@ -15,21 +15,18 @@ mamba create -y -p wellscan_env -c conda-forge \
   pip
 
 # Activate the environment
-conda activate /gpfs/gpfs1/scratch/c7471022/wellscan_env
+conda activate $SCRATCH/wellscan_env
 
 # Explicitly install pytorch after activating new conda environment
 mamba install -y -c pytorch pytorch torchvision torchaudio cpuonly
 # (GPU support is also possible, but requires cluster-specific command!)
 
 # Install the pip-only packages
-python -m pip install --no-user -r scratch/c7471022/env_setup/pip-requirements.txt
+python -m pip install --no-user -r $SCRATCH/env_setup/pip-requirements.txt
 
 
 ##### NOTE #################
 # pypylon installation did not work on leo5 due to a too old pip
 # so I did not install it (don't need a camera anyway)
-# Also, I did not install Optotune SDK because it is also not needed for calculations
-
-# Install local Optotune SDK wheels
-python -m pip install --no-user optoKummenberg-1.0.4894-py3-none-any.whl
-python -m pip install --no-user optoICC-2.0.4922-py3-none-any.whl
+# Also, I did not install the Optotune SDK because it is also not needed for calculations
+# (it is not distributed with this repository, see howto_build_wellscan24_env.txt)
