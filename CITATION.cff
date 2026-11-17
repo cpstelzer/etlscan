@@ -34,7 +34,7 @@ keywords:
   - zooplankton
 identifiers:
   - type: doi
-    value: 10.5281/zenodo.20396908
+    value: 10.5281/zenodo.20396907
     description: "Supplementary data for: Depth-resolved imaging of live plankton with electronically tunable lenses"
 preferred-citation:
   type: article
