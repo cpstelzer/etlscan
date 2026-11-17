@@ -3,17 +3,62 @@ from __future__ import annotations
 import time
 from math import isclose
 
+from src.utils.config_loader import require_config_keys
+
+
+
+# Keys of acquisition.stage_controller (config: stage_hardware_profile).
+STAGE_CONTROLLER_CONFIG_KEYS = (
+    'serial_port', 'device_x_number', 'device_y_number', 'microstep_size_um',
+    'position_tolerance_microsteps', 'baud_rate', 'serial_timeout_sec', 'renumber_wait_sec',
+    'homing_wait_sec', 'axis_move_wait_sec', 'between_axes_wait_sec', 'settle_wait_sec',
+)
 
 
 class StageController:
+    """Zaber XY stage over the binary serial protocol; every setting comes from the config."""
+
     def __init__(self, serial_port, device_x_number, device_y_number, device_x_microstep_size, device_y_microstep_size,
-                 position_tolerance):
+                 position_tolerance, *, baud_rate, serial_timeout_sec, renumber_wait_sec, homing_wait_sec,
+                 axis_move_wait_sec, between_axes_wait_sec, settle_wait_sec):
         self.serial_port = serial_port
         self.device_x_number = device_x_number
         self.device_y_number = device_y_number
         self.device_x_microstep_size = device_x_microstep_size
         self.device_y_microstep_size = device_y_microstep_size
         self.position_tolerance = position_tolerance
+        self.baud_rate = baud_rate
+        self.serial_timeout_sec = serial_timeout_sec
+        self.renumber_wait_sec = renumber_wait_sec
+        self.homing_wait_sec = homing_wait_sec
+        self.axis_move_wait_sec = axis_move_wait_sec
+        self.between_axes_wait_sec = between_axes_wait_sec
+        self.settle_wait_sec = settle_wait_sec
+
+    @classmethod
+    def from_config(cls, stage_controller_config) -> "StageController":
+        """Build the controller from ``acquisition.stage_controller`` (the stage hardware profile).
+
+        Raises:
+            ConfigError: a key of the profile is missing.
+        """
+        require_config_keys(stage_controller_config, STAGE_CONTROLLER_CONFIG_KEYS, 'stage_hardware_profile')
+        microstep_size_um = stage_controller_config['microstep_size_um']
+        return cls(
+            stage_controller_config['serial_port'],
+            stage_controller_config['device_x_number'],
+            stage_controller_config['device_y_number'],
+            microstep_size_um,
+            microstep_size_um,
+            stage_controller_config['position_tolerance_microsteps'],
+            baud_rate=stage_controller_config['baud_rate'],
+            serial_timeout_sec=stage_controller_config['serial_timeout_sec'],
+            renumber_wait_sec=stage_controller_config['renumber_wait_sec'],
+            homing_wait_sec=stage_controller_config['homing_wait_sec'],
+            axis_move_wait_sec=stage_controller_config['axis_move_wait_sec'],
+            between_axes_wait_sec=stage_controller_config['between_axes_wait_sec'],
+            settle_wait_sec=stage_controller_config['settle_wait_sec'],
+        )
 
     def initialize(self):
         from zaber.serial import BinarySerial, BinaryDevice, BinaryCommand
@@ -22,7 +67,7 @@ class StageController:
         print(f"Initializing Zaber stage on port {self.serial_port}...")
         port = None
         try:
-            port = BinarySerial(self.serial_port, baud=115200, timeout=60)
+            port = BinarySerial(self.serial_port, baud=self.baud_rate, timeout=self.serial_timeout_sec)
             print("  Port opened.")
             print("  Renumbering devices...")
             renumber_cmd = BinaryCommand(0, 2)
@@ -32,7 +77,7 @@ class StageController:
                 print(f"  Ignored UnexpectedReplyError during renumbering: {e}")
             except Exception as e_renumber:
                 print(f"  An error occurred during renumbering: {e_renumber}")
-            time.sleep(3)
+            time.sleep(self.renumber_wait_sec)
             port.flush()
             print("  Renumbering attempt finished.")
             device_x = BinaryDevice(port, self.device_x_number)
@@ -71,7 +116,7 @@ class StageController:
             print(f"    Ignored UnexpectedReplyError during homing of {device_name_str}: {e}")
         except Exception as e_home:
             print(f"    An error occurred during homing of {device_name_str}: {e_home}")
-        time.sleep(2.5)
+        time.sleep(self.homing_wait_sec)
         port_obj.flush()
         print(f"  Finished homing attempt for Zaber device {device_name_str}.")
 
@@ -87,7 +132,7 @@ class StageController:
                 print(f"    Ignored UnexpectedReplyError while moving {axis_name}-axis: {e}")
             except Exception as e_move:
                 print(f"    An error occurred while moving {axis_name}-axis: {e_move}")
-            time.sleep(1.5)
+            time.sleep(self.axis_move_wait_sec)
             port_obj.flush()
             print(f"  Zaber {axis_name}-axis move command sent. Assumed at {target_steps} microsteps.")
             return target_steps
@@ -102,10 +147,10 @@ class StageController:
         print(f"\nMoving Zaber stage to X = {x_mm:.2f} mm ({x_target_s} steps), Y = {y_mm:.2f} mm ({y_target_s} steps)")
 
         new_lx = self._move_axis_if_needed(dev_x, x_target_s, last_x_steps, "X", port_obj)
-        time.sleep(0.2)
+        time.sleep(self.between_axes_wait_sec)
         new_ly = self._move_axis_if_needed(dev_y, y_target_s, last_y_steps, "Y", port_obj)
 
         print("  Waiting for Zaber stage to settle at position...")
-        time.sleep(2)
+        time.sleep(self.settle_wait_sec)
         port_obj.flush()
         return new_lx, new_ly

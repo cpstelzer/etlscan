@@ -30,7 +30,6 @@ import csv
 import yaml # For loading config
 from datetime import date, datetime, timedelta
 from concurrent.futures import ThreadPoolExecutor, as_completed
-import math # For FPS rounding
 
 import cv2
 import numpy as np
@@ -38,7 +37,15 @@ from pypylon import pylon
 import optoICC
 
 from .focus_pattern import build_focus_cycle_pattern
-from .roi import reset_roi_to_full, set_centered_roi
+from .hardware_setup import (
+    close_camera,
+    configure_camera,
+    connect_lens,
+    disconnect_lens,
+    open_first_camera,
+    prefocus_lens,
+    set_frame_rate,
+)
 from .triggered_acquisition import (
     TRIGGER_MODE_SOFTWARE_GRID, TRIGGER_MODES, FixedGridTriggerLoop, GridTimingParams, block_id_steps,
     build_camera_clock_map, camera_tick_frequency_hz, camera_ticks_to_ns, find_lens_temperature_reader,
@@ -53,20 +60,6 @@ from src.utils.acquisition_metadata import (
     METADATA_MISSING_VALUE,
 )
 from src.utils.common_exceptions import ConfigError
-
-# --- Global Mappings ---
-# Maps Pylon Bayer formats to OpenCV debayering codes
-BAYER_TO_CV2_CODE = {
-    'BayerBG8': cv2.COLOR_BAYER_BG2BGR,
-    'BayerRG8': cv2.COLOR_BAYER_RG2BGR,
-    'BayerGB8': cv2.COLOR_BAYER_GB2BGR,
-    'BayerGR8': cv2.COLOR_BAYER_GR2BGR,
-    # Add 16-bit formats if needed, though 8-bit is faster
-    'BayerBG12': cv2.COLOR_BAYER_BG2BGR,
-    'BayerRG12': cv2.COLOR_BAYER_RG2BGR,
-    'BayerGB12': cv2.COLOR_BAYER_GB2BGR,
-    'BayerGR12': cv2.COLOR_BAYER_GR2BGR,
-}
 
 # --- Configuration Loading ---
 DEFAULT_CONFIG_PATH = "config/config.yml"
@@ -690,12 +683,8 @@ def run_acquisition(PLATE_ID, WELL_ID, START_DPT, config, process_as_color=False
     actual_frame_width, actual_frame_height = 0, 0
     
     try:
-        print("Connecting to liquid lens controller...")
         try:
-            ecc1c = optoICC.connectEcc(port=config['focusing']['lens_controller_port'])
-            lens = ecc1c.Lens
-            if lens is None: raise ConnectionError("Failed to get valid Lens object from ECC-1C.")
-            print(f"Connected to ECC-1C on {config['focusing']['lens_controller_port']}.")
+            ecc1c, lens = connect_lens(optoICC, config['focusing']['lens_controller_port'])
             lens_temperature_reader, lens_temperature_call = find_lens_temperature_reader(ecc1c, lens)
             if lens_temperature_reader is not None:
                 print(f"Lens temperature is read via {lens_temperature_call}.")
@@ -717,27 +706,15 @@ def run_acquisition(PLATE_ID, WELL_ID, START_DPT, config, process_as_color=False
         print(f"  Using '{focus_mode}' focusing pattern: {len(set(single_cycle_pattern))} planes, "
               f"{len(single_cycle_pattern)} frames per cycle.")
 
-        print(f"\n--- Pre-focusing lens to starting position: {START_DPT:.3f} dpt ---")
         try:
-            lens.StaticInput.SetAsInput()
-            lens.StaticInput.SetFocalPower(START_DPT)
-            settle_wait = 1.0 
-            print(f"Waiting {settle_wait}s for lens to settle...")
-            time.sleep(settle_wait)
-            print("Lens pre-focused and settled.")
+            prefocus_lens(lens, START_DPT, config['focusing']['prefocus_settle_sec'])
         except Exception as e:
             print(f"ERROR during lens pre-focus: {e}")
             raise
 
-
         print("\nConnecting to camera...")
         try:
-            tl_factory = pylon.TlFactory.GetInstance()
-            devices = tl_factory.EnumerateDevices()
-            if not devices: raise ConnectionError("No Pylon compatible camera found.")
-            camera = pylon.InstantCamera(tl_factory.CreateDevice(devices[0]))
-            camera.Open()
-            print(f"Connected to camera: {camera.GetDeviceInfo().GetModelName()}")
+            camera = open_first_camera(pylon)
         except (pylon.GenericException, ConnectionError) as e:
             print(f"ERROR connecting to Pylon camera: {e}")
             raise
@@ -745,151 +722,13 @@ def run_acquisition(PLATE_ID, WELL_ID, START_DPT, config, process_as_color=False
             print(f"ERROR: Unexpected error connecting to camera: {e}")
             raise
 
-        print("Configuring camera settings (Pixel Format, Exposure, Buffers)...")
+        camera_setup = configure_camera(camera, config, process_as_color, config['camera']['fps'])
+        process_as_color = camera_setup.process_as_color
+        debayer_code = camera_setup.debayer_code
+        actual_exposure_us = camera_setup.exposure_us
+        actual_frame_width, actual_frame_height = camera_setup.frame_width, camera_setup.frame_height
 
-        current_format_str = camera.PixelFormat.GetValue()
-        is_currently_bayer = current_format_str.startswith("Bayer")
-
-        if process_as_color:
-            if not is_currently_bayer:
-                print(f"  Requesting COLOR, but camera is in MONO format ('{current_format_str}').")
-                print("  Searching for a compatible Bayer format from config preferences...")
-                format_set = False
-                for fmt_pref in config['camera']['pixel_format_preference']:
-                    if fmt_pref.startswith("Bayer") and fmt_pref in camera.PixelFormat.Symbolics:
-                        try:
-                            camera.PixelFormat.SetValue(fmt_pref)
-                            print(f"  Successfully set Pixel Format to: {fmt_pref}")
-                            format_set = True
-                            break
-                        except Exception as e:
-                            print(f"  Warning: Could not set format to {fmt_pref}: {e}")
-                if not format_set:
-                    print("ERROR: Failed to set a Bayer format on the camera. Cannot proceed with color acquisition.")
-                    raise ValueError("Could not configure camera for Bayer pixel format.")
-            else:
-                print(f"  Camera is already in a compatible Bayer format: {current_format_str}")
-        else:
-            if is_currently_bayer:
-                print(f"  Requesting MONO, but camera is in COLOR format ('{current_format_str}').")
-                print("  Searching for a compatible Mono format from config preferences...")
-                format_set = False
-                for fmt_pref in config['camera']['pixel_format_preference']:
-                    if fmt_pref.startswith("Mono") and fmt_pref in camera.PixelFormat.Symbolics:
-                        try:
-                            camera.PixelFormat.SetValue(fmt_pref)
-                            print(f"  Successfully set Pixel Format to: {fmt_pref}")
-                            format_set = True
-                            break
-                        except Exception as e:
-                            print(f"  Warning: Could not set format to {fmt_pref}: {e}")
-                if not format_set:
-                    print("  Warning: Could not switch camera to a Mono format. Will proceed with current Bayer format.")
-            else:
-                print(f"  Camera is already in a compatible Mono format: {current_format_str}")
-
-        final_pixel_format = camera.PixelFormat.GetValue()
-        print(f"  Final active Pixel Format is: {final_pixel_format}")
-
-        debayer_code = None
-        final_format_is_bayer = final_pixel_format.startswith("Bayer")
-
-        if process_as_color:
-            if final_format_is_bayer:
-                debayer_code = BAYER_TO_CV2_CODE.get(final_pixel_format)
-                if debayer_code is None:
-                    raise ValueError(f"Unsupported Bayer format '{final_pixel_format}' for color conversion. Check BAYER_TO_CV2_CODE map.")
-                print(f"  Will use debayering for '{final_pixel_format}'.")
-            else:
-                print("WARNING: Color processing was requested, but the final camera format is not Bayer. Images will be monochrome.")
-                process_as_color = False
-
-        try:
-            exposure_to_set = config['camera']['exposure_us']
-            if hasattr(camera.ExposureTime, 'Min') and hasattr(camera.ExposureTime, 'Max'):
-                min_exp, max_exp = camera.ExposureTime.Min, camera.ExposureTime.Max
-                if exposure_to_set < min_exp :
-                    print(f"  Warning: Requested exposure {exposure_to_set}us < min {min_exp}us. Clamping.")
-                    exposure_to_set = min_exp
-                if exposure_to_set > max_exp :
-                    print(f"  Warning: Requested exposure {exposure_to_set}us > max {max_exp}us. Clamping.")
-                    exposure_to_set = max_exp
-            camera.ExposureTime.SetValue(exposure_to_set)
-            actual_exposure_us = camera.ExposureTime.GetValue()
-            print(f"  Exposure Time set to: {actual_exposure_us} us (Requested: {config['camera']['exposure_us']} us)")
-        except Exception as e:
-            actual_exposure_us = camera.ExposureTime.GetValue() if camera.ExposureTime.IsReadable() else config['camera']['exposure_us']
-            print(f"Warning: Could not set exposure time: {e}. Using current/config: {actual_exposure_us} us")
-
-        try:
-            buffer_count = max(config['camera']['max_num_buffer_min'], int(config['camera']['fps']))
-            camera.MaxNumBuffer = buffer_count
-            print(f"  MaxNumBuffer set to: {camera.MaxNumBuffer.GetValue()}")
-        except Exception as e:
-            print(f"Warning: Could not set MaxNumBuffer: {e}. Using default: {camera.MaxNumBuffer.GetValue() if camera.MaxNumBuffer.IsReadable() else 'N/A'}")
-
-        try:
-            actual_frame_width, actual_frame_height = set_centered_roi(
-                camera, config['roi']['width'], config['roi']['height']
-            )
-            print(f"ROI set. Actual acquisition dimensions: {actual_frame_width}x{actual_frame_height}")
-        except Exception as e:
-            print(f"ERROR: Failed to set camera ROI. Error: {e}")
-            if camera and camera.IsOpen():
-                actual_frame_width = camera.Width.GetValue()
-                actual_frame_height = camera.Height.GetValue()
-                print(f"Using current camera dimensions after ROI failure: {actual_frame_width}x{actual_frame_height}")
-            raise
-
-        print("Configuring camera frame rate...")
-        desired_fps = config['camera']['fps']
-        max_possible_fps = None
-        try:
-            camera.AcquisitionFrameRateEnable.SetValue(True)
-            print(f"  Attempting to set desired FPS: {desired_fps:.2f}")
-
-            try:
-                if hasattr(camera, "AcquisitionFrameRate") and camera.AcquisitionFrameRate.HasMax:
-                    max_possible_fps = camera.AcquisitionFrameRate.Max
-                    print(f"  Camera's AcquisitionFrameRate.Max: {max_possible_fps:.2f} FPS")
-                elif hasattr(camera, "ResultingFrameRate") and camera.ResultingFrameRate.IsReadable():
-                    max_possible_fps_resulting = camera.ResultingFrameRate.Value
-                    print(f"  Camera's current ResultingFrameRate: {max_possible_fps_resulting:.2f} FPS")
-                    if max_possible_fps is None or max_possible_fps_resulting < max_possible_fps :
-                         max_possible_fps = max_possible_fps_resulting
-                else:
-                    print(f"  Warning: Cannot directly query max FPS. Will attempt to set desired FPS ({desired_fps:.2f}) and read back.")
-                    max_possible_fps = desired_fps
-            except Exception as e_fps_query:
-                print(f"  Warning: Error querying max FPS capabilities: {e_fps_query}. Proceeding cautiously.")
-                max_possible_fps = desired_fps
-
-            if max_possible_fps is not None and desired_fps > max_possible_fps:
-                final_fps_to_set = math.floor(max_possible_fps)
-                print(f"Warning: Desired FPS ({desired_fps:.2f}) exceeds reported/estimated max possible ({max_possible_fps:.2f}).")
-                print(f"  Adjusting FPS to {final_fps_to_set:.2f} FPS.")
-                if final_fps_to_set <=0:
-                    print("Error: Calculated FPS to set is zero or negative. Defaulting to 5.0 FPS.")
-                    final_fps_to_set = 5.0
-                camera.AcquisitionFrameRate.SetValue(final_fps_to_set)
-            else:
-                camera.AcquisitionFrameRate.SetValue(desired_fps)
-            
-            final_fps = camera.AcquisitionFrameRate.GetValue()
-            print(f"  Final Acquisition Frame Rate set to: {final_fps:.2f} FPS")
-
-            if abs(final_fps - desired_fps) > 0.1 and (max_possible_fps is None or desired_fps <= max_possible_fps):
-                 print(f"  Note: Final FPS ({final_fps:.2f}) differs slightly from desired ({desired_fps:.2f}) due to camera constraints.")
-
-        except Exception as e:
-            final_fps = camera.AcquisitionFrameRate.GetValue() if camera.AcquisitionFrameRate.IsReadable() else 0
-            print(f"Warning: Could not configure frame rate: {e}. Using current value: {final_fps:.2f} FPS")
-            if camera.AcquisitionFrameRateEnable.IsReadable() and not camera.AcquisitionFrameRateEnable.GetValue():
-                 print("  Note: Frame rate control might be disabled on camera.")
-        
-        if final_fps <= 0:
-            print("ERROR: Final FPS is zero or negative. Cannot proceed.")
-            raise ValueError("Final FPS is not positive.")
+        final_fps = set_frame_rate(camera, config['camera']['fps'])
 
         total_frames_to_record = int(config['camera']['video_duration_sec'] * final_fps)
 
@@ -938,32 +777,8 @@ def run_acquisition(PLATE_ID, WELL_ID, START_DPT, config, process_as_color=False
 
     finally:
         print("\n--- Cleaning up resources ---")
-        if camera:
-            if camera.IsGrabbing():
-                print("Stopping camera grabbing (in finally block)...")
-                try: camera.StopGrabbing()
-                except Exception as e: print(f"  Error stopping camera grabbing: {e}")
-            if camera.IsOpen():
-                try:
-                    print("Attempting to reset ROI to full sensor size before closing camera...")
-                    reset_roi_to_full(camera)
-                except Exception as e_reset_roi: print(f"  Error resetting ROI to full: {e_reset_roi}")
-                print("Closing camera...")
-                try: camera.Close()
-                except Exception as e: print(f"  Error closing camera: {e}")
-                else: print("  Camera closed.")
-            else: print("Camera was not open, skipping close related actions.")
-        else: print("Camera object not created or connection failed.")
-        
-        if ecc1c:
-            print("Disconnecting from ECC-1C...")
-            try:
-                if hasattr(ecc1c, 'disconnect') and callable(ecc1c.disconnect): ecc1c.disconnect()
-                elif hasattr(ecc1c, 'close') and callable(ecc1c.close): ecc1c.close()
-                else: print("  Warning: ecc1c object lacks known 'disconnect()' or 'close()' method.")
-                print("  Disconnected from ECC-1C.")
-            except Exception as e: print(f"  Error during ECC-1C disconnection: {e}")
-        else: print("ECC-1C controller object not created or connection failed.")
+        close_camera(camera)
+        disconnect_lens(ecc1c)
         print("--- Cleanup finished ---")
         return acquisition_results
 

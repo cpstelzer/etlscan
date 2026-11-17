@@ -310,7 +310,8 @@ def _realtime_source(trigger_mode, target_fps=10.0, max_frames=12, control=None,
         etl_control_enabled=True, start_dpt=-2.0, focus_pattern="zigzag", scan_height_mm=14.0,
         scan_step_um=550.0, scan_ratio=3.36, lens_settle_time_sec=0.025, large_jump_threshold_dpt=-3.0,
         large_jump_settle_sec=0.040, lens_controller_port="COM11", acquisition_config=acquisition_config,
-        queue_size=queue_size, drop_frame_if_backlogged=drop, acquisition_control=control)
+        queue_size=queue_size, drop_frame_if_backlogged=drop, max_consecutive_missing_frames=15,
+        acquisition_control=control)
 
 
 def _realtime_cycle():

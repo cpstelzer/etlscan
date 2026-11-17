@@ -6,7 +6,7 @@ from typing import Any, Dict, Optional
 
 from src.acquire.triggered_acquisition import TRIGGER_MODE_SOFTWARE_GRID, TRIGGER_MODES, GridTimingParams
 from src.stages.stage_01_initial_detection import validate_stage1_detection_config
-from src.utils.config_loader import load_config_once, get_unified_segmentation_params
+from src.utils.config_loader import load_config_once, get_unified_segmentation_params, require_config_sections
 
 logger = logging.getLogger(__name__)
 
@@ -19,6 +19,7 @@ class RealtimeConfig:
     target_fps: float
     drop_frame_if_backlogged: bool
     queue_size: int
+    max_consecutive_missing_frames: int
     bgi_min_age_s: float
     bgi_max_age_s: float
     stage1_reacquire_detection_threshold: int
@@ -134,6 +135,7 @@ def load_realtime_config(config_path: str = "config/config.yml") -> RealtimeConf
         target_fps=float(runtime["target_fps"]),
         drop_frame_if_backlogged=bool(runtime["drop_frame_if_backlogged"]),
         queue_size=int(runtime["queue_size"]),
+        max_consecutive_missing_frames=int(runtime["max_consecutive_missing_frames"]),
         bgi_min_age_s=float(background["bgi_min_age_s"]),
         bgi_max_age_s=float(background["bgi_max_age_s"]),
         stage1_reacquire_detection_threshold=int(stage1["reacquire_detection_threshold"]),
@@ -194,6 +196,15 @@ def load_realtime_config(config_path: str = "config/config.yml") -> RealtimeConf
     _must_be_positive("runtime.target_fps", parsed.target_fps)
     if parsed.queue_size < 1:
         raise ValueError("realtime_mode.runtime.queue_size must be >= 1")
+    if parsed.max_consecutive_missing_frames < 1:
+        raise ValueError("realtime_mode.runtime.max_consecutive_missing_frames must be >= 1")
+    if parsed.acquisition_source == "camera":
+        # read when the camera session starts (src/acquire/hardware_setup.py): checked here already
+        require_config_sections(
+            acquisition_cfg,
+            {"camera": ("pixel_format_preference", "max_num_buffer_min"), "focusing": ("prefocus_settle_sec",)},
+            "acquisition",
+        )
     _must_be_positive("background.bgi_min_age_s", parsed.bgi_min_age_s)
     _must_be_positive("background.bgi_max_age_s", parsed.bgi_max_age_s)
     if parsed.bgi_max_age_s <= parsed.bgi_min_age_s:

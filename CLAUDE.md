@@ -59,6 +59,7 @@ etlscan/
 ├── src/
 │   ├── acquire/                # Hardware acquisition (Pylon + Zaber)
 │   │   ├── workflows.py        # Multi-well, experiment-sweep, single workflows
+│   │   ├── hardware_setup.py   # Camera + ETL controller: connect, configure, close (batch, realtime, flat field, diagnosis)
 │   │   ├── focus_pattern.py    # ETL focus cycle (shared with realtime) + plane-visit frame count
 │   │   ├── triggered_acquisition.py # Fixed-grid software-trigger loop (ETL/camera sync) + camera-clock helpers
 │   │   ├── config.py           # Plate-type normalisation and settings merge
@@ -181,7 +182,8 @@ which applies these transforms at load time:
 | `imaging` + `segmentation` | Split for clarity; the loader **assembles** them into the internal `config['system']` view that pipeline code consumes. Don't read `imaging`/`segmentation` directly in stage code — read `system`. |
 | `acquisition` | Rig-agnostic runtime. Hardware-specific values come from `hardware_profiles`. |
 | `hardware_profiles.<name>` | Deep-merged into `acquisition` per `active_hardware_profile`. Holds camera exposure, ROI, ETL focus, `optics` (`pixel_size_um`, `magnification`) and per-rig plate origin overrides (ETL-lens rig). |
-| `stage_hardware_profile` | Dedicated Zaber XY-stage profile, independent of the ETL-lens profiles. **Injected** into `acquisition.stage_controller` (single source — not duplicated per lens profile). |
+| Acquisition setup and timings | One camera / lens setup for every acquisition path: `src/acquire/hardware_setup.py` (`open_first_camera`, `configure_camera`: first format of `camera.pixel_format_preference` the camera offers, exposure clamped to the camera's range and increment, buffer count, centred ROI; `set_frame_rate`, `connect_lens`, `prefocus_lens`, `close_camera`, `disconnect_lens`). The vendor modules are passed in, so the realtime mode and the tests' simulated devices use the same code. Waits are config values, not literals: `focusing.prefocus_settle_sec`, `workflow.pause_between_wells_sec` / `pause_between_sweep_runs_sec`, `camera.single_frame_timeout_ms` (flat field), the `*_wait_sec` keys of `stage_hardware_profile`, `realtime_mode.runtime.max_consecutive_missing_frames`. An unknown `focusing.pattern` and a frame rate the camera cannot deliver raise instead of being replaced. |
+| `stage_hardware_profile` | Dedicated Zaber XY-stage profile (port, devices, microstep, baud rate, serial timeout, waits after each command; `StageController.from_config`), independent of the ETL-lens profiles. **Injected** into `acquisition.stage_controller` (single source — not duplicated per lens profile). |
 | `acquisition.plate.type` | Run-level plate selection (`24`/`96`), **decoupled** from the hardware profile. `acquisition.plate.definitions` holds geometry; profiles override only `origin_x`/`origin_y`. Read via `get_plate_settings(acq_conf)`. |
 | Particle-area thresholds | The four minimum-area knobs are intentionally distinct (see the note atop `config.yml`) — do not consolidate. |
 | `acquisition.experiment_sweep` | Scan-step × pattern grid for both sweep scripts, plus `variable_recording_duration` / `plane_revisit_times` (run length = max(`camera.video_duration_sec`, time for every plane to get k visits)). |
@@ -274,6 +276,7 @@ both image and ML errors).
 | `create_rim_excluded_well_mask` | `src/core/well_analysis.py` | Intersection of FG/BG well masks inset by `rim_exclusion_px`: the Stage-1 particle search area (batch both modes + realtime) |
 | `read_acquisition_metadata_header` | `src/utils/acquisition_metadata.py` | Parse the `# Key: value` header of a run's `metadata_log.csv` |
 | `read_frames_lost_at_acquisition` | `src/utils/acquisition_metadata.py` | Frame indices a run logged but saved no image for (markers shared with the acquisition writer) |
+| `configure_camera` and friends | `src/acquire/hardware_setup.py` | The one camera / ETL-controller setup, used by batch acquisition, realtime, the flat-field tool and the diagnosis script |
 | `figure_style` | `src/visualization/figure_style.py` | Context manager applying `config['figure_style']` to all figures created and saved inside it |
 | `figure_size` | `src/visualization/figure_style.py` | Configured (width, height) of a named figure, valid inside a style block |
 | `track_figure_style` | `src/visualization/figure_style.py` | The same for the track maps, with their line/marker sizes; draw tracks with `plot_track_line`, `plot_focus_points`, `draw_floor_shadow` |

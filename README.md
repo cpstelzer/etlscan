@@ -123,7 +123,8 @@ Supporting modules:
 - `src/acquire/triggered_acquisition.py` (fixed-grid trigger loop and camera-clock checks)
 - `src/acquire/config.py`, `src/acquire/plate_layout.py` (plate types and 24/96-well coordinates)
 - `src/acquire/stage_controller.py` (Zaber adapter), `src/acquire/well_selector_gui.py` (well selector)
-- `src/acquire/ws_flat_field.py` (guided flat-field and dark-frame acquisition)
+- `src/acquire/hardware_setup.py` (camera and lens-controller setup shared by all acquisition paths)
+- `src/acquire/ws_flat_field.py` (guided flat-field and dark-frame acquisition; run `python -m src.acquire.ws_flat_field`)
 
 To copy acquired runs into a pipeline input batch without changing their names, use:
 

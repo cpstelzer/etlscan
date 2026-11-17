@@ -13,6 +13,17 @@ import numpy as np
 
 from src.core.image_io_operations import load_image
 from src.acquire.focus_pattern import build_focus_cycle_from_up_values, build_focus_cycle_pattern
+from src.acquire.hardware_setup import (
+    close_camera,
+    connect_lens,
+    disconnect_lens,
+    open_first_camera,
+    prefocus_lens,
+    select_pixel_format,
+    set_buffer_count,
+    set_exposure,
+    set_frame_rate,
+)
 from src.acquire.roi import set_centered_roi
 from src.acquire.triggered_acquisition import (
     TRIGGER_MODE_SOFTWARE_GRID,
@@ -215,9 +226,6 @@ def _to_uint8_grayscale(raw_frame: np.ndarray) -> np.ndarray:
     return frame.astype(np.uint8)
 
 
-# Stop the session when this many frames in a row did not arrive (free-run: RetrieveResult
-# timeouts; fixed grid: commanded frames still without a frame).
-_MAX_CONSECUTIVE_MISSING_FRAMES = 15
 
 
 @dataclass(frozen=True)
@@ -390,6 +398,7 @@ class CameraFrameSource(FrameSource):
         acquisition_config: Dict[str, Any],
         queue_size: int,
         drop_frame_if_backlogged: bool,
+        max_consecutive_missing_frames: int,
         acquisition_control: Optional[AcquisitionControl] = None,
     ) -> None:
         self._target_fps = target_fps
@@ -415,6 +424,9 @@ class CameraFrameSource(FrameSource):
         self._acquisition_config = acquisition_config
         self._queue_size = queue_size
         self._drop_frame_if_backlogged = drop_frame_if_backlogged
+        # The session stops when this many frames in a row did not arrive (free-run: retrieve
+        # timeouts; fixed grid: commanded frames still without a frame).
+        self._max_consecutive_missing_frames = max_consecutive_missing_frames
         self._acquisition_control = acquisition_control
 
     def __iter__(self) -> Iterator[FramePacket]:
@@ -435,10 +447,7 @@ class CameraFrameSource(FrameSource):
 
             if not self._lens_controller_port:
                 raise RuntimeError("focusing.lens_controller_port must be set when ETL control is enabled")
-            ecc1c = optoICC.connectEcc(port=self._lens_controller_port)
-            lens = ecc1c.Lens
-            if lens is None:
-                raise RuntimeError("Failed to get valid Lens object from ECC-1C")
+            ecc1c, lens = connect_lens(optoICC, self._lens_controller_port, emit=logger.info)
 
             focus_cycle = build_focus_cycle_pattern(
                 start_dpt=self._start_dpt,
@@ -451,9 +460,9 @@ class CameraFrameSource(FrameSource):
                 focus_cycle = [round(self._start_dpt, 3)]
             unique_diopter_steps = build_unique_diopter_steps(focus_cycle)
 
-            lens.StaticInput.SetAsInput()
-            lens.StaticInput.SetFocalPower(self._start_dpt)
-            time.sleep(1.0)
+            prefocus_lens(
+                lens, self._start_dpt, self._acquisition_config["focusing"]["prefocus_settle_sec"], emit=logger.info
+            )
 
         planner = _FocusPlanner(
             focus_cycle,
@@ -469,46 +478,13 @@ class CameraFrameSource(FrameSource):
             self._acquisition_control,
         )
 
-        tl_factory = pylon.TlFactory.GetInstance()
-        devices = tl_factory.EnumerateDevices()
-        if not devices:
-            raise RuntimeError("No Pylon compatible camera found")
-
-        camera = pylon.InstantCamera(tl_factory.CreateDevice(devices[0]))
-        camera.Open()
+        camera = open_first_camera(pylon, emit=logger.info)
 
         try:
-            def _set_node_value_with_clamp(node: object, requested_value: float) -> float:
-                value = float(requested_value)
-                try:
-                    if hasattr(node, "Min"):
-                        value = max(value, float(node.Min))
-                    if hasattr(node, "Max"):
-                        value = min(value, float(node.Max))
-                    if hasattr(node, "Inc"):
-                        inc = float(node.Inc)
-                        min_v = float(node.Min) if hasattr(node, "Min") else 0.0
-                        if inc > 0:
-                            steps = round((value - min_v) / inc)
-                            value = min_v + steps * inc
-                    node.SetValue(value)
-                    if hasattr(node, "GetValue"):
-                        return float(node.GetValue())
-                except Exception as exc:  # noqa: BLE001
-                    logger.warning("Failed to set camera node value to %s: %s", requested_value, exc)
-                return value
-
-            if hasattr(camera, "PixelFormat"):
-                available_formats = list(camera.PixelFormat.Symbolics)
-                if "Mono8" in available_formats:
-                    camera.PixelFormat.SetValue("Mono8")
-                elif "Mono12" in available_formats:
-                    camera.PixelFormat.SetValue("Mono12")
-
-            actual_exposure_us = float(self._exposure_us)
-            if hasattr(camera, "ExposureTime"):
-                actual_exposure_us = _set_node_value_with_clamp(camera.ExposureTime, self._exposure_us)
-                logger.info("Realtime camera exposure set to %.3f us (requested %.3f us)", actual_exposure_us, self._exposure_us)
+            camera_config = self._acquisition_config["camera"]
+            select_pixel_format(camera, camera_config["pixel_format_preference"], False, emit=logger.info)
+            actual_exposure_us = float(set_exposure(camera, self._exposure_us, emit=logger.info))
+            set_buffer_count(camera, camera_config["max_num_buffer_min"], self._target_fps, emit=logger.info)
 
             if (self._roi_width is None) ^ (self._roi_height is None):
                 raise ValueError("Realtime ROI requires both width and height when either is set.")
@@ -535,10 +511,7 @@ class CameraFrameSource(FrameSource):
                 symbols = list(camera.TriggerMode.Symbolics)
                 if "Off" in symbols:
                     camera.TriggerMode.SetValue("Off")
-            if hasattr(camera, "AcquisitionFrameRateEnable"):
-                camera.AcquisitionFrameRateEnable.SetValue(True)
-            if hasattr(camera, "AcquisitionFrameRate"):
-                camera.AcquisitionFrameRate.SetValue(float(self._target_fps))
+            set_frame_rate(camera, float(self._target_fps), emit=logger.info)
 
             retrieve_timeout = int(1000 / max(self._target_fps, 1.0) + self._retrieve_timeout_margin_ms)
             trigger_mode = self._acquisition_config["camera"]["trigger_mode"]
@@ -550,18 +523,9 @@ class CameraFrameSource(FrameSource):
                     logger.info("ETL control disabled: no lens commands to synchronise, the camera free-runs.")
                 yield from self._iterate_with_free_run(pylon, camera, lens, planner, retrieve_timeout)
         finally:
-            if camera.IsGrabbing():
-                camera.StopGrabbing()
-            if camera.IsOpen():
-                camera.Close()
+            close_camera(camera, emit=logger.info, restore_full_roi=False)
             if ecc1c is not None:
-                try:
-                    if hasattr(ecc1c, "disconnect") and callable(ecc1c.disconnect):
-                        ecc1c.disconnect()
-                    elif hasattr(ecc1c, "close") and callable(ecc1c.close):
-                        ecc1c.close()
-                except Exception:
-                    pass
+                disconnect_lens(ecc1c, emit=logger.info)
 
     def _stop_requested(self, entry_index: int) -> bool:
         if self._max_frames is not None and entry_index >= int(self._max_frames):
@@ -605,7 +569,7 @@ class CameraFrameSource(FrameSource):
                     retrieve_timeout,
                     exc,
                 )
-                if consecutive_timeouts >= _MAX_CONSECUTIVE_MISSING_FRAMES:
+                if consecutive_timeouts >= self._max_consecutive_missing_frames:
                     raise RuntimeError("Camera acquisition repeatedly timed out; stopping realtime session.") from exc
                 continue
 
@@ -655,7 +619,7 @@ class CameraFrameSource(FrameSource):
         def next_diopter(entry_index: int) -> Optional[float]:
             if should_stop(entry_index):
                 return None
-            if len(entries) - counts["frames_seen"] >= _MAX_CONSECUTIVE_MISSING_FRAMES:
+            if len(entries) - counts["frames_seen"] >= self._max_consecutive_missing_frames:
                 raise RuntimeError("Camera delivered no frames for the last triggers; stopping realtime session.")
             if not self._drop_frame_if_backlogged:
                 if handoff.wait_for_space(lambda: should_stop(entry_index), period_s):
@@ -753,6 +717,7 @@ def build_frame_source(
     acquisition_config: Dict[str, Any],
     queue_size: int,
     drop_frame_if_backlogged: bool,
+    max_consecutive_missing_frames: int,
     acquisition_control: Optional[AcquisitionControl] = None,
 ) -> FrameSource:
     if source == "directory":
@@ -784,5 +749,6 @@ def build_frame_source(
         acquisition_config=acquisition_config,
         queue_size=queue_size,
         drop_frame_if_backlogged=drop_frame_if_backlogged,
+        max_consecutive_missing_frames=max_consecutive_missing_frames,
         acquisition_control=acquisition_control,
     )
