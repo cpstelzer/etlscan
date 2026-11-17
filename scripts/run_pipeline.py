@@ -25,6 +25,7 @@ from src.utils.path_helpers import get_valid_sample_subdirectories
 from src.utils.acquisition_metadata import (
     validate_background_compatibility,
     load_experiment_design,
+    read_recording_parameters,
     resolve_sample_design_values,
 )
 
@@ -253,6 +254,7 @@ def validate_sample_inputs(
     sample_ids: List[str],
     background_source: str,
     experiment_design_path: Optional[str],
+    check_recording_parameters: bool,
 ) -> Dict[str, Dict[str, Any]]:
     """Input: samples to run. Output: experiment-design values per sample (empty without a design).
 
@@ -260,6 +262,8 @@ def validate_sample_inputs(
     at once instead of after hours of processing: an external-background sample needs its
     BG folder and a BG run recorded with the same image-defining settings; with an
     experiment design, each sample needs a design row whose scan step matches its metadata.
+    With ``check_recording_parameters`` (Stage 1 or 2 selected) each sample's metadata log
+    must also give its frame rate and pixel scale, which those stages read from it.
     All problems are collected and raised together as one DataValidationError.
     """
     log_filename = config["acquisition"]["paths"]["log_filename"]
@@ -270,6 +274,8 @@ def validate_sample_inputs(
         sample_paths = prepare_sample_paths(config, batch_dir, sample_id, background_source)
         metadata_log_paths = [os.path.join(sample_paths.sample_input_dir, log_filename)]
         try:
+            if check_recording_parameters:
+                read_recording_parameters(config, sample_paths.sample_input_dir)
             if sample_paths.sample_bg_dir is not None:
                 if not os.path.isdir(sample_paths.sample_bg_dir):
                     raise DataValidationError(f"background folder missing: {sample_paths.sample_bg_dir}")
@@ -509,7 +515,8 @@ def main():
 
     try:
         design_values_by_sample = validate_sample_inputs(
-            config, args.input_batch_dir, valid_sample_ids, args.background_source, args.experiment_design
+            config, args.input_batch_dir, valid_sample_ids, args.background_source, args.experiment_design,
+            check_recording_parameters=bool(selected_stage_ids & {"1", "2"}),
         )
     except (DataValidationError, FileNotFoundError) as e:
         logger.error(f"{e}\nAborting before any sample is processed.")

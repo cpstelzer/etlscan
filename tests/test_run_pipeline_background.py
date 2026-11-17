@@ -54,7 +54,9 @@ def test_validate_sample_inputs_returns_design_values(run_pipeline, config, tmp_
         write_metadata_log(root / side / "20261016_plate14_well2")
     design = _design(tmp_path, [{"date": 20261016, "plate": 14, "well": 2, "water_depth_mm": 14, "scan_step_um": 250}])
 
-    values = run_pipeline.validate_sample_inputs(config, str(root), ["20261016_plate14_well2"], "external", design)
+    values = run_pipeline.validate_sample_inputs(
+        config, str(root), ["20261016_plate14_well2"], "external", design, check_recording_parameters=False
+    )
 
     assert values == {"20261016_plate14_well2": {"water_depth_mm": 14, "scan_step_um": 250}}
 
@@ -68,7 +70,8 @@ def test_validate_sample_inputs_collects_every_problem(run_pipeline, config, tmp
 
     with pytest.raises(DataValidationError) as excinfo:
         run_pipeline.validate_sample_inputs(
-            config, str(root), ["20261016_plate14_well1", "20261016_plate14_well2"], "external", None
+            config, str(root), ["20261016_plate14_well1", "20261016_plate14_well2"], "external", None,
+            check_recording_parameters=False,
         )
 
     message = str(excinfo.value)
@@ -77,9 +80,29 @@ def test_validate_sample_inputs_collects_every_problem(run_pipeline, config, tmp
     assert "20261016_plate14_well2" in message and "background folder missing" in message
 
 
-def test_validate_sample_inputs_time_shift_without_design_reads_nothing(run_pipeline, config, tmp_path):
-    # Regular runs need no metadata logs: nothing is read, nothing can fail.
-    assert run_pipeline.validate_sample_inputs(config, str(tmp_path), ["20261016_plate1_well1"], "time_shift", None) == {}
+def test_validate_sample_inputs_stages_3_and_4_read_no_metadata(run_pipeline, config, tmp_path):
+    # Stages 3 and 4 work on Stage-2 output: no metadata log is read, nothing can fail.
+    assert run_pipeline.validate_sample_inputs(
+        config, str(tmp_path), ["20261016_plate1_well1"], "time_shift", None, check_recording_parameters=False
+    ) == {}
+
+
+def test_validate_sample_inputs_requires_recording_parameters_for_stages_1_and_2(
+    run_pipeline, config, tmp_path, write_metadata_log
+):
+    # Stages 1 and 2 read frame rate and pixel scale from each recording: a sample without a
+    # metadata log fails before any sample is processed, one with a complete log passes.
+    logged_optics = {"Pixel Size (um)": "2.74", "Magnification": "0.638"}
+    write_metadata_log(tmp_path / "20261016_plate1_well1", config_overrides=logged_optics)
+    assert run_pipeline.validate_sample_inputs(
+        config, str(tmp_path), ["20261016_plate1_well1"], "time_shift", None, check_recording_parameters=True
+    ) == {}
+
+    with pytest.raises(DataValidationError, match="20261016_plate1_well2.*has no metadata_log.csv"):
+        run_pipeline.validate_sample_inputs(
+            config, str(tmp_path), ["20261016_plate1_well1", "20261016_plate1_well2"], "time_shift", None,
+            check_recording_parameters=True,
+        )
 
 
 def test_annotate_sample_outputs_puts_design_columns_first_and_is_idempotent(run_pipeline, tmp_path):

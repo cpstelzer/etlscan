@@ -9,11 +9,12 @@ run, and that each sample matches its row in an optional experiment-design table
 Below the header, the frame table holds one row per focus-pattern entry; the pipeline
 reads it to tell frames the camera lost during acquisition from files missing later.
 The volume a recording covers is read from its frames themselves (frame size and the
-focal planes in their filenames), which every recording has, log or not.
+focal planes in their filenames); its frame rate and pixel scale come from the header.
 """
 import logging
 import os
 import re
+from dataclasses import dataclass
 from typing import Any, Dict, List, Set, Tuple
 
 import numpy as np
@@ -21,7 +22,7 @@ import pandas as pd
 from PIL import Image
 
 from src.utils.common_exceptions import DataValidationError
-from src.utils.config_loader import get_pixel_to_mm_factor
+from src.utils.config_loader import get_pixel_to_mm_factor, require_config_sections
 from src.utils.path_helpers import parse_date_plate_well, parse_frame_filenames
 
 logger = logging.getLogger(__name__)
@@ -60,6 +61,15 @@ _IMAGE_DEFINING_HEADER_FIELDS = (
     ("Configuration", "Trigger Mode"),
 )
 _SCAN_STEP_FIELD = ("Configuration", "Scan Step (um)")
+# Header keys of the values the offline pipeline takes from the recording itself (shared
+# with the acquisition writer). The frame rate has always been logged; pixel size and
+# magnification are logged since the optics moved into the hardware profiles.
+_CONFIGURATION_SECTION = "Configuration"
+HEADER_FRAME_RATE_KEY = "Final Acquisition FPS"
+HEADER_PIXEL_SIZE_KEY = "Pixel Size (um)"
+HEADER_MAGNIFICATION_KEY = "Magnification"
+OPTICS_SOURCE_RECORDING = "recording metadata"
+OPTICS_SOURCE_ACTIVE_PROFILE = "active hardware profile (the recording predates logged optics)"
 # Value of a header field that older acquisitions did not write: every run recorded before
 # the fixed-grid trigger loop used the free-run loop.
 _HEADER_FIELD_DEFAULTS = {
@@ -143,11 +153,81 @@ def read_frames_lost_at_acquisition(metadata_log_path: str) -> Set[int]:
     return {int(frame) for frame in frame_table.loc[lost_mask, _FRAME_INDEX_COLUMN]}
 
 
-def get_scan_extent_mm(config: Dict[str, Any], image_dir_path: str) -> Tuple[float, float, float]:
+@dataclass(frozen=True)
+class RecordingParameters:
+    """How a recording was made, as far as the offline pipeline depends on it."""
+
+    frame_rate_fps: float        # frames per second of the run
+    pixel_to_mm_factor: float    # mm per image pixel in the object plane
+    optics_source: str           # OPTICS_SOURCE_RECORDING or OPTICS_SOURCE_ACTIVE_PROFILE
+
+
+def read_recording_parameters(config: Dict[str, Any], image_dir_path: str) -> RecordingParameters:
+    """Read frame rate and pixel scale of the recording in ``image_dir_path`` from its metadata log.
+
+    The pipeline analyses recordings made earlier, possibly with another lens or frame rate
+    than the config describes now, so both values come from the run's own
+    ``metadata_log.csv``. A recording made before the acquisition logged pixel size and
+    magnification takes ``acquisition.optics`` of the active hardware profile
+    (``optics_source`` says which applied).
+
+    Raises:
+        DataValidationError: no metadata log, no or a non-positive frame rate, or only one
+            of the two optics fields.
+        ConfigError: the recording has no optics fields and the active profile has none either.
+    """
+    log_filename = config["acquisition"]["paths"]["log_filename"]
+    log_path = os.path.join(image_dir_path, log_filename)
+    if not os.path.isfile(log_path):
+        raise DataValidationError(
+            f"Recording {image_dir_path!r} has no {log_filename}: its frame rate and pixel scale are unknown."
+        )
+    configuration = read_acquisition_metadata_header(log_path).get(_CONFIGURATION_SECTION, {})
+
+    if HEADER_FRAME_RATE_KEY not in configuration:
+        raise DataValidationError(f"Metadata header of {log_path!r} has no '{HEADER_FRAME_RATE_KEY}'.")
+    try:
+        frame_rate_fps = float(configuration[HEADER_FRAME_RATE_KEY])
+    except ValueError as error:
+        raise DataValidationError(
+            f"'{HEADER_FRAME_RATE_KEY}' in {log_path!r} is not a number: {configuration[HEADER_FRAME_RATE_KEY]!r}"
+        ) from error
+    if not (np.isfinite(frame_rate_fps) and frame_rate_fps > 0):
+        raise DataValidationError(f"'{HEADER_FRAME_RATE_KEY}' in {log_path!r} must be positive, got {frame_rate_fps!r}.")
+
+    optics_keys = (HEADER_PIXEL_SIZE_KEY, HEADER_MAGNIFICATION_KEY)
+    logged_optics_keys = [key for key in optics_keys if key in configuration]
+    if len(logged_optics_keys) == len(optics_keys):
+        try:
+            optics_config = {
+                "pixel_size_um": float(configuration[HEADER_PIXEL_SIZE_KEY]),
+                "magnification": float(configuration[HEADER_MAGNIFICATION_KEY]),
+            }
+        except ValueError as error:
+            raise DataValidationError(f"Optics fields in {log_path!r} are not numbers: {error}") from error
+        optics_source = OPTICS_SOURCE_RECORDING
+    elif logged_optics_keys:
+        raise DataValidationError(
+            f"Metadata header of {log_path!r} has '{logged_optics_keys[0]}' but not both of {optics_keys}."
+        )
+    else:
+        require_config_sections(config, {"acquisition.optics": ("pixel_size_um", "magnification")}, "config")
+        optics_config = config["acquisition"]["optics"]
+        optics_source = OPTICS_SOURCE_ACTIVE_PROFILE
+
+    return RecordingParameters(
+        frame_rate_fps=frame_rate_fps,
+        pixel_to_mm_factor=get_pixel_to_mm_factor(optics_config),
+        optics_source=optics_source,
+    )
+
+
+def get_scan_extent_mm(image_dir_path: str, pixel_to_mm_factor: float) -> Tuple[float, float, float]:
     """Return the (x, y, z) extent in mm that the recording in ``image_dir_path`` covers.
 
-    x/y are its frame size (from the header of its first frame) at the tracking pixel
-    scale, the factor that converts detections to x_mm/y_mm; z is the deepest focal plane
+    x/y are its frame size (from the header of its first frame) at ``pixel_to_mm_factor``,
+    the recording's pixel scale (:func:`read_recording_parameters`) that also converts
+    detections to x_mm/y_mm; z is the deepest focal plane
     (fd_mm) in its frame filenames, the token that becomes z_mm. All three count from 0
     (image corner, sweep start plane), so every detected coordinate falls inside this box
     by construction. That makes it the fixed axis range for the tracking plots:
@@ -167,7 +247,6 @@ def get_scan_extent_mm(config: Dict[str, Any], image_dir_path: str) -> Tuple[flo
     frames_df = parse_frame_filenames(image_dir_path)
     if frames_df is None or frames_df.empty:
         raise DataValidationError(f"No acquisition frames in {image_dir_path!r}: the recording's extent is unknown.")
-    pixel_to_mm_factor = get_pixel_to_mm_factor(config["stage_01_initial_detection"]["tracking"])
     with Image.open(frames_df["full_path"].iloc[0]) as first_frame:  # reads the header only
         width_px, height_px = first_frame.size
     return (

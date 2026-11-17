@@ -137,7 +137,8 @@ The YAML file at `config/config.yml` controls acquisition, the offline pipeline 
 
 - `paths.pipeline_base`: offline-pipeline root (writes `data/output/`, hosts `models/` and `data/training_data/`). Required; the former top-level `project_base_dir` key is no longer read.
 - `paths.raw_data_root`: where acquisition writes captured frames; point `run_pipeline --input_batch_dir` at it.
-- `active_hardware_profile` and `hardware_profiles.<name>`: rig-specific settings (see [Hardware](#hardware)), deep-merged into `acquisition`.
+- `active_hardware_profile` and `hardware_profiles.<name>`: rig-specific settings (see [Hardware](#hardware)), deep-merged into `acquisition`. Each profile holds the optics (`optics.pixel_size_um`, `optics.magnification`), which the acquisition writes into every run's `metadata_log.csv`.
+- The offline pipeline reads a recording's frame rate and pixel scale from its own `metadata_log.csv`, not from the current config, so each sample folder must keep that file. Recordings made before the optics were logged use the optics of the active hardware profile.
 - `acquisition`: scan pattern, step size, frame rate, recording duration, trigger mode and plate type (`acquisition.plate.type`, `24` or `96`).
 - `imaging` (frame geometry) and `segmentation` (shared thresholding/segmentation) — the loader assembles these into the internal `system` view.
 - Stage-specific blocks (`stage_01_initial_detection`, `stage_02_characterization`, `stage_03_filtering_and_classification`, `stage_04_biological_analysis`) that tune detection, tracking, focus-peak detection, filtering, classifier thresholds and visualization. The focus-peak settings are under `stage_02_characterization.focussed_particles.peak_detection`.

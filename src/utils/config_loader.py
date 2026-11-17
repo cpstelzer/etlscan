@@ -254,6 +254,17 @@ def get_unified_segmentation_params(config: Dict[str, Any]) -> Dict[str, Any]:
     return unified_params
 
 
-def get_pixel_to_mm_factor(tracking_config: Dict[str, Any]) -> float:
-    """Millimetres per image pixel in the object plane, from the tracking optics."""
-    return tracking_config["pixel_size_um"] / (tracking_config["magnification"] * 1000)
+def get_pixel_to_mm_factor(optics_config: Dict[str, Any]) -> float:
+    """Millimetres per image pixel in the object plane, from ``pixel_size_um`` and ``magnification``.
+
+    ``optics_config`` is ``acquisition.optics`` of a hardware profile, or the same two values
+    read from a recording's metadata header.
+    """
+    require_config_keys(optics_config, ("pixel_size_um", "magnification"), "acquisition.optics")
+    pixel_size_um = float(optics_config["pixel_size_um"])
+    magnification = float(optics_config["magnification"])
+    if not (pixel_size_um > 0 and magnification > 0):
+        raise ConfigError(
+            f"pixel_size_um and magnification must be positive, got {pixel_size_um!r} and {magnification!r}"
+        )
+    return pixel_size_um / (magnification * 1000)

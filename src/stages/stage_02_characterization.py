@@ -23,7 +23,7 @@ from scipy.interpolate import UnivariateSpline
 from src.utils import (
     load_dataframe_from_csv, save_dataframe_to_csv, build_crop_filename
 )
-from src.utils.acquisition_metadata import get_scan_extent_mm
+from src.utils.acquisition_metadata import get_scan_extent_mm, read_recording_parameters
 from src.utils.config_loader import get_unified_segmentation_params, require_config_keys
 from src.utils.path_helpers import extract_frame_from_filename
 from src.utils.common_exceptions import ConfigError, DataValidationError
@@ -74,6 +74,11 @@ def run_stage_02_characterization(
     using a modular feature calculator architecture.
     """
     logger.info(f"--- Stage 2: Universal Characterization for Sample ID: {sample_id} ---")
+    recording = read_recording_parameters(config, image_dir_path)
+    logger.info(
+        "Stage 2: recording at %.2f fps, %.6f mm per pixel (optics from %s).",
+        recording.frame_rate_fps, recording.pixel_to_mm_factor, recording.optics_source,
+    )
     s2_config = config['stage_02_characterization']
     segmentation_params = get_unified_segmentation_params(config)
 
@@ -160,10 +165,10 @@ def run_stage_02_characterization(
     # focus filter
     filtered_df, diagnostics_df = select_focused_tracks(comprehensive_df, focus_cfg)
 
-    # flag in-focus depths that no neighbouring knot of their track supports (same
-    # recording frame rate source as the Stage-1 background offset)
+    # flag in-focus depths that no neighbouring knot of their track supports (time between
+    # knots from the recording's frame rate, as for the Stage-1 background offset)
     filtered_df = flag_depth_knot_speed_outliers(
-        filtered_df, comprehensive_df, focus_cfg, float(config['acquisition']['camera']['fps'])
+        filtered_df, comprehensive_df, focus_cfg, recording.frame_rate_fps
     )
     # reconstruct continuous per-frame depth (z) from the sparse in-focus points
     comprehensive_df = add_reconstructed_depth(comprehensive_df, filtered_df, focus_cfg)
@@ -195,7 +200,7 @@ def run_stage_02_characterization(
             normalized_cropping,
             image_dir_path,
             focus_cfg,
-            get_scan_extent_mm(config, image_dir_path),
+            get_scan_extent_mm(image_dir_path, recording.pixel_to_mm_factor),
             bool(cropping_config['save_all_particle_crops']),
             config,
         )

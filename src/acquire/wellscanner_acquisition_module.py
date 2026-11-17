@@ -45,7 +45,13 @@ from .triggered_acquisition import (
     grab_timestamp_ticks,
     read_lens_temperature, restore_free_run, sample_camera_clock, summarize_grid_recording, summarize_recording,
 )
-from src.utils.acquisition_metadata import METADATA_LOOP_ERROR_PREFIX, METADATA_MISSING_VALUE
+from src.utils.acquisition_metadata import (
+    HEADER_FRAME_RATE_KEY,
+    HEADER_MAGNIFICATION_KEY,
+    HEADER_PIXEL_SIZE_KEY,
+    METADATA_LOOP_ERROR_PREFIX,
+    METADATA_MISSING_VALUE,
+)
 from src.utils.common_exceptions import ConfigError
 
 # --- Global Mappings ---
@@ -626,7 +632,7 @@ def acquire_and_save_frames(camera, lens, full_focus_pattern,
             csvfile.write(f"# Processed as Color: {process_as_color}\n")
             csvfile.write(f"# Target Duration (s): {config['camera']['video_duration_sec']}\n")
             csvfile.write(f"# Configured FPS: {config['camera']['fps']:.2f}\n")
-            csvfile.write(f"# Final Acquisition FPS: {final_fps:.2f}\n")
+            csvfile.write(f"# {HEADER_FRAME_RATE_KEY}: {final_fps:.2f}\n")
             csvfile.write(f"# Actual Exposure (us): {actual_exposure_us}\n")
             csvfile.write(f"# Actual ROI (WxH): {actual_frame_width}x{actual_frame_height}\n")
             csvfile.write(f"# Pixel Format: {camera.PixelFormat.GetValue()}\n")
@@ -640,6 +646,8 @@ def acquire_and_save_frames(camera, lens, full_focus_pattern,
             csvfile.write(f"# Scan Height (mm): {config['focusing']['scan_height_mm']}\n")
             csvfile.write(f"# Scan Step (um): {config['focusing']['scan_step_um']}\n")
             csvfile.write(f"# Scan Ratio (mm/dpt): {scan_ratio}\n")
+            csvfile.write(f"# {HEADER_PIXEL_SIZE_KEY}: {config['optics']['pixel_size_um']}\n")
+            csvfile.write(f"# {HEADER_MAGNIFICATION_KEY}: {config['optics']['magnification']}\n")
             if lens_temp_start_c is not None:
                 csvfile.write(f"# Lens Temperature Start (C): {lens_temp_start_c:.2f}\n")
             if lens_temp_end_c is not None:
