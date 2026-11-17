@@ -10,15 +10,15 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from src.stages.stage_02_characterization import (
+from src.core.depth_reconstruction import (
     reconstruct_track_depth,
     add_reconstructed_depth,
     attach_reconstructed_depth_to_subset,
     find_depth_knot_speed_outliers,
     flag_depth_knot_speed_outliers,
     DEPTH_KNOT_SPEED_OUTLIER_COLUMN,
-    FOCUS_Z_RECONSTRUCTED_COLUMN,
 )
+from src.core.track_columns import FOCUS_Z_RECONSTRUCTED_COLUMN
 from src.utils.common_exceptions import ConfigError, DataValidationError
 
 

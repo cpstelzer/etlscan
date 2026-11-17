@@ -33,7 +33,8 @@ from src.core.image_enhancement import subtract_images, apply_blur
 from src.core.masking_operations import mask_well_area, apply_mask
 from src.core.region_props_calculator import find_contours, calculate_contour_measurements, filter_contours_by_area
 from src.core.segmentation import generate_binary_mask_from_float_image, assess_subtracted_foreground
-from src.visualization.figure_style import draw_floor_shadow, plot_track_line, track_figure_style
+from src.visualization.figure_style import track_figure_style
+from src.visualization.track_maps import build_tracking_figure, build_tracking_xy_figure
 from src.core.well_analysis import (
     create_well_mask_black_plate,
     create_rim_excluded_well_mask,
@@ -1001,73 +1002,6 @@ def _track_particles_3d(processed_df, search_range_mm, memory_frames, min_track_
     filtered_trajectories = filtered_trajectories.reset_index(drop=True)
     return filtered_trajectories
 
-def _build_tracking_figure(
-    tracked_df: pd.DataFrame,
-    extent_mm: Tuple[float, float, float]
-) -> Optional[plt.Figure]:
-    """Create a 3D matplotlib figure summarizing all tracked particle paths.
-
-    Axes are pinned to ``extent_mm`` (the full imaged volume) rather than
-    autoscaled to the tracks, so the plot always shows the whole field of view
-    and Z sweep and stays comparable across samples. Each track's grey copy on
-    the floor shows its x/y position. Build and save inside
-    :func:`track_figure_style`, which sets the line sizes.
-    """
-    if tracked_df.empty:
-        return None
-    x_max_mm, y_max_mm, z_max_mm = extent_mm
-    fig = plt.figure(figsize=(7.5, 7))
-    ax = fig.add_subplot(111, projection='3d')
-    ax.set_title("3D particle tracks")
-    ax.set_xlabel("x (mm)", labelpad=14)
-    ax.set_ylabel("y (mm)", labelpad=14)
-    ax.set_zlabel("z (mm)", labelpad=14)
-    tracks = [track for _, track in tracked_df.groupby('track_id')]
-    for track in tracks:
-        draw_floor_shadow(ax, track['x_mm'].values, track['y_mm'].values)
-    for rank, track in enumerate(tracks):
-        plot_track_line(ax, (track['x_mm'], track['y_mm'], track['z_mm']), rank)
-    ax.set_xlim(0, x_max_mm)
-    ax.set_ylim(0, y_max_mm)
-    ax.set_zlim(0, z_max_mm)
-    plt.tight_layout()
-    return fig
-
-
-def _build_tracking_xy_figure(
-    tracked_df: pd.DataFrame,
-    extent_mm: Tuple[float, float, float]
-) -> Optional[plt.Figure]:
-    """Create a 2D XY-projection figure of all tracked particle paths.
-
-    Companion to :func:`_build_tracking_figure`. The 3D view is subject to
-    perspective distortion (a point's screen position depends on its Z), which
-    can make the XY layout look different from how it really is. This flat
-    projection plots the same trajectories on the true XY plane so the spatial
-    layout can be read and compared against Stage 2 without that distortion.
-
-    Axes are pinned to the full field of view from ``extent_mm``; the aspect is
-    adjusted via the axes box because the ``datalim`` alternative would stretch
-    those fixed limits back out to fill the box. Tracks keep the colours they
-    have in the 3D view.
-    """
-    if tracked_df.empty:
-        return None
-    x_max_mm, y_max_mm, _ = extent_mm
-    fig = plt.figure(figsize=(7, 7))
-    ax = fig.add_subplot(111)
-    ax.set_title("XY projection of particle tracks")
-    ax.set_xlabel("x (mm)")
-    ax.set_ylabel("y (mm)")
-    for rank, (_, track) in enumerate(tracked_df.groupby('track_id')):
-        plot_track_line(ax, (track['x_mm'], track['y_mm']), rank)
-    ax.set_xlim(0, x_max_mm)
-    ax.set_ylim(0, y_max_mm)
-    ax.set_aspect('equal', adjustable='box')
-    plt.tight_layout()
-    return fig
-
-
 def _sweep_period_frames(images_df: pd.DataFrame) -> int:
     """Frames per focus-sweep cycle of a recording, from the spacing of its fd_mm == 0 frames.
 
@@ -1361,8 +1295,8 @@ def run_stage_01_initial_detection(
         # Outside the tracking try-block: a frame that cannot be read must not pass as a tracking failure.
         extent_mm = get_scan_extent_mm(image_dir_path, recording.pixel_to_mm_factor)
         with track_figure_style(config):
-            tracking_fig = _build_tracking_figure(tracks_for_figures_df, extent_mm) if not tracks_for_figures_df.empty else None
-            tracking_xy_fig = _build_tracking_xy_figure(tracks_for_figures_df, extent_mm) if not tracks_for_figures_df.empty else None
+            tracking_fig = build_tracking_figure(tracks_for_figures_df, extent_mm) if not tracks_for_figures_df.empty else None
+            tracking_xy_fig = build_tracking_xy_figure(tracks_for_figures_df, extent_mm) if not tracks_for_figures_df.empty else None
             if tracking_fig is not None:
                 figure_3d_path = os.path.join(output_dir_stage1, f"{sample_id}_stage1_tracks_3d.png")
                 # The tight bbox of a 3D axes omits its z label; include it explicitly.

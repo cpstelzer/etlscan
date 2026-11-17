@@ -10,6 +10,8 @@ import matplotlib.pyplot as plt
 from typing import Optional, Dict, Any, Tuple
 import logging
 
+from src.visualization.figure_style import figure_size
+
 logger = logging.getLogger(__name__)
 
 
@@ -74,7 +76,7 @@ def visualize_ml_features(
                  logger.error(f"Cannot convert image of shape {image_float.shape} to RGB for visualization.")
                  return
         
-        fig, ax = plt.subplots(figsize=(5, 6))
+        fig, ax = plt.subplots(figsize=figure_size('feature_overlay'))
         ax.imshow(image_rgb, cmap='gray')
         ax.set_axis_off()
 

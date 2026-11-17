@@ -12,7 +12,7 @@ import skimage.measure
 from src.utils.common_exceptions import ConfigError
 from src.utils.config_loader import load_config_once
 from src.visualization.feature_visualization import visualize_ml_features
-from src.visualization.figure_style import figure_style
+from src.visualization.figure_style import figure_size, figure_style
 
 CONFIG_DIR = Path(__file__).resolve().parents[1] / "config"
 
@@ -31,6 +31,15 @@ STYLE_CONFIG = {
         'tick_length': 5.5,
         'track_line_width': 1.3,
         'track_marker_size': 3.5,
+        'figure_size_in': {
+            'track_map_3d': [7.5, 7],
+            'track_map_xy': [7, 7],
+            'track_map_side': [7.5, 6],
+            'focus_diagnostic': [8, 8],
+            'diagnostics_summary': [8, 4.5],
+            'feature_overlay': [5, 6],
+            'feature_importance': [6.5, 4],
+        },
     }
 }
 
@@ -102,3 +111,37 @@ def test_stage4_overlay_outlines_regions_and_legends_every_element(monkeypatch, 
     assert saved_legends == [[
         "Main body", "Egg area", "Major axis", "Posterior end", "Posterior 35% area"
     ]]
+
+
+def test_figure_size_is_the_configured_size_inside_a_style_block():
+    with figure_style(STYLE_CONFIG):
+        assert figure_size('feature_importance') == (6.5, 4.0)
+        with pytest.raises(ConfigError, match="Unknown figure"):
+            figure_size('poster')
+
+
+def test_figure_size_outside_a_style_block_fails():
+    with pytest.raises(ConfigError, match="needs an active figure style"):
+        figure_size('track_map_3d')
+
+
+def test_figure_sizes_of_nested_style_blocks_are_restored():
+    wide_config = {'figure_style': dict(STYLE_CONFIG['figure_style'])}
+    wide_config['figure_style']['figure_size_in'] = dict(
+        STYLE_CONFIG['figure_style']['figure_size_in'], track_map_xy=[12, 7]
+    )
+    with figure_style(STYLE_CONFIG):
+        with figure_style(wide_config):
+            assert figure_size('track_map_xy') == (12.0, 7.0)
+        assert figure_size('track_map_xy') == (7.0, 7.0)
+
+
+@pytest.mark.parametrize("bad_size", [[7], [7, 0], "7x7", [7, True]])
+def test_unusable_figure_size_fails(bad_size):
+    bad_config = {'figure_style': dict(STYLE_CONFIG['figure_style'])}
+    bad_config['figure_style']['figure_size_in'] = dict(
+        STYLE_CONFIG['figure_style']['figure_size_in'], track_map_3d=bad_size
+    )
+    with pytest.raises(ConfigError, match="track_map_3d"):
+        with figure_style(bad_config):
+            pass

@@ -75,6 +75,16 @@ figure_style:
   # the points bury the lines. Thinner lines and small open rings keep each track legible.
   track_line_width: 2.2
   track_marker_size: 5.5
+  # Size of each figure the pipeline writes, [width, height] in inches. The point sizes
+  # above are chosen for these widths (see the note at the top of this section).
+  figure_size_in:
+    track_map_3d: [7.5, 7]         # Stage-1 tracks_3d, Stage-2 reconstructed_trajectories_3d
+    track_map_xy: [7, 7]           # Stage-1 tracks_xy, Stage-2 reconstructed_trajectories_xy
+    track_map_side: [7.5, 6]       # Stage-2 reconstructed_trajectories_xz / _yz
+    focus_diagnostic: [8, 8]       # Stage-2 per-track sharpness curve with crop collage
+    diagnostics_summary: [8, 4.5]  # Stage-2 track lengths and focus peaks
+    feature_overlay: [5, 6]        # Stage-4 body / egg overlay
+    feature_importance: [8, 7]     # train_model.py feature-importance chart
 
 # -----------------------------------------------------------------------------
 # Imaging geometry (frame dimensions + illumination source)
@@ -464,7 +474,7 @@ stage_02_characterization:
     # dark and bright image regions would need different thresholds.
     sharpness_column: "variance_laplacian_per_intensity"
     # Focus peaks are measured against the track's own out-of-focus level (baseline),
-    # never against an absolute sharpness value (src/stages/stage_02_characterization.py,
+    # never against an absolute sharpness value (src/core/focus_peak_detection.py,
     # detect_peaks_in_track).
     peak_detection:
       baseline_window_mm: 4.0              # running-median window, in focal travel (frames = mm / scan step)
