@@ -307,7 +307,7 @@ If you use this software, please cite the paper:
 
 > Stelzer, C.-P., M. Brunner & M. Pichler. *Depth-resolved imaging of live plankton with electronically tunable lenses.* In revision at Limnology and Oceanography: Methods.
 
-The data of the paper, example outputs of every pipeline stage and the training images of the classifiers are archived at Zenodo: <https://doi.org/10.5281/zenodo.20396908>. Citation metadata is in `CITATION.cff`.
+The data of the paper, example outputs of every pipeline stage and the training images of the classifiers are archived at Zenodo: <https://doi.org/10.5281/zenodo.20396907>. Citation metadata is in `CITATION.cff`.
 
 ## License
 
