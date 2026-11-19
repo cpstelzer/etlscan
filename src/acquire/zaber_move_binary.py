@@ -13,30 +13,14 @@ import csv
 import sys
 
 from src.acquire.stage_controller import StageController
-from src.utils.config_loader import load_config_once, require_config_sections
+from src.utils.config_loader import load_config_once, require_config_keys
 
 CSV_FILENAME = "wellscanner_coords.csv"
 
 
 def main():
-    acq_conf = load_config_once()['acquisition']
-    require_config_sections(
-        acq_conf,
-        {'stage_controller': (
-            'serial_port', 'device_x_number', 'device_y_number', 'microstep_size_um',
-            'position_tolerance_microsteps',
-        )},
-        'acquisition',
-    )
-    sc_cfg = acq_conf['stage_controller']
-    controller = StageController(
-        serial_port=sc_cfg['serial_port'],
-        device_x_number=sc_cfg['device_x_number'],
-        device_y_number=sc_cfg['device_y_number'],
-        device_x_microstep_size=sc_cfg['microstep_size_um'],
-        device_y_microstep_size=sc_cfg['microstep_size_um'],
-        position_tolerance=sc_cfg['position_tolerance_microsteps'],
-    )
+    acq_conf = require_config_keys(load_config_once()['acquisition'], ('stage_controller',), 'acquisition')
+    controller = StageController.from_config(acq_conf['stage_controller'])
 
     port, device_x, device_y = controller.initialize()
 

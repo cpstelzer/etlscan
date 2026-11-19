@@ -26,6 +26,8 @@ def _base_unified_config(**overrides):
         "acquisition": {
             "camera": {
                 "exposure_us": 1234,
+                "pixel_format_preference": ["Mono8", "Mono12"],
+                "max_num_buffer_min": 50,
                 "retrieve_timeout_margin_ms": 150,
                 "trigger_mode": "software_grid",
                 "trigger_ready_lead_ms": 8,
@@ -43,6 +45,7 @@ def _base_unified_config(**overrides):
                 "scan_step_um": 350,
                 "scan_ratio": 2.25,
                 "lens_settle_time_sec": 0.025,
+                "prefocus_settle_sec": 1.0,
                 "min_settle_ms": 10,
                 "lens_temperature_interval_sec": 1.0,
                 "large_jump_threshold_dpt": -3.0,
@@ -127,6 +130,7 @@ def _base_unified_config(**overrides):
                 "target_fps": 5,
                 "drop_frame_if_backlogged": True,
                 "queue_size": 2,
+                "max_consecutive_missing_frames": 15,
             },
             "background": {"bgi_min_age_s": 2.0, "bgi_max_age_s": 4.0},
             "stage1": {"reacquire_detection_threshold": 3},
@@ -240,3 +244,15 @@ def test_realtime_loader_requires_the_stage1_detection_keys(tmp_path: Path) -> N
     del cfg["stage_01_initial_detection"]["black_plate_well_analysis"]["brightness_matching"]["adjustment_method"]
     with pytest.raises(Exception, match="brightness_matching.adjustment_method"):
         mod.load_realtime_config(str(_write_config(tmp_path, cfg)))
+
+
+def test_realtime_loader_checks_the_camera_setup_keys_for_a_camera_session(tmp_path: Path) -> None:
+    mod = _load_rt_config_module()
+    cfg = _base_unified_config()
+    del cfg["acquisition"]["focusing"]["prefocus_settle_sec"]
+    with pytest.raises(Exception, match="acquisition.focusing.prefocus_settle_sec"):
+        mod.load_realtime_config(str(_write_config(tmp_path, cfg)))
+
+    cfg["realtime_mode"]["acquisition"]["source"] = "directory"   # frames from disk: no camera is set up
+    (tmp_path / "directory").mkdir()
+    assert mod.load_realtime_config(str(_write_config(tmp_path / "directory", cfg))).max_consecutive_missing_frames == 15

@@ -59,6 +59,7 @@ def _start_acquisition_thread(
         acquisition_config=config.acquisition_config,
         queue_size=config.queue_size,
         drop_frame_if_backlogged=config.drop_frame_if_backlogged,
+        max_consecutive_missing_frames=config.max_consecutive_missing_frames,
         acquisition_control=acquisition_control,
     )
 

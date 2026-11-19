@@ -111,8 +111,9 @@ import numpy as np  # noqa: E402
 from pypylon import pylon  # noqa: E402
 import optoICC  # noqa: E402
 
+from src.acquire import hardware_setup  # noqa: E402
 from src.acquire.focus_pattern import build_focus_cycle_pattern  # noqa: E402
-from src.acquire.roi import reset_roi_to_full, set_centered_roi  # noqa: E402
+from src.acquire.roi import reset_roi_to_full  # noqa: E402
 from src.acquire.wellscanner_acquisition_module import (  # noqa: E402
     acquire_and_save_frames, load_config)
 
@@ -507,20 +508,12 @@ def hysteresis_sequence(start_dpt):
 
 
 # ---------------------------------------------------------------------------
-# Camera configuration (mirrors run_acquisition; mono only)
+# Camera configuration (as in run_acquisition; mono only)
 # ---------------------------------------------------------------------------
 def configure_camera(camera, acq):
-    fmt = camera.PixelFormat.GetValue()
-    if fmt.startswith("Bayer"):
-        for pref in acq["camera"]["pixel_format_preference"]:
-            if pref.startswith("Mono") and pref in camera.PixelFormat.Symbolics:
-                camera.PixelFormat.SetValue(pref)
-                break
-    camera.ExposureTime.SetValue(acq["camera"]["exposure_us"])
-    exposure_us = float(camera.ExposureTime.GetValue())
-    camera.MaxNumBuffer = max(acq["camera"]["max_num_buffer_min"], int(acq["camera"]["fps"]))
-    width, height = set_centered_roi(camera, acq["roi"]["width"], acq["roi"]["height"])
-    return exposure_us, int(width), int(height)
+    """Camera settings of a production run (the shared setup of src/acquire/hardware_setup.py), mono."""
+    setup = hardware_setup.configure_camera(camera, acq, False, acq["camera"]["fps"])
+    return float(setup.exposure_us), setup.frame_width, setup.frame_height
 
 
 def set_free_run(camera, fps):
@@ -1129,12 +1122,7 @@ def main():
                   + "; ".join(t_notes))
             for line in temperature_attribute_listing(ecc, lens):
                 print("   ", line)
-        tl = pylon.TlFactory.GetInstance()
-        devices = tl.EnumerateDevices()
-        if not devices:
-            raise ConnectionError("No Pylon camera found.")
-        camera = pylon.InstantCamera(tl.CreateDevice(devices[0]))
-        camera.Open()
+        camera = hardware_setup.open_first_camera(pylon)
         exposure_us, width, height = configure_camera(camera, acq)
         run = Run(base_dir, date_str, args.plate, args.well, start, acq, camera, lens,
                   width, height, exposure_us)

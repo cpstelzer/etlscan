@@ -63,17 +63,9 @@ def _get_acquisition_api():
 
 
 def _build_stage_controller(acq_conf):
-    """Construct a StageController from the hardware-profile-merged stage settings."""
-    sc_cfg = acq_conf['stage_controller']
-    microstep_um = sc_cfg['microstep_size_um']
-    return StageController(
-        sc_cfg['serial_port'],
-        sc_cfg['device_x_number'],
-        sc_cfg['device_y_number'],
-        microstep_um,
-        microstep_um,
-        sc_cfg['position_tolerance_microsteps'],
-    )
+    """Construct a StageController from the stage hardware profile (acquisition.stage_controller)."""
+    require_config_keys(acq_conf, ('stage_controller',), 'acquisition')
+    return StageController.from_config(acq_conf['stage_controller'])
 
 
 def select_wells(acq_conf, csv_filename):
@@ -423,7 +415,7 @@ def run_multiwell_workflow(*, acquisition_config_path, csv_filename):
 
                 if idx < len(all_wells_data) - 1:
                     print("Waiting before next well...")
-                    time.sleep(5)
+                    time.sleep(acq_conf['workflow']['pause_between_wells_sec'])
 
             print("\nAll wells processed.")
 
@@ -592,7 +584,7 @@ def _run_parameter_sweep(*, acq_conf, plate_num, well_num, wellname, start_dpt_v
         else:
             print(f"  Acquisition for {wellname} ({current_step_um}um, {current_pattern}) FAILED.")
 
-        time.sleep(2)
+        time.sleep(acq_conf['workflow']['pause_between_sweep_runs_sec'])
 
 
 def run_experiment_sweep_workflow(*, acquisition_config_path, csv_filename):
@@ -693,7 +685,7 @@ def run_experiment_sweep_workflow(*, acquisition_config_path, csv_filename):
 
                 if idx < len(all_wells_data) - 1:
                     print("\nWaiting before next well...")
-                    time.sleep(5)
+                    time.sleep(acq_conf['workflow']['pause_between_wells_sec'])
 
             print("\nAll wells and parameter combinations processed.")
 

@@ -147,6 +147,9 @@ acquisition:
     # continues on schedule); free_run sleeps that long and discards one sacrificial frame.
     large_jump_threshold_dpt: -3.0
     large_jump_settle_sec: 0.040
+    # Wait after the lens is driven to the first focal plane, before a recording or a
+    # realtime session starts.
+    prefocus_settle_sec: 1.0
     # software_grid: read the lens temperature (if the controller reports it) every this many
     # seconds, in the settling time right after a lens command (a read takes ~6 ms).
     lens_temperature_interval_sec: 1.0
@@ -168,6 +171,7 @@ acquisition:
     max_num_buffer_min: 50
     grab_strategy: "OneByOne"
     retrieve_timeout_margin_ms: 150
+    single_frame_timeout_ms: 2000    # wait for one frame outside a recording (flat-field / dark-frame capture)
     # How exposures are timed against the ETL commands (src/acquire/triggered_acquisition.py):
     #   "software_grid" (default): one software trigger per focus-pattern entry, trigger i due
     #     at t0 + i / fps on a fixed grid; frame i is exposed only after its own lens command
@@ -189,6 +193,10 @@ acquisition:
   # roi.width/height and optics.pixel_size_um/magnification: set by hardware_profiles
   output:
     image_format: "bmp"
+  # Pauses of the multi-well and sweep workflows (src/acquire/workflows.py).
+  workflow:
+    pause_between_wells_sec: 5        # after a well's recording, before the stage moves on
+    pause_between_sweep_runs_sec: 2   # between two recordings of a scan-step x pattern sweep
   # stage_controller (Zaber XY stage) is injected from the dedicated
   # stage_hardware_profile block (see below).
   watermark:
@@ -271,6 +279,15 @@ stage_hardware_profile:
   device_y_number: 2
   microstep_size_um: 0.15625
   position_tolerance_microsteps: 10
+  baud_rate: 115200
+  serial_timeout_sec: 60
+  # The binary protocol sends no "move finished" reply that the code waits for; these
+  # fixed waits give the stage time to finish before the next command.
+  renumber_wait_sec: 3         # after the renumber command at start-up
+  homing_wait_sec: 2.5         # after homing one axis
+  axis_move_wait_sec: 1.5      # after a move command to one axis
+  between_axes_wait_sec: 0.2   # between the X move and the Y move
+  settle_wait_sec: 2           # at the target position, before the recording starts
 
 # -----------------------------------------------------------------------------
 # Realtime mode
@@ -292,6 +309,8 @@ realtime_mode:
     # new time grid (no catch-up burst), so the frame rate drops instead.
     drop_frame_if_backlogged: false
     queue_size: 3
+    # Stop the session when this many frames in a row did not arrive from the camera.
+    max_consecutive_missing_frames: 15
   background:
     bgi_min_age_s: 2.0
     bgi_max_age_s: 4.0

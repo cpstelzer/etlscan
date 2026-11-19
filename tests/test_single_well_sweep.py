@@ -26,6 +26,7 @@ def _acq_conf(tmp_path, *, variable, min_duration_sec=15, plane_revisit_times=5)
         },
         "focusing": {"pattern": "zigzag", "scan_step_um": 200, "scan_height_mm": 3.2, "scan_ratio": 3.36},
         "camera": {"fps": 25.0, "video_duration_sec": min_duration_sec},
+        "workflow": {"pause_between_wells_sec": 5, "pause_between_sweep_runs_sec": 2},
         "experiment_sweep": {
             "scan_steps_um_options": list(SCAN_STEPS),
             "focusing_pattern_options": list(PATTERNS),

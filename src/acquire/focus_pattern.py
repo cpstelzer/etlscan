@@ -25,14 +25,14 @@ logger = logging.getLogger(__name__)
 def build_focus_cycle_from_up_values(pattern: str, diopter_values_up: list[float]) -> list[float]:
     """Turn an upward diopter ramp into one cycle of the requested pattern.
 
-    Unknown patterns fall back to ``zigzag`` with a warning (the long-standing
-    behaviour of both acquisition paths).
+    Raises:
+        ValueError: ``pattern`` is neither ``zigzag`` nor ``sawtooth``.
     """
     normalized_pattern = pattern.strip().lower()
     if normalized_pattern == "sawtooth":
         return diopter_values_up
     if normalized_pattern != "zigzag":
-        logger.warning(f"Unknown focus pattern {pattern!r}. Defaulting to 'zigzag'.")
+        raise ValueError(f"Unknown focus pattern {pattern!r}: acquisition.focusing.pattern must be 'zigzag' or 'sawtooth'.")
     diopter_values_down: list[float] = []
     if len(diopter_values_up) > 1:
         diopter_values_down = diopter_values_up[-2:0:-1]
