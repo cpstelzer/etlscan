@@ -53,11 +53,10 @@ def _limits_at_draw(ax):
     return ax.get_xlim(), ax.get_ylim()
 
 
-# Only the tracking optics: the config's camera ROI and scan height describe the rig as
-# set up now, not the recording, and must not be read (they would raise KeyError here).
-OPTICS_ONLY_CONFIG = {
-    'stage_01_initial_detection': {'tracking': {'pixel_size_um': 2.0, 'magnification': 0.5}}
-}
+# The recording's pixel scale (read_recording_parameters): 2.0 um pixels at 0.5x = 0.004 mm.
+# No config is handed in: the camera ROI and scan height in it describe the rig as set up
+# now, not the recording.
+PIXEL_TO_MM_FACTOR = 0.004
 
 
 def _write_frame(directory, frame, fd_mm, width_px, height_px):
@@ -72,12 +71,12 @@ def test_scan_extent_derived_from_recorded_frames(tmp_path):
     (tmp_path / 'metadata_log.csv').write_text('# not a frame\n')
 
     # 2.0 um at 0.5x = 4 um = 0.004 mm per pixel, over 1000x500 px frames; deepest plane 1.2 mm.
-    assert get_scan_extent_mm(OPTICS_ONLY_CONFIG, str(tmp_path)) == pytest.approx((4.0, 2.0, 1.2))
+    assert get_scan_extent_mm(str(tmp_path), PIXEL_TO_MM_FACTOR) == pytest.approx((4.0, 2.0, 1.2))
 
 
 def test_scan_extent_without_frames_fails(tmp_path):
     with pytest.raises(DataValidationError, match="No acquisition frames"):
-        get_scan_extent_mm(OPTICS_ONLY_CONFIG, str(tmp_path))
+        get_scan_extent_mm(str(tmp_path), PIXEL_TO_MM_FACTOR)
 
 
 def test_stage1_3d_figure_spans_full_extent(corner_tracks_df):

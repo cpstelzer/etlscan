@@ -18,8 +18,12 @@ from src.utils import (
     parse_date_plate_well, parse_frame_filenames, extract_frame_from_filename
 )
 from src.utils.common_exceptions import ProcessingError, ImageProcessingError, ConfigError, DataValidationError
-from src.utils.acquisition_metadata import get_scan_extent_mm, read_frames_lost_at_acquisition
-from src.utils.config_loader import get_pixel_to_mm_factor, require_config_sections
+from src.utils.acquisition_metadata import (
+    get_scan_extent_mm,
+    read_frames_lost_at_acquisition,
+    read_recording_parameters,
+)
+from src.utils.config_loader import require_config_sections
 from src.core.image_io_operations import (
     load_image,
     load_flat_field_assets,
@@ -73,10 +77,9 @@ STAGE1_SHARED_REQUIRED_KEYS = {
     'particle_comparison': ('search_radius_factor', 'default_particle_area'),
 }
 _STAGE1_BATCH_REQUIRED_KEYS = {
-    '': ('BG_frame_offset_mode', 'bg_offset_val'),
+    '': ('BG_frame_offset_mode', 'bg_offset_val', 'bg_offset_min_time_s'),
     'tracking': (
-        'enabled', 'pixel_size_um', 'magnification', 'track_in_2d', 'search_range_mm', 'memory_frames',
-        'min_track_length',
+        'enabled', 'track_in_2d', 'search_range_mm', 'memory_frames', 'min_track_length',
     ),
 }
 _STAGE1_EXTERNAL_BACKGROUND_KEYS = {
@@ -567,37 +570,27 @@ def _build_time_shift_pairs(
     """Pair every frame with a later frame of the same recording (time-shifted BG).
 
     The offset is ``bg_offset_val``, or in ``automatic`` mode the smallest offset of at
-    least ~5 s whose frames match in fd_mm; pairs wrap modulo the frame count.
+    least ``bg_offset_min_time_s`` (in frames at ``recording_fps``, the recording's own frame
+    rate) whose frames match in fd_mm; pairs wrap modulo the frame count.
     """
     bg_offset_mode = config_s1['BG_frame_offset_mode']
     bg_offset_default = config_s1['bg_offset_val']
-    min_offset_for_auto = max(int(round(recording_fps * 5)), 1) if recording_fps > 0 else None
-
-    effective_mode = bg_offset_mode
+    min_offset_for_auto = None
     if bg_offset_mode == 'automatic':
-        if min_offset_for_auto is None:
-            logger.warning(
-                "Stage 1: Automatic background offset requested but acquisition.camera.fps is non-positive; "
-                "falling back to configured offset %d.",
-                bg_offset_default,
-            )
-            bg_offset = bg_offset_default
-            effective_mode = 'fixed-fallback'
-        else:
-            bg_offset = _determine_bg_offset_for_fg_bg_pairs(
-                images_df_filtered,
-                min_offset_for_auto,
-                bg_offset_default
-            )
+        min_offset_for_auto = max(int(round(recording_fps * config_s1['bg_offset_min_time_s'])), 1)
+        bg_offset = _determine_bg_offset_for_fg_bg_pairs(
+            images_df_filtered,
+            min_offset_for_auto,
+            bg_offset_default
+        )
     else:
         bg_offset = bg_offset_default
 
-    min_offset_display = min_offset_for_auto if min_offset_for_auto is not None else 'N/A'
     logger.info(
         "Stage 1: Using background frame offset %s (mode=%s, minimum_auto_offset=%s, recording_fps=%.3f)",
         bg_offset,
-        effective_mode,
-        min_offset_display,
+        bg_offset_mode,
+        min_offset_for_auto if min_offset_for_auto is not None else 'N/A',
         recording_fps,
     )
 
@@ -1099,6 +1092,7 @@ def run_particle_tracking(
     tracking_config: Dict[str, Any],
     memory_frames: int,
     search_range_mm: float,
+    pixel_to_mm_factor: float,
 ) -> pd.DataFrame:
     """Perform particle tracking on fused detections and return data instead of writing files.
 
@@ -1106,14 +1100,14 @@ def run_particle_tracking(
     survives, the processed detections with ``track_id`` NaN. ``memory_frames`` (how long
     a particle may go undetected) and ``search_range_mm`` (linking radius) come from
     ``tracking`` for time-shift runs and are the static-object values for
-    external-background runs (see :func:`run_stage_01_initial_detection`). The track
+    external-background runs (see :func:`run_stage_01_initial_detection`).
+    ``pixel_to_mm_factor`` is the recording's pixel scale. The track
     figures are built by the caller from the final (object-filtered) tracks.
     """
     logger.info(f"--- Post-S1 Tracking initiated for: {sample_id} ---")
     min_track_length = tracking_config['min_track_length']
     tracking_values = {
-        'pixel_size_um': tracking_config['pixel_size_um'],
-        'magnification': tracking_config['magnification'],
+        'pixel_to_mm_factor': pixel_to_mm_factor,
         'search_range_mm': search_range_mm,
         'memory_frames': memory_frames,
         'min_track_length': min_track_length,
@@ -1124,7 +1118,7 @@ def run_particle_tracking(
     track_in_2d = bool(tracking_config['track_in_2d'])
 
     processed_data = _process_particle_coordinates_for_tracking_df(
-        fused_df, get_pixel_to_mm_factor(tracking_config)
+        fused_df, pixel_to_mm_factor
     )
     if processed_data.empty:
         logger.warning("Tracking workflow stopped: No data after initial processing.")
@@ -1198,6 +1192,11 @@ def run_stage_01_initial_detection(
     """
     logger.info(f"--- Stage 1: Initial Detection for Sample ID: {sample_id} ---")
     validate_stage1_config(config, external_background=bg_image_dir_path is not None)
+    recording = read_recording_parameters(config, image_dir_path)
+    logger.info(
+        "Stage 1: recording at %.2f fps, %.6f mm per pixel (optics from %s).",
+        recording.frame_rate_fps, recording.pixel_to_mm_factor, recording.optics_source,
+    )
     config_s1 = config[STAGE1_CONFIG_PATH]
     system_cfg = config['system']
     source_image_illumination = system_cfg['source_image_illumination_type']
@@ -1225,7 +1224,7 @@ def run_stage_01_initial_detection(
         images_df_filtered = _filter_image_df(images_df.copy(), trim_to_last_fd0=True)
         if images_df_filtered.empty: return None
         frame_pairs = _build_time_shift_pairs(
-            images_df_filtered, config_s1, float(config['acquisition']['camera']['fps'])
+            images_df_filtered, config_s1, recording.frame_rate_fps
         )
     else:
         external_background_config = config_s1['external_background']
@@ -1342,7 +1341,8 @@ def run_stage_01_initial_detection(
                 memory_frames = tracking_config['memory_frames']
                 search_range_mm = tracking_config['search_range_mm']
             tracked_df = run_particle_tracking(
-                final_sample_df, sample_id, tracking_config, memory_frames, search_range_mm
+                final_sample_df, sample_id, tracking_config, memory_frames, search_range_mm,
+                recording.pixel_to_mm_factor,
             )
         except Exception as e:
             logger.exception(f"Particle tracking failed for sample {sample_id}: {e}")
@@ -1359,7 +1359,7 @@ def run_stage_01_initial_detection(
             tracked_df.dropna(subset=['track_id']) if 'track_id' in tracked_df.columns else pd.DataFrame()
         )
         # Outside the tracking try-block: a frame that cannot be read must not pass as a tracking failure.
-        extent_mm = get_scan_extent_mm(config, image_dir_path)
+        extent_mm = get_scan_extent_mm(image_dir_path, recording.pixel_to_mm_factor)
         with track_figure_style(config):
             tracking_fig = _build_tracking_figure(tracks_for_figures_df, extent_mm) if not tracks_for_figures_df.empty else None
             tracking_xy_fig = _build_tracking_xy_figure(tracks_for_figures_df, extent_mm) if not tracks_for_figures_df.empty else None

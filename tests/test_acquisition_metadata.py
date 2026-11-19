@@ -7,13 +7,16 @@ import pytest
 from src.utils.acquisition_metadata import (
     METADATA_LOOP_ERROR_PREFIX,
     METADATA_MISSING_VALUE,
+    OPTICS_SOURCE_ACTIVE_PROFILE,
+    OPTICS_SOURCE_RECORDING,
     load_experiment_design,
     read_acquisition_metadata_header,
     read_frames_lost_at_acquisition,
+    read_recording_parameters,
     resolve_sample_design_values,
     validate_background_compatibility,
 )
-from src.utils.common_exceptions import DataValidationError
+from src.utils.common_exceptions import ConfigError, DataValidationError
 
 
 # --- header parsing -------------------------------------------------------------
@@ -168,3 +171,65 @@ def test_design_requires_key_and_scan_step_columns(tmp_path):
 def test_design_rejects_duplicate_sample_rows(tmp_path):
     with pytest.raises(DataValidationError, match="duplicate"):
         load_experiment_design(_write_design(tmp_path, _DESIGN_ROWS + _DESIGN_ROWS[:1]))
+
+
+# --- recording parameters (frame rate, pixel scale) -----------------------------
+
+# The rig as configured NOW: another frame rate and another lens than the recordings below.
+CURRENT_RIG_CONFIG = {
+    "acquisition": {
+        "paths": {"log_filename": "metadata_log.csv"},
+        "camera": {"fps": 10.0},
+        "optics": {"pixel_size_um": 2.74, "magnification": 1.5},
+    }
+}
+
+
+def test_recording_parameters_come_from_the_recording_not_the_current_config(tmp_path, write_metadata_log):
+    write_metadata_log(tmp_path, config_overrides={
+        "Final Acquisition FPS": "24.97", "Pixel Size (um)": "2.74", "Magnification": "0.638",
+    })
+
+    recording = read_recording_parameters(CURRENT_RIG_CONFIG, str(tmp_path))
+
+    assert recording.frame_rate_fps == pytest.approx(24.97)
+    assert recording.pixel_to_mm_factor == pytest.approx(2.74 / 0.638 / 1000)
+    assert recording.optics_source == OPTICS_SOURCE_RECORDING
+
+
+def test_recording_without_logged_optics_takes_the_active_profile(tmp_path, write_metadata_log):
+    write_metadata_log(tmp_path)   # header as written before the optics were logged
+
+    recording = read_recording_parameters(CURRENT_RIG_CONFIG, str(tmp_path))
+
+    assert recording.frame_rate_fps == pytest.approx(25.0)   # still the recording's own frame rate
+    assert recording.pixel_to_mm_factor == pytest.approx(2.74 / 1.5 / 1000)
+    assert recording.optics_source == OPTICS_SOURCE_ACTIVE_PROFILE
+
+
+def test_recording_without_logged_optics_needs_optics_in_the_profile(tmp_path, write_metadata_log):
+    write_metadata_log(tmp_path)
+    config_without_optics = {"acquisition": {"paths": {"log_filename": "metadata_log.csv"}}}
+
+    with pytest.raises(ConfigError, match="acquisition.optics"):
+        read_recording_parameters(config_without_optics, str(tmp_path))
+
+
+def test_recording_with_only_one_optics_field_fails(tmp_path, write_metadata_log):
+    write_metadata_log(tmp_path, config_overrides={"Magnification": "0.638"})
+
+    with pytest.raises(DataValidationError, match="Magnification"):
+        read_recording_parameters(CURRENT_RIG_CONFIG, str(tmp_path))
+
+
+def test_recording_without_metadata_log_fails(tmp_path):
+    with pytest.raises(DataValidationError, match="has no metadata_log.csv"):
+        read_recording_parameters(CURRENT_RIG_CONFIG, str(tmp_path))
+
+
+@pytest.mark.parametrize("logged_frame_rate", ["0.00", "-25.00", "fast"])
+def test_recording_with_unusable_frame_rate_fails(tmp_path, write_metadata_log, logged_frame_rate):
+    write_metadata_log(tmp_path, config_overrides={"Final Acquisition FPS": logged_frame_rate})
+
+    with pytest.raises(DataValidationError, match="Final Acquisition FPS"):
+        read_recording_parameters(CURRENT_RIG_CONFIG, str(tmp_path))

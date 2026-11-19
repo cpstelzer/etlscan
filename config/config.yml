@@ -176,7 +176,7 @@ acquisition:
     trigger_late_report_ms: 2        # count triggers later than this after their grid time
     timestamp_mismatch_ms: 10        # a frame whose exposure - trigger is off the recording's median by more was matched to the wrong trigger
     # exposure_us: set by hardware_profiles
-  # roi.width/height: set by hardware_profiles
+  # roi.width/height and optics.pixel_size_um/magnification: set by hardware_profiles
   output:
     image_format: "bmp"
   # stage_controller (Zaber XY stage) is injected from the dedicated
@@ -218,6 +218,9 @@ hardware_profiles:
     roi:
       width: 4512
       height: 4512
+    optics:
+      pixel_size_um: 2.74   # camera sensor pixel pitch
+      magnification: 0.638  # objective; image pixel in the object plane = pixel_size_um / magnification
     plate:
       definitions:
         "24":
@@ -233,6 +236,9 @@ hardware_profiles:
     roi:
       width: 4512
       height: 4512
+    optics:
+      pixel_size_um: 2.74
+      magnification: 1.5
     plate:
       definitions:
         "24":
@@ -317,8 +323,12 @@ realtime_mode:
 stage_01_initial_detection:
   # Time-shift background (run_pipeline default, --background_source time_shift): BG = a later
   # frame of the same recording, so only moving specimens survive the subtraction.
+  # "automatic": the smallest frame offset of at least bg_offset_min_time_s (converted with
+  # the recording's frame rate) whose frames lie at the same focal plane; bg_offset_val is
+  # used when none is found. Any other value: bg_offset_val frames.
   BG_frame_offset_mode: "automatic"
   bg_offset_val: 180
+  bg_offset_min_time_s: 5
   # External background (--background_source external): BG = the same frame of a separate
   # specimen-free recording of the well, so non-moving (e.g. fixated) specimens are found too.
   # --input_batch_dir is the experiment root holding <fg_subdir>/ and <bg_subdir>/ with
@@ -416,8 +426,9 @@ stage_01_initial_detection:
     default_particle_area: 2000
   tracking:
     enabled: true
-    pixel_size_um: 2.74
-    magnification: 0.638
+    # The pixel scale (mm per image pixel) is not set here: it is read from each recording's
+    # metadata_log.csv (Pixel Size / Magnification); recordings made before the acquisition
+    # logged them take acquisition.optics of the active hardware profile.
     # Link in the XY plane only. On these focus-sweep scans z is the ETL focal depth
     # (identical for every particle in a frame, stepping ~0.2 mm/frame), so it cannot
     # separate particles yet eats the search budget and throttles memory. 3D (false)
@@ -479,7 +490,7 @@ stage_02_characterization:
     # focus peak of another object (e.g. the well rim) or an identity swap, not a dive:
     # animals here swim ~1 mm/s in xy (90th percentile 1.5 mm/s), while false knots implied
     # 6-10 mm/s. tolerance_planes covers the plane quantisation of two knots (a peak can sit
-    # one plane off its object). Time comes from acquisition.camera.fps, as in Stage 1.
+    # one plane off its object). Time comes from the recording's frame rate (its metadata_log.csv), as in Stage 1.
     # Tracks with fewer than 3 knots are not gated (no neighbour majority).
     depth_knot_speed_gate:
       max_vertical_speed_mm_s: 1.5

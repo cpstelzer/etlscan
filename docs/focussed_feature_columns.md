@@ -88,7 +88,7 @@ Before the fit, a speed gate (`flag_depth_knot_speed_outliers`, configured by
 `focussed_particles.depth_knot_speed_gate`) drops depth knots that no neighbouring
 knot of the track supports: a knot whose depth differs from each neighbour by more
 than `tolerance_planes` focal planes plus `max_vertical_speed_mm_s` times the time
-between them (frame rate `acquisition.camera.fps`). Such a lone depth is a focus peak
+between them (frame rate of the recording, from its `metadata_log.csv`). Such a lone depth is a focus peak
 of another object in the crop or a frame of another animal after a Stage-1 identity
 swap. Tracks with fewer than 3 knots are not gated; two or more consecutive knots
 that agree are kept.

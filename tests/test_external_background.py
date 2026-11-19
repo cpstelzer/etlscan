@@ -179,6 +179,21 @@ def test_time_shift_pairs_unchanged(tmp_path):
     ]
 
 
+@pytest.mark.parametrize("recording_fps, expected_offset", [(10.0, 8), (25.0, 16)])
+def test_automatic_time_shift_offset_follows_the_recording_frame_rate(tmp_path, recording_fps, expected_offset):
+    # bg_offset_min_time_s = 0.4 s is 4 frames at 10 fps and 10 frames at 25 fps; the focal
+    # planes repeat every 8 frames, so the first matching offset is 8 and 16 respectively.
+    images_df = _filter_image_df(
+        _touch_frames(tmp_path / "fg", "20261016_plate3_well7", range(0, 41)), trim_to_last_fd0=True
+    )
+    config_s1 = {"BG_frame_offset_mode": "automatic", "bg_offset_val": 3, "bg_offset_min_time_s": 0.4}
+
+    pairs = _build_time_shift_pairs(images_df, config_s1, recording_fps=recording_fps)
+
+    first_fg, first_bg = pairs[0]
+    assert first_bg["frame"] - first_fg["frame"] == expected_offset
+
+
 # --- sweep period (tracking memory) and lint-shaped detections -------------------
 
 def test_sweep_period_is_spacing_of_fd0_frames(tmp_path):
@@ -243,6 +258,16 @@ def no_flat_field_confirmed(monkeypatch):
     monkeypatch.setattr(image_io_operations, "_ffc_missing_confirmed", True)
 
 
+def _write_fg_log(sample_dir):
+    """Minimal FG metadata log: Stage 1 reads the recording's frame rate from its header
+    (no optics fields, like a recording made before they were logged)."""
+    with open(os.path.join(sample_dir, "metadata_log.csv"), "w", encoding="utf-8") as log_file:
+        log_file.write(
+            "# === Acquisition Run Metadata ===\n# --- Configuration ---\n"
+            "# Final Acquisition FPS: 25.00\n# === Frame Data ===\n"
+        )
+
+
 def _write_sample(root, sample_id, frames, make_fg, make_bg, fd_of=_sweep_fd):
     for side, make in (("fg", make_fg), ("bg", make_bg)):
         sample_dir = os.path.join(root, side, sample_id)
@@ -250,6 +275,7 @@ def _write_sample(root, sample_id, frames, make_fg, make_bg, fd_of=_sweep_fd):
         for frame in frames:
             name = _frame_name("20261016_plate3_well7", frame, fd_of(frame))
             cv2.imwrite(os.path.join(sample_dir, name), make(frame))
+    _write_fg_log(os.path.join(root, "fg", sample_id))
     return os.path.join(root, "fg", sample_id), os.path.join(root, "bg", sample_id)
 
 
