@@ -6,6 +6,9 @@ from typing import Any, Dict, Optional, Tuple, Union, List
 
 import pandas as pd
 
+from src.utils.common_exceptions import ConfigError
+from src.utils.config_loader import require_config_sections
+
 logger = logging.getLogger(__name__)
 
 # Raw frame written by the acquisition: <date>_plate<p>_well<w>_f<frame>_dpt<diopter>_fd<focal distance>mm.png
@@ -18,51 +21,41 @@ _FRAME_FILENAME_PATTERN = re.compile(
 def get_project_base_dir(config: Dict[str, Any]) -> str:
     """Input: config dict. Output: project root path without creating files.
 
-    Reads ``paths.pipeline_base`` and falls back to the legacy top-level
-    ``project_base_dir`` key for configs that have not been migrated.
+    Reads ``paths.pipeline_base`` (environment variables and ``~`` are expanded).
+
+    Raises:
+        ConfigError: ``paths.pipeline_base`` is missing or empty.
     """
-    paths_cfg = config.get("paths", {})
-    configured_base_dir = paths_cfg.get("pipeline_base", config.get("project_base_dir"))
-    if configured_base_dir is None:
-        raise KeyError("config must define paths.pipeline_base (or legacy project_base_dir)")
+    require_config_sections(config, {'paths': ('pipeline_base',)}, 'config')
+    configured_base_dir = config['paths']['pipeline_base']
+    if not configured_base_dir:
+        raise ConfigError("Config key 'paths.pipeline_base' must name the pipeline base directory.")
     expanded_base_dir = os.path.expanduser(os.path.expandvars(str(configured_base_dir)))
     return expanded_base_dir
 
 
-def get_sample_dir(config: Dict[str, Any], sample_subdir_name: Optional[str] = None) -> str:
+def get_sample_dir(config: Dict[str, Any], sample_subdir_name: str) -> str:
     """
     Constructs the full path to a sample directory within data/input.
-    If sample_subdir_name is 'MyBatch/SampleA', it resolves to project_base_dir/data/input/MyBatch/SampleA.
-    If sample_subdir_name is None, it uses the 'sample_subdir_name' from config.
+    If sample_subdir_name is 'MyBatch/SampleA', it resolves to <pipeline_base>/data/input/MyBatch/SampleA.
     """
     base_dir = get_project_base_dir(config)
-    input_data_root = os.path.join(base_dir, 'data', 'input')
-
-    if sample_subdir_name is None:
-        sample_subdir_name_resolved = config.get("sample_subdir_name", "")
-    else:
-        sample_subdir_name_resolved = sample_subdir_name
-
-    return os.path.join(input_data_root, sample_subdir_name_resolved)
+    return os.path.join(base_dir, 'data', 'input', sample_subdir_name)
 
 
 def get_output_dir_for_sample(
     config: Dict[str, Any],
-    sample_subdir_name: Optional[str] = None,
+    sample_subdir_name: str,
     batch_name: Optional[str] = None,
 ) -> str:
     """
     Constructs the base output path for a given sample.
-    If batch_name is provided, output is project_base_dir/data/output/batch_name/sample_subdir_name.
-    Otherwise, output is project_base_dir/data/output/sample_subdir_name.
+    If batch_name is provided, output is <pipeline_base>/data/output/batch_name/sample_subdir_name.
+    Otherwise, output is <pipeline_base>/data/output/sample_subdir_name.
     """
     base_dir = get_project_base_dir(config)
     output_data_root = os.path.join(base_dir, 'data', 'output')
-
-    if sample_subdir_name is None:
-        sample_subdir_name_resolved = config.get("sample_subdir_name", "")
-    else:
-        sample_subdir_name_resolved = sample_subdir_name
+    sample_subdir_name_resolved = sample_subdir_name
 
     if batch_name:
         if os.path.basename(output_data_root) == batch_name:

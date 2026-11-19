@@ -7,7 +7,6 @@
 # NOTE ON PARTICLE-AREA THRESHOLDS (px^2): the pipeline has several deliberately
 # DISTINCT minimum-area knobs. They govern different stages/inputs and are NOT
 # duplicates -- do not consolidate them:
-#   - segmentation.min_significant_area (300)                                    : smallest region kept during segmentation
 #   - stage_01_initial_detection.particle_analysis.min_microorganism_area (300) : background-subtracted detection
 #   - stage_01_initial_detection.unsubtracted_particle_analysis.min_particle_area (600) : unsubtracted-frame detection
 #   - stage_01_initial_detection.particle_comparison.default_particle_area (2000): fallback area used in track matching
@@ -113,7 +112,6 @@ segmentation:
   unsharp_mask_amount: 1.0
   min_noise_size: 50
   closing_selem_size: 3
-  min_significant_area: 300
 
 # -----------------------------------------------------------------------------
 # Acquisition runtime (rig-agnostic defaults)
@@ -382,7 +380,6 @@ stage_01_initial_detection:
       fallback_full_frame_on_failure: true
     brightness_peak_calculation:
       min_well_pixels: 100
-      min_intensity_for_peak_search: 75
       percentile_for_peak_proxy: 75
     brightness_matching:
       max_peak_difference_allowed: 15
@@ -488,6 +485,7 @@ stage_02_characterization:
       max_vertical_speed_mm_s: 1.5
       tolerance_planes: 2
     save_plots: true
+    # Prefix of the crop files shown in the focus-diagnostic collages; null = the sample id.
     crop_filename_prefix: null
 
 # -----------------------------------------------------------------------------

@@ -168,14 +168,16 @@ which applies these transforms at load time:
 |---------|-------|
 | `base_config` (variants) | A config with a top-level `base_config: "<file>"` (relative to itself) is a **variant**: it holds only the values it changes and is deep-merged over that base before the transforms below. Use variants instead of copying `config.yml`, so they cannot drift. |
 | Stage-2 focus peaks | `stage_02_characterization.focussed_particles.peak_detection`: a peak is measured against the track's own out-of-focus baseline (running median over `baseline_window_mm` of focal travel; frames derived from the sample's scan step), never an absolute sharpness value. Detection runs on `variance_laplacian_per_intensity` (Laplacian variance ÷ crop mean intensity), because out of focus the plain `variance_laplacian` is shot noise that grows with brightness. Peaks at a track's first/last frame are kept and flagged `focus_peak_at_track_edge`. With `one_peak_per_sweep_pass` only the strongest peak of each monotonic sweep pass (derived from z) is kept. `sharpness_min_threshold` in the same block is the **realtime** per-frame gate only. The depth spline (`z_reconstructed`) skips knots that `depth_knot_speed_gate` flags (`depth_knot_speed_outlier`): a knot that disagrees with every neighbouring knot by more than `tolerance_planes` planes + `max_vertical_speed_mm_s` × Δt (Δt from `acquisition.camera.fps`, as in Stage 1). |
-| `paths.pipeline_base` | Offline-pipeline root (output, models, training data). Legacy `project_base_dir` still accepted as a fallback in `get_project_base_dir`. |
+| No fallbacks in code | `config.yml` is the only source of a parameter value. Code indexes config sections directly, never `.get(key, default)`; a function checks its section once with `require_config_keys`, a stage all of its sections at its start with `require_config_sections` (`validate_stage1_config`, also called by `load_realtime_config`). A missing key raises `ConfigError` naming its path; a key nothing reads is removed. Enforced by `tests/test_config_key_coverage.py`. |
+| `paths.pipeline_base` | Offline-pipeline root (output, models, training data); required (`get_project_base_dir`). |
+| Stage-3 training keys | Everything only the training scripts read (`test_split_size`, `random_state`, `exclude_feature_prefixes`, `rf_param_grid`, `efficient_net_training`) lives under `stage_03_filtering_and_classification.training_params`; inference settings are direct children of the stage. |
 | `paths.raw_data_root` | Acquisition output root; **injected** into `acquisition.paths.output_folder_base` (single source of truth). Point `run_pipeline --input_batch_dir` here. |
 | `imaging` + `segmentation` | Split for clarity; the loader **assembles** them into the internal `config['system']` view that pipeline code consumes. Don't read `imaging`/`segmentation` directly in stage code — read `system`. |
 | `acquisition` | Rig-agnostic runtime. Hardware-specific values come from `hardware_profiles`. |
 | `hardware_profiles.<name>` | Deep-merged into `acquisition` per `active_hardware_profile`. Holds camera exposure, ROI, ETL focus, and per-rig plate origin overrides (ETL-lens rig). |
 | `stage_hardware_profile` | Dedicated Zaber XY-stage profile, independent of the ETL-lens profiles. **Injected** into `acquisition.stage_controller` (single source — not duplicated per lens profile). |
 | `acquisition.plate.type` | Run-level plate selection (`24`/`96`), **decoupled** from the hardware profile. `acquisition.plate.definitions` holds geometry; profiles override only `origin_x`/`origin_y`. Read via `get_plate_settings(acq_conf)`. |
-| Particle-area thresholds | The five `min_*_area` knobs are intentionally distinct (see the note atop `config.yml`) — do not consolidate. |
+| Particle-area thresholds | The four minimum-area knobs are intentionally distinct (see the note atop `config.yml`) — do not consolidate. |
 | `acquisition.experiment_sweep` | Scan-step × pattern grid for both sweep scripts, plus `variable_recording_duration` / `plane_revisit_times` (run length = max(`camera.video_duration_sec`, time for every plane to get k visits)). |
 | `acquisition.camera.trigger_mode` | How exposures are timed against the ETL commands (`acquire_and_save_frames`, every `run_acquire*.py`). `software_grid` (default): one software trigger per focus-pattern entry, trigger i due at t0 + i / `fps` on a fixed grid; frame i is exposed only after its own lens command + `focusing.min_settle_ms`, the lens moves only `exposure + post_exposure_margin_ms` after a trigger, `WaitForFrameTriggerReady` runs `trigger_ready_lead_ms` before the due time; a large jump (`large_jump_threshold_dpt`) delays only its own trigger to command end + `large_jump_settle_sec`. The realtime camera source (`src/realtime/acquisition.py`) follows the same setting and runs the same loop on a background thread at `realtime_mode.runtime.target_fps` (adaptive/repeat requests apply from the next lens command; `drop_frame_if_backlogged: false` pauses the loop and restarts the grid instead of dropping). `free_run`: legacy loop (sleep `focusing.lens_settle_time_sec`, take the next free-run frame), kept for comparison — at 25 fps it labels each frame with the previous frame's plane (one-frame lag). `metadata_log.csv` gets `# Trigger Mode` (image-defining: an external-BG run must use the same loop as its FG run; a missing field means `free_run`, i.e. all older data), `# Min Settle (ms)` (grid), `# Lens Temperature Start/End (C)` (if the controller reports it) and, after the legacy columns, `grid_time_s`, `lens_cmd_start_s`, `lens_cmd_end_s`, `trigger_time_s`, `trigger_late_ms`, `block_id`, `camera_timestamp_ns`, `exposure_minus_trigger_ms`, `exposure_minus_lens_cmd_ms`, `lens_temp_c` (times relative to the acquisition start; exposure times from camera timestamps via clock latches). One recording check per run (`camera.clock_sync_samples`, `trigger_late_report_ms`, `timestamp_mismatch_ms`). |
 | Egg detection | `stage_04_biological_analysis.egg_detection` is only consumed by stage 4; it is **not** merged into `get_unified_segmentation_params`. |
@@ -207,10 +209,10 @@ pytest tests/ --ignore=tests/test_acquire_refactor_contracts.py
 pytest tests/test_filename_helpers.py -v
 ```
 
-Expected baseline: **109 tests pass**, 6 pre-existing failures in
-`test_realtime_config_phase34.py`, `test_stage03_ml_columns.py`, and
-`test_stage3_feature_columns.py` (config/signature mismatches unrelated to
-active refactoring work).
+Expected baseline (Windows rig PC, `wellscan24_env`, full suite): **352 tests pass**,
+5 pre-existing failures: three in `test_config_refactor_baseline.py` (they assert rig values
+the config has since changed), `test_project_base_dir_expansion.py::…expands_tilde` and
+`test_stage03_ml_columns.py::test_stage3_writes_ml_columns` (both compare POSIX paths).
 
 ---
 
@@ -258,6 +260,7 @@ both image and ML errors).
 | `apply_quality_flag_filters` | `src/core/feature_calculators/quality_calculator.py` | Drop particles flagged `has_black_mask_artifact` / `is_on_crop_boundary` per `stage_03_filtering_and_classification.quality_flags_filter`; the one implementation for batch and realtime Stage 3 |
 | `calculate_posterior_attributes` | `src/core/feature_calculators/bio_features_calculator.py` | Annotate RegionProperties with posterior axis vector (used by Stage 4 + visualisation) |
 | `load_config_once` | `src/utils/config_loader.py` | Load and cache the YAML config |
+| `require_config_keys` / `require_config_sections` | `src/utils/config_loader.py` | Check that a config section (or several nested ones) holds the keys a function reads; `ConfigError` names each missing key with its path |
 | `get_scan_extent_mm` | `src/utils/acquisition_metadata.py` | (x, y, z) mm extent a recording covers — its frame size × tracking pixel scale, and its deepest `fd` plane (not the config's ROI / scan height); the fixed axis range for the Stage-1/Stage-2 tracking plots |
 | `parse_frame_filenames` | `src/utils/path_helpers.py` | One row per raw frame of a sample dir (frame, dpt, fd_mm, path), parsed from the acquisition filenames |
 | `create_well_mask_with_fallback` | `src/core/well_analysis.py` | Well mask with the full-frame bright-mask fallback (brightness matching + Stage-1 rim exclusion) |

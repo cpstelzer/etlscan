@@ -7,6 +7,7 @@ import pytest
 
 cv2 = pytest.importorskip("cv2", reason="OpenCV required.", exc_type=ImportError)
 
+from src.utils.common_exceptions import ConfigError
 from src.core.masking_operations import (
     create_circular_mask,
     apply_mask,
@@ -73,9 +74,8 @@ def test_mask_well_area_manual_center(circle_image):
 
 def test_mask_well_area_missing_radius_fraction(circle_image):
     mask_config = {"auto_center_mask": True, "radius_px": 100}
-    result_image, binary_mask = mask_well_area(circle_image, mask_config, {})
-    assert result_image is None
-    assert binary_mask is None
+    with pytest.raises(ConfigError, match="well_masking.radius_fraction"):
+        mask_well_area(circle_image, mask_config, {})
 
 
 def test_detect_black_mask_artifact_detects_corner(tmp_path):

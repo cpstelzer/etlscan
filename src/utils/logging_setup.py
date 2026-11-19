@@ -25,11 +25,9 @@ def setup_logging(config: Dict[str, object]) -> logging.Logger:
     log_level = getattr(logging, level_str, logging.INFO)
     
     log_format_str = log_config["format"]
-    console_format_str = log_config.get("console_format", log_format_str)
     date_format_str = log_config["date_format"]
 
     formatter = logging.Formatter(log_format_str, date_format_str)
-    console_formatter = logging.Formatter(console_format_str, date_format_str)
 
     log_file_config_path = log_config["log_file"]
     
@@ -73,7 +71,7 @@ def setup_logging(config: Dict[str, object]) -> logging.Logger:
     # Add a console handler regardless of whether a file handler is active,
     # but its level can be controlled.
     console_handler = logging.StreamHandler(sys.stdout) # Use sys.stdout for INFO, sys.stderr for ERROR/WARNING
-    console_handler.setFormatter(console_formatter)
+    console_handler.setFormatter(formatter)
     
     # Set console handler level. Typically INFO or WARNING for progress.
     # If file logging is active, we might want console to be less verbose.

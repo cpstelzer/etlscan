@@ -7,6 +7,7 @@ from typing import Optional, Sequence, Tuple, Dict, Any
 from skimage.exposure import rescale_intensity
 
 from src.utils.common_exceptions import ImageProcessingError, ConfigError, DataValidationError
+from src.utils.config_loader import require_config_keys
 from src.core.region_props_calculator import find_contours
 from src.core.image_enhancement import apply_blur
 
@@ -26,9 +27,9 @@ def create_well_mask_black_plate(
         logger.error("create_well_mask_black_plate: Invalid input image.")
         return None, None
 
-    low_thresh = config_well_mask.get('low_threshold_value', 5)
-    min_diameter = config_well_mask.get('min_expected_diameter_px', 100)
-    max_diameter = config_well_mask.get('max_expected_diameter_px', 4000)
+    low_thresh = config_well_mask['low_threshold_value']
+    min_diameter = config_well_mask['min_expected_diameter_px']
+    max_diameter = config_well_mask['max_expected_diameter_px']
     min_fill_ratio_to_enclosing_circle = config_well_mask['min_fill_ratio_to_enclosing_circle']
     center_offset_fraction_threshold = config_well_mask['center_offset_fraction_threshold']
 
@@ -41,7 +42,7 @@ def create_well_mask_black_plate(
     # 1. Opening: Removes small noise and protrusions from the well's border.
     # 2. Closing: Fills small holes and gaps in the well's border.
     # This combination produces a much smoother contour for accurate circularity calculation.
-    morph_kernel_size = config_well_mask.get('morph_kernel_size', 9)
+    morph_kernel_size = config_well_mask['morph_kernel_size']
     kernel = cv2.getStructuringElement(
         cv2.MORPH_ELLIPSE, (morph_kernel_size, morph_kernel_size)
     )
@@ -157,10 +158,10 @@ def create_well_mask_with_fallback(
     well_mask, _ = create_well_mask_black_plate(image_gray_uint8, config_well_identification)
     if well_mask is not None:
         return well_mask
-    if not config_well_identification.get('fallback_full_frame_on_failure', True):
+    if not config_well_identification['fallback_full_frame_on_failure']:
         return None
     bright_mask = create_full_frame_bright_mask(
-        image_gray_uint8, config_well_identification.get('low_threshold_value', 5)
+        image_gray_uint8, config_well_identification['low_threshold_value']
     )
     if bright_mask is not None:
         logger.info("create_well_mask_with_fallback: No discrete well found; using full-frame bright-pixel fallback mask.")
@@ -260,13 +261,24 @@ def match_low_frequency_illumination(
 def calculate_well_brightness_peak(
     image_gray_uint8: np.ndarray,
     well_mask_uint8: np.ndarray,
-    min_intensity_for_peak_search: int = 75,
-    percentile_for_proxy: int = 75,
-    min_well_pixels: int = 100,
+    percentile_for_proxy: float,
+    min_well_pixels: int,
 ) -> Optional[float]:
     """
     Calculates a proxy for the well background's brightness peak from its histogram.
+
+    The proxy is the median of the well pixels at or above the ``percentile_for_proxy``
+    percentile (``brightness_peak_calculation.percentile_for_peak_proxy``); a well with
+    fewer than ``min_well_pixels`` pixels is reported as unreliable.
+
+    Raises:
+        ConfigError: ``percentile_for_proxy`` is outside [0, 100).
     """
+    if not 0 <= percentile_for_proxy < 100:
+        raise ConfigError(
+            "black_plate_well_analysis.brightness_peak_calculation.percentile_for_peak_proxy must be "
+            f"in [0, 100), got {percentile_for_proxy!r}"
+        )
     if image_gray_uint8 is None or well_mask_uint8 is None:
         logger.error("calculate_well_brightness_peak: Input image or mask is None.")
         return None
@@ -277,9 +289,6 @@ def calculate_well_brightness_peak(
         if well_pixels.size == 0:
             return None
 
-    if percentile_for_proxy < 0 or percentile_for_proxy >= 100:
-        percentile_for_proxy = 75
-    
     # Ensure well_pixels is not empty before calling percentile
     if well_pixels.size == 0:
         logger.warning("calculate_well_brightness_peak: well_pixels is empty after masking. Cannot determine peak.")
@@ -328,13 +337,13 @@ def match_well_brightness(
     Returns:
         Tuple[np.ndarray, np.ndarray]: Adjusted FG and BG images (uint8).
     """
-    cfg_well_id = config_well_analysis.get('well_identification')
-    cfg_peak_calc = config_well_analysis.get('brightness_peak_calculation')
-    cfg_matching = config_well_analysis.get('brightness_matching')
-
-    if not all([cfg_well_id, cfg_peak_calc, cfg_matching]):
-        logger.error("match_well_brightness: Missing required configuration sections. Returning original images.")
-        return fg_img_uint8, bg_img_uint8
+    require_config_keys(
+        config_well_analysis, ('well_identification', 'brightness_peak_calculation', 'brightness_matching'),
+        'stage_01_initial_detection.black_plate_well_analysis',
+    )
+    cfg_well_id = config_well_analysis['well_identification']
+    cfg_peak_calc = config_well_analysis['brightness_peak_calculation']
+    cfg_matching = config_well_analysis['brightness_matching']
 
     fg_mask = (
         fg_well_mask_uint8 if fg_well_mask_uint8 is not None
@@ -348,18 +357,10 @@ def match_well_brightness(
         logger.warning("match_well_brightness: Could not create well masks for FG or BG. Returning original images.")
         return fg_img_uint8, bg_img_uint8
 
-    fg_peak = calculate_well_brightness_peak(
-        fg_img_uint8, fg_mask,
-        cfg_peak_calc.get('min_intensity_for_peak_search', 75),
-        cfg_peak_calc.get('percentile_for_peak_proxy', 75),
-        cfg_peak_calc.get('min_well_pixels', 100),
-    )
-    bg_peak = calculate_well_brightness_peak(
-        bg_img_uint8, bg_mask,
-        cfg_peak_calc.get('min_intensity_for_peak_search', 75),
-        cfg_peak_calc.get('percentile_for_peak_proxy', 75),
-        cfg_peak_calc.get('min_well_pixels', 100),
-    )
+    percentile_for_peak_proxy = cfg_peak_calc['percentile_for_peak_proxy']
+    min_well_pixels = cfg_peak_calc['min_well_pixels']
+    fg_peak = calculate_well_brightness_peak(fg_img_uint8, fg_mask, percentile_for_peak_proxy, min_well_pixels)
+    bg_peak = calculate_well_brightness_peak(bg_img_uint8, bg_mask, percentile_for_peak_proxy, min_well_pixels)
 
     if fg_peak is None or bg_peak is None:
         logger.warning("match_well_brightness: Could not determine brightness peaks for FG or BG. Returning original images.")
@@ -367,9 +368,9 @@ def match_well_brightness(
 
     logger.debug(f"match_well_brightness: FG Peak={fg_peak:.2f}, BG Peak={bg_peak:.2f}")
 
-    max_diff_allowed = cfg_matching.get('max_peak_difference_allowed', 15)
-    target_offset = cfg_matching.get('target_peak_offset_after_shift', 3) # How much dimmer target should be
-    adjustment_method = cfg_matching.get('adjustment_method', 'global_shift')
+    max_diff_allowed = cfg_matching['max_peak_difference_allowed']
+    target_offset = cfg_matching['target_peak_offset_after_shift'] # How much dimmer target should be
+    adjustment_method = cfg_matching['adjustment_method']
 
     adjusted_fg = fg_img_uint8.copy()
     adjusted_bg = bg_img_uint8.copy()
@@ -400,11 +401,6 @@ def match_well_brightness(
                 np.clip(bg_float, 0, 255, out=bg_float) # Clip in-place
                 adjusted_bg = bg_float.astype(np.uint8)
 
-                # Verification (optional)
-                # new_bg_peak = calculate_well_brightness_peak(adjusted_bg, bg_mask, 
-                #                                              cfg_peak_calc.get('min_intensity_for_peak_search', 75),
-                #                                              cfg_peak_calc.get('percentile_for_peak_proxy', 75))
-                # logger.debug(f"match_well_brightness: New BG peak after adjustment: {new_bg_peak if new_bg_peak else 'N/A'}")
             else:
                 logger.debug(f"match_well_brightness: Calculated shift is zero. No adjustment to BG needed to match FG target.")
 

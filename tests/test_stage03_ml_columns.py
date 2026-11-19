@@ -32,8 +32,9 @@ def _write_config(tmp_path: Path, filter_on_boundary: bool = False) -> Path:
     """Write a minimal pipeline config for Stage 3 tests and return its path."""
     config_path = tmp_path / "config.yml"
     config_data = {
-        'project_base_dir': str(tmp_path),
-        'sample_subdir_name': 'sample_A',
+        'paths': {'pipeline_base': str(tmp_path)},
+        # no LBP columns expected from Stage 2 in these tests
+        'stage_02_characterization': {'shape_descriptors': {'lbp_radii': [], 'lbp_points': 8}},
         'stage_03_filtering_and_classification': {
             'model_type': 'random_forest_model',
             'size_invariant_features': False,

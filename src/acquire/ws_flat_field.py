@@ -71,7 +71,7 @@ def determine_color_mode(acq_conf):
     print("\nStep 1: Determining acquisition mode")
     process_images_in_color = False
     is_color_camera = check_camera_is_color()
-    color_mode_config = acq_conf.get("camera", {}).get("color_mode", "Ask").capitalize()
+    color_mode_config = acq_conf["camera"]["color_mode"].capitalize()
 
     if color_mode_config == "Color":
         if not is_color_camera:
@@ -326,7 +326,7 @@ def main():
 
     process_as_color = determine_color_mode(acq_conf)
 
-    base_out_dir = acq_conf.get("paths", {}).get("output_folder_base", ".")
+    base_out_dir = acq_conf["paths"]["output_folder_base"]
     flat_dir = os.path.join(base_out_dir, "1_flat_field")
     os.makedirs(flat_dir, exist_ok=True)
     flat_path = os.path.join(flat_dir, "flat.png")

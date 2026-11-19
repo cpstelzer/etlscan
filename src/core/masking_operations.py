@@ -14,6 +14,7 @@ except Exception:  # noqa: BLE001 - propagate as optional dependency
     cv2 = None  # type: ignore
 
 from src.utils.common_exceptions import ImageProcessingError
+from src.utils.config_loader import require_config_keys
 
 logger = logging.getLogger(__name__)
 
@@ -112,13 +113,17 @@ def mask_well_area(
     from .region_props_calculator import find_contours  # Local import to avoid cv2 dependency at module import time
 
     _require_cv2("mask_well_area")
+    require_config_keys(
+        mask_config, ('auto_center_mask', 'radius_px', 'radius_fraction'),
+        'stage_01_initial_detection.well_masking',
+    )
     img_h, img_w = image_gray.shape
     center: Optional[Tuple[int, int]] = None
     radius: Optional[int] = None
 
     try:
         # Determine center coordinates
-        if mask_config.get('auto_center_mask', True):
+        if mask_config['auto_center_mask']:
             # Threshold to find the well area
             _, threshold_img = cv2.threshold(image_gray, 5, 255, cv2.THRESH_BINARY)
             contours = find_contours(threshold_img, mode="external", method="simple")
@@ -132,25 +137,12 @@ def mask_well_area(
                 (cx_auto, cy_auto), _ = cv2.minEnclosingCircle(largest_contour)
                 center = (int(cx_auto), int(cy_auto))
         else: # Manual centering
-            center_x = system_params.get('image_width_px', img_w) // 2
-            center_y = system_params.get('image_height_px', img_h) // 2
+            center_x = system_params['image_width_px'] // 2
+            center_y = system_params['image_height_px'] // 2
             center = (center_x, center_y)
 
         # Determine radius (always uses configured radius_px and radius_fraction)
-        config_radius_px = mask_config.get("radius_px")
-        if config_radius_px is None:
-            logger.error("'radius_px' not found in mask_config. Cannot determine mask radius.")
-            return None, None
-        
-        radius_fraction = mask_config.get('radius_fraction')
-        if radius_fraction is None:
-            logger.error(
-                "'radius_fraction' not found in mask_config for well masking. "
-                "Ensure it is set under stage_01_initial_detection.well_masking in config.yml."
-            )
-            return None, None
-            
-        radius = int(config_radius_px * radius_fraction)
+        radius = int(mask_config['radius_px'] * mask_config['radius_fraction'])
 
         if radius <= 0:
             logger.error(f"Calculated mask radius ({radius}) is not positive. Cannot create mask.")

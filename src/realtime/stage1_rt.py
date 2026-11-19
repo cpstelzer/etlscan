@@ -23,13 +23,6 @@ class Stage1Result:
     detections_df: pd.DataFrame
 
 
-def _has_brightness_config_sections(cfg: Dict[str, Any]) -> bool:
-    return all(
-        section in cfg and isinstance(cfg.get(section), dict) and bool(cfg.get(section))
-        for section in ("well_identification", "brightness_peak_calculation", "brightness_matching")
-    )
-
-
 def run_stage1_realtime(
     fg_img_uint8: np.ndarray,
     bg_img_uint8: np.ndarray,
@@ -44,13 +37,6 @@ def run_stage1_realtime(
 
     brightness_cfg = config["config_black_plate_well"]
     enable_brightness_adjustment = bool(config["enable_brightness_adjustment"])
-    if enable_brightness_adjustment and not _has_brightness_config_sections(brightness_cfg):
-        if frame_index % 60 == 0:
-            logger.warning(
-                "Realtime Stage-1 brightness adjustment requested but config_black_plate_well is incomplete; "
-                "running without brightness matching for this frame."
-            )
-        enable_brightness_adjustment = False
 
     source_illumination = str(config["source_image_illumination"]).strip().lower()
 

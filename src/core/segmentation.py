@@ -9,6 +9,7 @@ from typing import Dict, Any, Optional, Tuple
 from skimage.measure._regionprops import RegionProperties 
 
 from src.utils.common_exceptions import ConfigError
+from src.utils.config_loader import require_config_keys
 
 logger = logging.getLogger(__name__)
 
@@ -47,9 +48,8 @@ def generate_binary_mask_from_float_image(
         final_threshold_value_float = otsu_thresh_val_raw_sk * otsu_multiplier
         logger.debug(f"generate_binary_mask (Otsu): raw={otsu_thresh_val_raw_sk:.4f}, mult={otsu_multiplier}, final={final_threshold_value_float:.4f}")
     elif thresholding_mode == 'fixed':
-        fixed_thresh_val_config_int = threshold_params.get('fixed_threshold_value')
-        if fixed_thresh_val_config_int is None:
-            raise ConfigError("generate_binary_mask: thresholding_mode is 'fixed' but 'fixed_threshold_value' is missing.")
+        require_config_keys(threshold_params, ('fixed_threshold_value',), 'segmentation.thresholding')
+        fixed_thresh_val_config_int = threshold_params['fixed_threshold_value']
         try:
             fixed_thresh_int = int(fixed_thresh_val_config_int)
         except ValueError:

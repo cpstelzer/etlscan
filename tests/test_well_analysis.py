@@ -16,17 +16,19 @@ from src.core.well_analysis import (
     match_low_frequency_illumination,
     match_well_brightness,
 )
-from src.utils.common_exceptions import ImageProcessingError
+from src.utils.common_exceptions import ConfigError, ImageProcessingError
 
 
 @pytest.fixture()
 def well_config():
     return {
+        "morph_kernel_size": 9,
         "low_threshold_value": 10,
         "min_expected_diameter_px": 100,
         "max_expected_diameter_px": 190,
         "min_fill_ratio_to_enclosing_circle": 0.80,
         "center_offset_fraction_threshold": 0.15,
+        "fallback_full_frame_on_failure": True,
     }
 
 
@@ -34,14 +36,16 @@ def well_config():
 def full_analysis_config():
     return {
         "well_identification": {
+            "morph_kernel_size": 9,
             "low_threshold_value": 10,
             "min_expected_diameter_px": 100,
             "max_expected_diameter_px": 190,
             "min_fill_ratio_to_enclosing_circle": 0.80,
             "center_offset_fraction_threshold": 0.1,
+            "fallback_full_frame_on_failure": True,
         },
         "brightness_peak_calculation": {
-            "min_intensity_for_peak_search": 75,
+            "min_well_pixels": 100,
             "percentile_for_peak_proxy": 75,
         },
         "brightness_matching": {
@@ -98,7 +102,7 @@ def test_create_well_mask_rejects_non_2d(well_config):
 def test_calculate_well_brightness_peak_returns_float(fg_image, well_config):
     mask, _ = create_well_mask_black_plate(fg_image, well_config)
     assert mask is not None
-    peak = calculate_well_brightness_peak(fg_image, mask)
+    peak = calculate_well_brightness_peak(fg_image, mask, percentile_for_proxy=75, min_well_pixels=100)
     assert peak is not None
     assert isinstance(peak, float)
     assert peak > 0
@@ -107,8 +111,15 @@ def test_calculate_well_brightness_peak_returns_float(fg_image, well_config):
 def test_calculate_well_brightness_peak_none_inputs():
     img = np.zeros((100, 100), dtype=np.uint8)
     mask = np.ones((100, 100), dtype=np.uint8) * 255
-    assert calculate_well_brightness_peak(None, mask) is None
-    assert calculate_well_brightness_peak(img, None) is None
+    assert calculate_well_brightness_peak(None, mask, percentile_for_proxy=75, min_well_pixels=100) is None
+    assert calculate_well_brightness_peak(img, None, percentile_for_proxy=75, min_well_pixels=100) is None
+
+
+def test_calculate_well_brightness_peak_rejects_out_of_range_percentile():
+    img = np.full((100, 100), 120, dtype=np.uint8)
+    mask = np.ones((100, 100), dtype=np.uint8) * 255
+    with pytest.raises(ConfigError, match="percentile_for_peak_proxy"):
+        calculate_well_brightness_peak(img, mask, percentile_for_proxy=100, min_well_pixels=100)
 
 
 def test_match_well_brightness_brighter_bg_is_adjusted(
@@ -130,10 +141,15 @@ def test_match_well_brightness_similar_bg_unchanged(
     assert np.array_equal(adj_bg, bg_image_similar)
 
 
-def test_match_well_brightness_missing_config_returns_originals(fg_image, bg_image_brighter):
-    adj_fg, adj_bg = match_well_brightness(fg_image, bg_image_brighter, {})
-    assert np.array_equal(adj_fg, fg_image)
-    assert np.array_equal(adj_bg, bg_image_brighter)
+def test_match_well_brightness_missing_config_fails(fg_image, bg_image_brighter):
+    with pytest.raises(ConfigError, match="black_plate_well_analysis.well_identification"):
+        match_well_brightness(fg_image, bg_image_brighter, {})
+
+
+def test_create_well_mask_requires_every_key(fg_image, well_config):
+    del well_config["morph_kernel_size"]
+    with pytest.raises(KeyError, match="morph_kernel_size"):
+        create_well_mask_black_plate(fg_image, well_config)
 
 
 # --- Full-frame fallback (no discrete well present) ---------------------------

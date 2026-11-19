@@ -321,7 +321,7 @@ def run_realtime_session(config: RealtimeConfig, plate: int, well: int) -> str:
                 "min_focus_score": config.min_focus_score,
                 "min_particle_area": config.min_particle_area,
                 "max_candidates_per_frame": config.max_stage2_candidates_per_frame,
-                "source_image_illumination": config.stage1_config.get("source_image_illumination", "darkfield"),
+                "source_image_illumination": config.stage1_config["source_image_illumination"],
             })
             monitor.counters.stage2_candidates += s2.pre_threshold_count
             monitor.counters.stage2_rejected_focus += s2.rejected_focus_count
@@ -376,7 +376,7 @@ def run_realtime_session(config: RealtimeConfig, plate: int, well: int) -> str:
                 logger.warning(
                     "All %d Stage-2 candidates were rejected by boundary filter (mode=%s).",
                     s2.pre_threshold_count,
-                    str(config.stage1_config.get("source_image_illumination", "darkfield")).strip().lower(),
+                    str(config.stage1_config["source_image_illumination"]).strip().lower(),
                 )
                 last_boundary_reject_warn_frame = packet.frame_index
 

@@ -19,7 +19,7 @@ from src.utils import (
 )
 from src.utils.common_exceptions import ProcessingError, ImageProcessingError, ConfigError, DataValidationError
 from src.utils.acquisition_metadata import get_scan_extent_mm, read_frames_lost_at_acquisition
-from src.utils.config_loader import get_pixel_to_mm_factor
+from src.utils.config_loader import get_pixel_to_mm_factor, require_config_sections
 from src.core.image_io_operations import (
     load_image,
     load_flat_field_assets,
@@ -44,6 +44,78 @@ logger = logging.getLogger(__name__)
 # filename tokens) agree within this tolerance. Shared by both FG/BG pairing strategies:
 # the time-shift offset search and the external-background frame matching.
 _FOCAL_PLANE_TOLERANCE = 1e-6
+
+# Every config key Stage 1 reads (batch, both background sources, and the realtime Stage 1,
+# which runs the same functions). Checked once by validate_stage1_config; the code then
+# indexes the sections directly, without fallback values.
+STAGE1_CONFIG_PATH = 'stage_01_initial_detection'
+STAGE1_SHARED_REQUIRED_KEYS = {
+    'well_masking': ('create_mask', 'auto_center_mask', 'radius_px', 'radius_fraction'),
+    'black_plate_well_analysis': ('enable_brightness_adjustment', 'rim_exclusion_px'),
+    'black_plate_well_analysis.well_identification': (
+        'morph_kernel_size', 'low_threshold_value', 'min_expected_diameter_px', 'max_expected_diameter_px',
+        'min_fill_ratio_to_enclosing_circle', 'center_offset_fraction_threshold',
+        'fallback_full_frame_on_failure',
+    ),
+    'black_plate_well_analysis.brightness_peak_calculation': (
+        'min_well_pixels', 'percentile_for_peak_proxy',
+    ),
+    'black_plate_well_analysis.brightness_matching': (
+        'max_peak_difference_allowed', 'adjustment_method', 'target_peak_offset_after_shift',
+    ),
+    'particle_analysis': (
+        'apply_convolution', 'convolution_kernel', 'min_microorganism_area', 'microorganism_blur_kernel',
+    ),
+    'unsubtracted_particle_analysis': (
+        'min_particle_area', 'adaptive_padding_factor', 'background_floor_percentile',
+        'max_roi_foreground_fraction',
+    ),
+    'particle_comparison': ('search_radius_factor', 'default_particle_area'),
+}
+_STAGE1_BATCH_REQUIRED_KEYS = {
+    '': ('BG_frame_offset_mode', 'bg_offset_val'),
+    'tracking': (
+        'enabled', 'pixel_size_um', 'magnification', 'track_in_2d', 'search_range_mm', 'memory_frames',
+        'min_track_length',
+    ),
+}
+_STAGE1_EXTERNAL_BACKGROUND_KEYS = {
+    'external_background': (
+        'illumination_match_downsample', 'illumination_match_median_kernel_px',
+        'max_failed_frame_fraction', 'static_search_range_mm', 'lint_max_solidity',
+    ),
+}
+# The shared thresholding settings: the loader assembles `imaging` + `segmentation` into
+# config['system'].
+_STAGE1_SYSTEM_REQUIRED_KEYS = {
+    '': ('source_image_illumination_type',),
+    'thresholding': ('thresholding_mode', 'otsu_threshold_multiplier', 'fixed_threshold_value'),
+    'subtracted_foreground': ('foreground_diff_threshold', 'max_foreground_fraction'),
+}
+
+
+def validate_stage1_detection_config(config: Dict[str, Any]) -> None:
+    """Fail fast when ``config`` lacks a key the per-frame detection reads (batch and realtime).
+
+    Raises:
+        ConfigError: naming each missing key with its path in ``config.yml``.
+    """
+    require_config_sections(config, {STAGE1_CONFIG_PATH: (), 'system': ()}, 'config')
+    require_config_sections(config[STAGE1_CONFIG_PATH], STAGE1_SHARED_REQUIRED_KEYS, STAGE1_CONFIG_PATH)
+    require_config_sections(config['system'], _STAGE1_SYSTEM_REQUIRED_KEYS, 'imaging / segmentation')
+
+
+def validate_stage1_config(config: Dict[str, Any], external_background: bool = False) -> None:
+    """Fail fast when ``config`` lacks a key batch Stage 1 reads (detection, pairing, tracking).
+
+    Raises:
+        ConfigError: naming each missing key with its path in ``config.yml``.
+    """
+    validate_stage1_detection_config(config)
+    config_s1 = config[STAGE1_CONFIG_PATH]
+    require_config_sections(config_s1, _STAGE1_BATCH_REQUIRED_KEYS, STAGE1_CONFIG_PATH)
+    if external_background:
+        require_config_sections(config_s1, _STAGE1_EXTERNAL_BACKGROUND_KEYS, STAGE1_CONFIG_PATH)
 
 
 def select_background_frame(images_df: pd.DataFrame, fg_index: int, bg_offset: int) -> Dict[str, Any]:
@@ -112,7 +184,7 @@ def prepare_masked_foreground(
         )
 
     well_mask_uint8 = None
-    if well_masking_cfg.get('create_mask', False):
+    if well_masking_cfg['create_mask']:
         _, well_mask_uint8 = mask_well_area(
             fg_img_uint8.copy(),
             well_masking_cfg,
@@ -697,8 +769,8 @@ def _analyze_single_subtracted_image_global_thresh(
     particles_data = []; binary_mask_display_uint8 = None
     if image_to_analyze_gray_uint8 is None: return particles_data, binary_mask_display_uint8
     processed_img_uint8 = image_to_analyze_gray_uint8.copy()
-    apply_conv = config_stage1_particle_analysis.get('apply_convolution', False)
-    kernel_list = config_stage1_particle_analysis.get('convolution_kernel')
+    apply_conv = config_stage1_particle_analysis['apply_convolution']
+    kernel_list = config_stage1_particle_analysis['convolution_kernel']
     if apply_conv and kernel_list:
         try:
             conv_kernel = np.array(kernel_list, dtype=np.float32)
@@ -711,7 +783,7 @@ def _analyze_single_subtracted_image_global_thresh(
         binary_mask = binary_mask & foreground_floor_mask
     binary_mask_uint8 = binary_mask.astype(np.uint8) * 255; binary_mask_display_uint8 = binary_mask_uint8.copy()
     img_for_contours = binary_mask_uint8
-    blur_kernel_size_sub_binary = config_stage1_particle_analysis.get('microorganism_blur_kernel', 0)
+    blur_kernel_size_sub_binary = config_stage1_particle_analysis['microorganism_blur_kernel']
     if blur_kernel_size_sub_binary > 0 and blur_kernel_size_sub_binary % 2 == 1:
         blurred_binary = apply_blur(binary_mask_uint8, blur_kernel_size_sub_binary, "median")
         if blurred_binary is not None: img_for_contours = blurred_binary; logger.debug(f"S1 Subtracted: Applied blur (kernel {blur_kernel_size_sub_binary}) to binary mask.")
@@ -757,9 +829,9 @@ def _analyze_unsubtracted_locally(
     if full_unsub_prepped_uint8 is None: return [], None, (None, None, None)
     all_local_particle_data = []; composite_binary_mask_full_image = np.zeros_like(full_unsub_prepped_uint8, dtype=np.uint8)
     first_roi_img_2d_for_display, first_roi_hist_data_ravel, first_roi_effective_thresh_val_float = None, None, None
-    min_area_unsub = analysis_config.get('min_particle_area', 50); h_full, w_full = full_unsub_prepped_uint8.shape
-    background_floor_percentile = float(analysis_config.get('background_floor_percentile', 25))
-    max_roi_foreground_fraction = float(analysis_config.get('max_roi_foreground_fraction', 0.85))
+    min_area_unsub = analysis_config['min_particle_area']; h_full, w_full = full_unsub_prepped_uint8.shape
+    background_floor_percentile = float(analysis_config['background_floor_percentile'])
+    max_roi_foreground_fraction = float(analysis_config['max_roi_foreground_fraction'])
     logger.debug(f"Local Unsub: Processing {len(candidate_particles_subtracted)} candidate ROIs with adaptive padding factor {adaptive_padding_factor}")
     for i, cand_p_sub in enumerate(candidate_particles_subtracted):
         if 'X' not in cand_p_sub or 'Y' not in cand_p_sub: continue
@@ -793,17 +865,17 @@ def _analyze_unsubtracted_locally(
         local_threshold_value_for_data = np.nan
         if i == 0:
             first_roi_img_2d_for_display, first_roi_hist_data_ravel = roi_float_for_segment_2d.copy(), current_roi_hist_data_ravel
-            if global_threshold_config.get('thresholding_mode') == 'otsu':
+            if global_threshold_config['thresholding_mode'] == 'otsu':
                 if roi_float_for_segment_2d.min() != roi_float_for_segment_2d.max():
-                    try: otsu_val_disp, otsu_mult_disp = skimage.filters.threshold_otsu(roi_float_for_segment_2d), global_threshold_config.get('otsu_threshold_multiplier', 0.45); first_roi_effective_thresh_val_float, local_threshold_value_for_data = otsu_val_disp * otsu_mult_disp, otsu_val_disp * otsu_mult_disp
+                    try: otsu_val_disp, otsu_mult_disp = skimage.filters.threshold_otsu(roi_float_for_segment_2d), global_threshold_config['otsu_threshold_multiplier']; first_roi_effective_thresh_val_float, local_threshold_value_for_data = otsu_val_disp * otsu_mult_disp, otsu_val_disp * otsu_mult_disp
                     except ValueError: pass
-            elif global_threshold_config.get('thresholding_mode') == 'fixed': first_roi_effective_thresh_val_float, local_threshold_value_for_data = global_threshold_config.get('fixed_threshold_value', 70) / 255.0, global_threshold_config.get('fixed_threshold_value', 70) / 255.0
+            elif global_threshold_config['thresholding_mode'] == 'fixed': first_roi_effective_thresh_val_float, local_threshold_value_for_data = global_threshold_config['fixed_threshold_value'] / 255.0, global_threshold_config['fixed_threshold_value'] / 255.0
         else:
-            if global_threshold_config.get('thresholding_mode') == 'otsu':
+            if global_threshold_config['thresholding_mode'] == 'otsu':
                  if roi_float_for_segment_2d.min() != roi_float_for_segment_2d.max():
-                    try: otsu_val_data, otsu_mult_data = skimage.filters.threshold_otsu(roi_float_for_segment_2d), global_threshold_config.get('otsu_threshold_multiplier', 0.45); local_threshold_value_for_data = otsu_val_data * otsu_mult_data
+                    try: otsu_val_data, otsu_mult_data = skimage.filters.threshold_otsu(roi_float_for_segment_2d), global_threshold_config['otsu_threshold_multiplier']; local_threshold_value_for_data = otsu_val_data * otsu_mult_data
                     except ValueError: pass
-            elif global_threshold_config.get('thresholding_mode') == 'fixed': local_threshold_value_for_data = global_threshold_config.get('fixed_threshold_value', 70) / 255.0
+            elif global_threshold_config['thresholding_mode'] == 'fixed': local_threshold_value_for_data = global_threshold_config['fixed_threshold_value'] / 255.0
         local_binary_mask_roi_uint8 = local_binary_mask_roi.astype(np.uint8) * 255
         composite_binary_mask_full_image[y1:y2, x1:x2] = np.maximum(composite_binary_mask_full_image[y1:y2, x1:x2], local_binary_mask_roi_uint8)
         contours_in_roi = find_contours(local_binary_mask_roi_uint8, mode="external", method="simple")
@@ -826,7 +898,7 @@ def _compare_and_fuse_particle_dfs(df_ref: pd.DataFrame, df_query: pd.DataFrame,
     """Fuse subtracted and unsubtracted detections by spatial proximity to keep confident particles."""
     if df_ref.empty or df_query.empty: return pd.DataFrame()
     if not all(k in df_ref.columns and k in df_query.columns for k in ['X', 'Y']): raise DataValidationError("X, Y columns missing for fusion.")
-    sr_factor, dp_area = config_s1_comparison.get('search_radius_factor', 2.0), config_s1_comparison.get('default_particle_area', 500.0); search_radius = sr_factor * np.sqrt(dp_area / np.pi)
+    sr_factor, dp_area = config_s1_comparison['search_radius_factor'], config_s1_comparison['default_particle_area']; search_radius = sr_factor * np.sqrt(dp_area / np.pi)
     df_query_cleaned = df_query.dropna(subset=['X', 'Y']).copy()
     if df_query_cleaned.empty: return pd.DataFrame()
     if 'original_query_idx' not in df_query_cleaned.columns: df_query_cleaned.loc[:, 'original_query_idx'] = range(len(df_query_cleaned))
@@ -1038,14 +1110,18 @@ def run_particle_tracking(
     figures are built by the caller from the final (object-filtered) tracks.
     """
     logger.info(f"--- Post-S1 Tracking initiated for: {sample_id} ---")
-    pixel_size_um = tracking_config.get('pixel_size_um')
-    magnification = tracking_config.get('magnification')
-    min_track_length = tracking_config.get('min_track_length')
-    if not all([pixel_size_um, magnification, search_range_mm, memory_frames, min_track_length]):
-        raise ConfigError("One or more required tracking parameters are missing from the configuration.")
-    # Link in the XY plane only when requested. A plain .get default (not part of the
-    # all() check above) because False is a valid, intended value; absent key -> 3D.
-    track_in_2d = bool(tracking_config.get('track_in_2d', False))
+    min_track_length = tracking_config['min_track_length']
+    tracking_values = {
+        'pixel_size_um': tracking_config['pixel_size_um'],
+        'magnification': tracking_config['magnification'],
+        'search_range_mm': search_range_mm,
+        'memory_frames': memory_frames,
+        'min_track_length': min_track_length,
+    }
+    unset = [name for name, value in tracking_values.items() if not value]
+    if unset:
+        raise ConfigError(f"Tracking parameters must be set and non-zero: {', '.join(unset)}")
+    track_in_2d = bool(tracking_config['track_in_2d'])
 
     processed_data = _process_particle_coordinates_for_tracking_df(
         fused_df, get_pixel_to_mm_factor(tracking_config)
@@ -1121,7 +1197,8 @@ def run_stage_01_initial_detection(
     step after pairing (subtraction gate, refinement, fusion, tracking) is shared.
     """
     logger.info(f"--- Stage 1: Initial Detection for Sample ID: {sample_id} ---")
-    config_s1 = config['stage_01_initial_detection']
+    validate_stage1_config(config, external_background=bg_image_dir_path is not None)
+    config_s1 = config[STAGE1_CONFIG_PATH]
     system_cfg = config['system']
     source_image_illumination = system_cfg['source_image_illumination_type']
     global_threshold_config = system_cfg['thresholding']
@@ -1262,8 +1339,8 @@ def run_stage_01_initial_detection(
             if external_background_config is not None:
                 memory_frames, search_range_mm = sweep_period_frames, static_search_range_mm
             else:
-                memory_frames = tracking_config.get('memory_frames')
-                search_range_mm = tracking_config.get('search_range_mm')
+                memory_frames = tracking_config['memory_frames']
+                search_range_mm = tracking_config['search_range_mm']
             tracked_df = run_particle_tracking(
                 final_sample_df, sample_id, tracking_config, memory_frames, search_range_mm
             )

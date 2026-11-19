@@ -2,7 +2,7 @@
 import copy
 import functools
 import os
-from typing import Any, Dict, Tuple
+from typing import Any, Dict, Iterable, Mapping, Tuple
 
 import yaml
 
@@ -187,6 +187,49 @@ def _replace_null_with_none(d: Dict[str, Any]):
                     v[i] = None
         elif v == 'null':
             d[k] = None
+
+
+def require_config_keys(section: Any, keys: Iterable[str], section_path: str) -> Dict[str, Any]:
+    """Return ``section`` after checking that it is a mapping that holds every key in ``keys``.
+
+    Config values have no fallback in code: a function that reads a config section calls this
+    once and then indexes the section directly. ``section_path`` is the section's dotted path
+    in ``config.yml`` (e.g. ``"stage_01_initial_detection.tracking"``), used in the message.
+
+    Raises:
+        ConfigError: ``section`` is not a mapping, or keys are missing (each named with its
+            full path).
+    """
+    if not isinstance(section, dict):
+        raise ConfigError(
+            f"Config section '{section_path}' must be a mapping, got {type(section).__name__}."
+        )
+    missing = [key for key in keys if key not in section]
+    if missing:
+        raise ConfigError(
+            "Missing config key(s): " + ", ".join(f"{section_path}.{key}" for key in missing)
+        )
+    return section
+
+
+def require_config_sections(
+    root: Any, required_keys_by_section: Mapping[str, Iterable[str]], root_path: str
+) -> None:
+    """Check several (nested) sections below ``root`` with :func:`require_config_keys`.
+
+    ``required_keys_by_section`` maps a section's dotted path relative to ``root`` (``""`` for
+    ``root`` itself) to the keys it must hold. A stage calls this once at its start, so an
+    incomplete config stops the run before any data is processed.
+
+    Raises:
+        ConfigError: a section is missing or not a mapping, or one of its keys is missing.
+    """
+    for section_path, keys in required_keys_by_section.items():
+        section, walked_path = root, root_path
+        for name in filter(None, section_path.split(".")):
+            section = require_config_keys(section, (name,), walked_path)[name]
+            walked_path = f"{walked_path}.{name}"
+        require_config_keys(section, keys, walked_path)
 
 
 def get_unified_segmentation_params(config: Dict[str, Any]) -> Dict[str, Any]:

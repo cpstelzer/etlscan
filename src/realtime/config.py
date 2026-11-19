@@ -5,6 +5,7 @@ import logging
 from typing import Any, Dict, Optional
 
 from src.acquire.triggered_acquisition import TRIGGER_MODE_SOFTWARE_GRID, TRIGGER_MODES, GridTimingParams
+from src.stages.stage_01_initial_detection import validate_stage1_detection_config
 from src.utils.config_loader import load_config_once, get_unified_segmentation_params
 
 logger = logging.getLogger(__name__)
@@ -97,6 +98,8 @@ def _must_be_nonnegative(name: str, value: float) -> None:
 
 def load_realtime_config(config_path: str = "config/config.yml") -> RealtimeConfig:
     pipeline_cfg = load_config_once(config_path)
+    # Realtime Stage 1 runs the batch detection functions: same keys, checked before the session starts.
+    validate_stage1_detection_config(pipeline_cfg)
 
     rt = pipeline_cfg["realtime_mode"]
     runtime = rt["runtime"]

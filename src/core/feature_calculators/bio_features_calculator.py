@@ -5,6 +5,8 @@ from typing import Optional, Tuple
 import numpy as np
 from skimage.measure._regionprops import RegionProperties
 
+from src.utils.common_exceptions import ConfigError
+
 logger = logging.getLogger(__name__)
 
 
@@ -59,11 +61,10 @@ def calculate_posterior_attributes(
         props_obj._axis_vector_pointing_posterior = axis_vector_rc_unit
 
     if not (0 < egg_posterior_pixel_fraction_config < 1):
-        logger.warning(
-            f"egg_posterior_pixel_fraction ({egg_posterior_pixel_fraction_config}) "
-            "is out of (0,1) range. Defaulting to 0.45."
+        raise ConfigError(
+            "stage_04_biological_analysis.egg_detection.egg_posterior_pixel_fraction must be in (0, 1), "
+            f"got {egg_posterior_pixel_fraction_config!r}"
         )
-        egg_posterior_pixel_fraction_config = 0.45
 
     percentile_to_cut = (1.0 - egg_posterior_pixel_fraction_config) * 100.0
     projections_for_slice = np.dot(

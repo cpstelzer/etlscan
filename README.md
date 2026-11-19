@@ -135,7 +135,7 @@ python scripts/prepare_acquisition_batch.py <acquisition_output_dir> <batch_name
 
 The YAML file at `config/config.yml` controls acquisition, the offline pipeline and the realtime mode. Key entries:
 
-- `paths.pipeline_base`: offline-pipeline root (writes `data/output/`, hosts `models/` and `data/training_data/`). The legacy top-level `project_base_dir` key is still accepted as a fallback.
+- `paths.pipeline_base`: offline-pipeline root (writes `data/output/`, hosts `models/` and `data/training_data/`). Required; the former top-level `project_base_dir` key is no longer read.
 - `paths.raw_data_root`: where acquisition writes captured frames; point `run_pipeline --input_batch_dir` at it.
 - `active_hardware_profile` and `hardware_profiles.<name>`: rig-specific settings (see [Hardware](#hardware)), deep-merged into `acquisition`.
 - `acquisition`: scan pattern, step size, frame rate, recording duration, trigger mode and plate type (`acquisition.plate.type`, `24` or `96`).

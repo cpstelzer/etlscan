@@ -13,6 +13,9 @@ from src.core.segmentation import generate_binary_mask_from_float_image
 
 logger = logging.getLogger(__name__)
 
+# Stage-1 columns holding a particle's bounding box (written by calculate_contour_measurements).
+_BBOX_COLUMNS = {'x': 'bounding_x', 'y': 'bounding_y', 'w': 'bounding_w', 'h': 'bounding_h'}
+
 def crop_rotated(
     image: np.ndarray,
     center: Tuple[float, float],
@@ -63,9 +66,7 @@ def normalized_crop_config(crop_config: Dict[str, Any]) -> Dict[str, Any]:
     return {
         'mode': mode,
         'adaptive_padding_factor': adaptive_padding_factor,
-        'bbox_column_mapping': crop_config.get('bbox_column_mapping', {
-            'x': 'bounding_x', 'y': 'bounding_y', 'w': 'bounding_w', 'h': 'bounding_h'
-        }),
+        'bbox_column_mapping': dict(_BBOX_COLUMNS),
     }
 
 

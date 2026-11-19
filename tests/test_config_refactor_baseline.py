@@ -15,6 +15,7 @@ import pytest
 import yaml
 
 from src.utils import config_loader
+from src.utils.common_exceptions import ConfigError
 from src.utils.config_loader import get_unified_segmentation_params
 from src.acquire.config import get_plate_settings
 from src.acquire.plate_layout import (
@@ -175,7 +176,7 @@ def test_unified_segmentation_params_snapshot():
     assert params["otsu_threshold_multiplier"] == 0.7
     assert params["fixed_threshold_value"] == 70
     assert params["source_image_illumination_type"] == "collimated"
-    assert params["min_significant_area"] == 300
+    assert params["closing_selem_size"] == 3
     # egg-detection keys are decoupled: they must NOT leak into the shared params.
     assert "egg_min_area" not in params
     assert "egg_max_area" not in params
@@ -193,7 +194,8 @@ def test_output_path_resolution_structure(tmp_path):
     assert get_project_base_dir(cfg) == str(tmp_path)
 
 
-def test_legacy_project_base_dir_fallback(tmp_path):
-    # Configs not yet migrated to paths.pipeline_base still resolve.
+def test_legacy_project_base_dir_is_rejected(tmp_path):
+    # paths.pipeline_base is the only place the pipeline root is read from.
     cfg = {"project_base_dir": str(tmp_path)}
-    assert get_project_base_dir(cfg) == str(tmp_path)
+    with pytest.raises(ConfigError, match="paths"):
+        get_project_base_dir(cfg)
