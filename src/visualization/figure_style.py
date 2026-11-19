@@ -9,19 +9,27 @@ use :func:`track_figure_style` instead and draw through the ``plot_track_line`` 
 ``plot_focus_points`` / ``draw_floor_shadow`` helpers below, so they all look alike.
 """
 from contextlib import contextmanager
-from typing import Any, Dict, Iterator, Sequence
+from typing import Any, Dict, Iterator, Optional, Sequence, Tuple
 
 import matplotlib.pyplot as plt
 import numpy as np
 from matplotlib.axes import Axes
 
+from src.utils.common_exceptions import ConfigError
 from src.utils.config_loader import require_config_keys
 
 _FIGURE_STYLE_KEYS = (
     'dpi', 'font_family', 'font_size', 'tick_label_size', 'title_size', 'annotation_size', 'line_width',
     'marker_size', 'marker_edge_width', 'axes_line_width', 'tick_length',
-    'track_line_width', 'track_marker_size',
+    'track_line_width', 'track_marker_size', 'figure_size_in',
 )
+# One entry of figure_style.figure_size_in per figure the pipeline writes.
+_FIGURE_SIZE_NAMES = (
+    'track_map_3d', 'track_map_xy', 'track_map_side', 'focus_diagnostic', 'diagnostics_summary',
+    'feature_overlay', 'feature_importance',
+)
+# The figure sizes of the style block that is active (None outside of one); see figure_size.
+_active_figure_sizes: Optional[Dict[str, Tuple[float, float]]] = None
 
 # Fifteen hues of similar weight: tab10, then the darkest step of five tab20b hues. tab20's
 # light/dark pairs of one hue made neighbouring tracks look like one track, and its pastels
@@ -65,10 +73,60 @@ def _figure_style_rc_params(config: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+def _figure_sizes(config: Dict[str, Any]) -> Dict[str, Tuple[float, float]]:
+    """Return ``figure_style.figure_size_in`` as ``{name: (width, height)}`` (ConfigError if unusable)."""
+    sizes_config = require_config_keys(
+        config['figure_style']['figure_size_in'], _FIGURE_SIZE_NAMES, 'figure_style.figure_size_in'
+    )
+    figure_sizes = {}
+    for name in _FIGURE_SIZE_NAMES:
+        size = sizes_config[name]
+        if (not isinstance(size, (list, tuple)) or len(size) != 2
+                or not all(isinstance(side, (int, float)) and not isinstance(side, bool) and side > 0 for side in size)):
+            raise ConfigError(
+                f"figure_style.figure_size_in.{name} must be [width, height] in inches (positive numbers), got {size!r}"
+            )
+        figure_sizes[name] = (float(size[0]), float(size[1]))
+    return figure_sizes
+
+
+@contextmanager
+def _style_block(config: Dict[str, Any], rc_params: Dict[str, Any]) -> Iterator[None]:
+    """Make ``rc_params`` and the configured figure sizes current inside the block."""
+    global _active_figure_sizes
+    figure_sizes_before = _active_figure_sizes
+    _active_figure_sizes = _figure_sizes(config)
+    try:
+        with plt.rc_context(rc_params):
+            yield
+    finally:
+        _active_figure_sizes = figure_sizes_before
+
+
+def figure_size(name: str) -> Tuple[float, float]:
+    """Return the configured (width, height) in inches of the figure ``name``.
+
+    Like the rcParams, the sizes are those of the style block the figure is created in:
+    call this inside ``figure_style(config)`` / ``track_figure_style(config)``.
+
+    Raises:
+        ConfigError: called outside a style block, or ``name`` is not a figure of
+            ``figure_style.figure_size_in``.
+    """
+    if _active_figure_sizes is None:
+        raise ConfigError(
+            f"figure_size({name!r}) needs an active figure style: create the figure inside "
+            "figure_style(config) or track_figure_style(config)."
+        )
+    if name not in _active_figure_sizes:
+        raise ConfigError(f"Unknown figure {name!r}; figure_style.figure_size_in defines {_FIGURE_SIZE_NAMES}.")
+    return _active_figure_sizes[name]
+
+
 @contextmanager
 def figure_style(config: Dict[str, Any]) -> Iterator[None]:
     """Apply the configured figure style to every figure created and saved inside the block."""
-    with plt.rc_context(_figure_style_rc_params(config)):
+    with _style_block(config, _figure_style_rc_params(config)):
         yield
 
 
@@ -85,7 +143,7 @@ def track_figure_style(config: Dict[str, Any]) -> Iterator[None]:
         'axes3d.yaxis.panecolor': _TRANSPARENT,
         'axes3d.zaxis.panecolor': _TRANSPARENT,
     })
-    with plt.rc_context(rc_params):
+    with _style_block(config, rc_params):
         yield
 
 

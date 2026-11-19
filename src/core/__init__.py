@@ -19,6 +19,12 @@
 #                         create_rim_excluded_well_mask,
 #                         calculate_well_brightness_peak, match_well_brightness,
 #                         match_low_frequency_illumination
+# focus_peak_detection  : focus_sweep_geometry, estimate_sharpness_baseline,
+#                         detect_peaks_in_track, filter_focused_frames, FocusSweep
+# depth_reconstruction  : reconstruct_track_depth, find_depth_knot_speed_outliers,
+#                         flag_depth_knot_speed_outliers, add_reconstructed_depth,
+#                         attach_reconstructed_depth_to_subset
+# track_columns         : FOCUS_*_COLUMN names of the track tables
 # sharpness_assessment  : calculate_sharpness_metrics,
 #                         normalize_and_combine_sharpness,
 #                         AVAILABLE_SHARPNESS_METRICS

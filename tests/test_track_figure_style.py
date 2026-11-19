@@ -11,8 +11,9 @@ import matplotlib.pyplot as plt
 import pandas as pd
 import pytest
 
-from src.stages.stage_01_initial_detection import _build_tracking_figure, _build_tracking_xy_figure
-from src.stages.stage_02_characterization import (
+from src.visualization.track_maps import (
+    build_tracking_figure,
+    build_tracking_xy_figure,
     plot_3d_reconstructed,
     plot_side_view_reconstructed,
     plot_xy_reconstructed,
@@ -155,8 +156,8 @@ def test_side_view_rejects_an_unknown_axis(tracks_df, tmp_path):
 
 def test_stage1_track_maps_share_the_track_style(tracks_df):
     with track_figure_style(STYLE_CONFIG):
-        fig_3d = _build_tracking_figure(tracks_df, EXTENT_MM)
-        fig_xy = _build_tracking_xy_figure(tracks_df, EXTENT_MM)
+        fig_3d = build_tracking_figure(tracks_df, EXTENT_MM)
+        fig_xy = build_tracking_xy_figure(tracks_df, EXTENT_MM)
 
     lines_3d = fig_3d.axes[0].lines
     assert all((shadow.get_data_3d()[2] == 0).all() for shadow in lines_3d[:3])

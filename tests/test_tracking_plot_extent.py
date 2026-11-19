@@ -17,11 +17,11 @@ from PIL import Image
 
 from src.utils.acquisition_metadata import get_scan_extent_mm
 from src.utils.common_exceptions import DataValidationError
-from src.stages.stage_01_initial_detection import (
-    _build_tracking_figure,
-    _build_tracking_xy_figure,
-)
-from src.stages.stage_02_characterization import (
+from src.visualization.figure_style import track_figure_style
+from tests.test_figure_style import STYLE_CONFIG
+from src.visualization.track_maps import (
+    build_tracking_figure,
+    build_tracking_xy_figure,
     plot_3d_reconstructed,
     plot_side_view_reconstructed,
     plot_xy_reconstructed,
@@ -29,6 +29,13 @@ from src.stages.stage_02_characterization import (
 
 # Deliberately non-square in x/y so an axis mix-up cannot pass unnoticed.
 EXTENT_MM = (15.0, 12.0, 3.2)
+
+
+@pytest.fixture(autouse=True)
+def _track_map_style():
+    """Track maps are created inside the track-map style block, which also sets their size."""
+    with track_figure_style(STYLE_CONFIG):
+        yield
 
 
 @pytest.fixture
@@ -80,7 +87,7 @@ def test_scan_extent_without_frames_fails(tmp_path):
 
 
 def test_stage1_3d_figure_spans_full_extent(corner_tracks_df):
-    fig = _build_tracking_figure(corner_tracks_df, EXTENT_MM)
+    fig = build_tracking_figure(corner_tracks_df, EXTENT_MM)
     ax = fig.axes[0]
 
     xlim, ylim = _limits_at_draw(ax)
@@ -91,7 +98,7 @@ def test_stage1_3d_figure_spans_full_extent(corner_tracks_df):
 
 
 def test_stage1_xy_figure_spans_full_extent(corner_tracks_df):
-    fig = _build_tracking_xy_figure(corner_tracks_df, EXTENT_MM)
+    fig = build_tracking_xy_figure(corner_tracks_df, EXTENT_MM)
     ax = fig.axes[0]
 
     # Equal aspect must not claw back the fixed limits: adjustable='datalim'

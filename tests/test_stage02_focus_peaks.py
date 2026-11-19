@@ -12,7 +12,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from src.stages.stage_02_characterization import (
+from src.core.focus_peak_detection import (
     FOCUS_PEAK_EDGE_COLUMN,
     detect_peaks_in_track,
     estimate_sharpness_baseline,

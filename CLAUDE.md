@@ -78,6 +78,9 @@ etlscan/
 │   │   ├── region_props_calculator.py
 │   │   ├── segmentation.py
 │   │   ├── sharpness_assessment.py
+│   │   ├── focus_peak_detection.py         # Stage-2 focus peaks against a track's own baseline
+│   │   ├── depth_reconstruction.py         # Stage-2 depth knots, speed gate, z_reconstructed spline
+│   │   ├── track_columns.py                # Column names of the track tables
 │   │   └── well_analysis.py
 │   ├── realtime/
 │   │   ├── stage1_rt.py        # Real-time Stage-1 wrapper
@@ -100,7 +103,9 @@ etlscan/
 │   │   └── data_io.py
 │   └── visualization/
 │       ├── feature_visualization.py  # Stage-4 body/egg overlay
-│       └── figure_style.py           # Shared plot style from config['figure_style']
+│       ├── focus_diagnostics.py      # Stage-2 sharpness curves with crop collages, diagnostics summary
+│       ├── track_maps.py             # Stage-1 and Stage-2 track maps (3D, XY, side views)
+│       └── figure_style.py           # Shared plot style and figure sizes from config['figure_style']
 └── tests/                      # pytest suite (mirror of src/ layout)
 ```
 
@@ -182,7 +187,7 @@ which applies these transforms at load time:
 | `acquisition.experiment_sweep` | Scan-step × pattern grid for both sweep scripts, plus `variable_recording_duration` / `plane_revisit_times` (run length = max(`camera.video_duration_sec`, time for every plane to get k visits)). |
 | `acquisition.camera.trigger_mode` | How exposures are timed against the ETL commands (`acquire_and_save_frames`, every `run_acquire*.py`). `software_grid` (default): one software trigger per focus-pattern entry, trigger i due at t0 + i / `fps` on a fixed grid; frame i is exposed only after its own lens command + `focusing.min_settle_ms`, the lens moves only `exposure + post_exposure_margin_ms` after a trigger, `WaitForFrameTriggerReady` runs `trigger_ready_lead_ms` before the due time; a large jump (`large_jump_threshold_dpt`) delays only its own trigger to command end + `large_jump_settle_sec`. The realtime camera source (`src/realtime/acquisition.py`) follows the same setting and runs the same loop on a background thread at `realtime_mode.runtime.target_fps` (adaptive/repeat requests apply from the next lens command; `drop_frame_if_backlogged: false` pauses the loop and restarts the grid instead of dropping). `free_run`: legacy loop (sleep `focusing.lens_settle_time_sec`, take the next free-run frame), kept for comparison — at 25 fps it labels each frame with the previous frame's plane (one-frame lag). `metadata_log.csv` gets `# Trigger Mode` (image-defining: an external-BG run must use the same loop as its FG run; a missing field means `free_run`, i.e. all older data), `# Min Settle (ms)` (grid), `# Lens Temperature Start/End (C)` (if the controller reports it) and, after the legacy columns, `grid_time_s`, `lens_cmd_start_s`, `lens_cmd_end_s`, `trigger_time_s`, `trigger_late_ms`, `block_id`, `camera_timestamp_ns`, `exposure_minus_trigger_ms`, `exposure_minus_lens_cmd_ms`, `lens_temp_c` (times relative to the acquisition start; exposure times from camera timestamps via clock latches). One recording check per run (`camera.clock_sync_samples`, `trigger_late_report_ms`, `timestamp_mismatch_ms`). |
 | Egg detection | `stage_04_biological_analysis.egg_detection` is only consumed by stage 4; it is **not** merged into `get_unified_segmentation_params`. |
-| `figure_style` | Publication style of **every** figure the pipeline writes (Stage-1/2 track maps, Stage-2 focus diagnostics, Stage-4 overlays, `train_model.py` feature-importance chart): dpi, font family, axis-label/tick/title/in-plot-annotation font sizes, line width, marker size, axes line width. Applied as matplotlib rcParams by the `figure_style(config)` context manager; plot code sets no font sizes, line widths, marker sizes or dpi itself — new plots must be created *and saved* inside that block. Figures are ~7–8 in wide so the pt sizes print legibly at single-column width. The track maps (Stage-1 `*_tracks_3d/xy`, Stage-2 `reconstructed_trajectories_3d/xy/xz/yz`) use `track_figure_style(config)` instead: the same style with `track_line_width` / `track_marker_size`, white 3D panes and a faint grid. They draw through the shared `plot_track_line` (15-colour palette by rank), `plot_focus_points` (open rings) and `draw_floor_shadow` (grey copy at z = 0) helpers, so they all look alike; the four Stage-2 views take their tracks from one selection, so a track has the same colour in each. The XZ/YZ side views show depth (`z_reconstructed` line, in-focus `z_mm` rings) at true scale. |
+| `figure_style` | Publication style of **every** figure the pipeline writes (Stage-1/2 track maps, Stage-2 focus diagnostics, Stage-4 overlays, `train_model.py` feature-importance chart): dpi, font family, axis-label/tick/title/in-plot-annotation font sizes, line width, marker size, axes line width. Applied as matplotlib rcParams by the `figure_style(config)` context manager; plot code sets no font sizes, line widths, marker sizes, dpi or figure size itself — new plots must be created *and saved* inside that block. Each figure's size is an entry of `figure_style.figure_size_in`, read inside the block with `figure_size(name)` (a new figure needs a new entry). Figures are ~7–8 in wide so the pt sizes print legibly at single-column width. The track maps (Stage-1 `*_tracks_3d/xy`, Stage-2 `reconstructed_trajectories_3d/xy/xz/yz`) use `track_figure_style(config)` instead: the same style with `track_line_width` / `track_marker_size`, white 3D panes and a faint grid. They draw through the shared `plot_track_line` (15-colour palette by rank), `plot_focus_points` (open rings) and `draw_floor_shadow` (grey copy at z = 0) helpers, so they all look alike; the four Stage-2 views take their tracks from one selection, so a track has the same colour in each. The XZ/YZ side views show depth (`z_reconstructed` line, in-focus `z_mm` rings) at true scale. |
 | `stage_01_initial_detection.external_background` | Read only with `run_pipeline --background_source external`: `fg/`/`bg/` subfolder names, low-frequency illumination match (downsample, median kernel), `max_failed_frame_fraction`, per-detection lint filter `lint_max_solidity`. Tracking in this mode uses a one-sweep-period memory (derived, not configured) and the static-object linking radius `static_search_range_mm`; the subtracted-foreground gate and all other detection/tracking params are shared with time-shift mode. |
 
 ---
@@ -270,6 +275,7 @@ both image and ML errors).
 | `read_acquisition_metadata_header` | `src/utils/acquisition_metadata.py` | Parse the `# Key: value` header of a run's `metadata_log.csv` |
 | `read_frames_lost_at_acquisition` | `src/utils/acquisition_metadata.py` | Frame indices a run logged but saved no image for (markers shared with the acquisition writer) |
 | `figure_style` | `src/visualization/figure_style.py` | Context manager applying `config['figure_style']` to all figures created and saved inside it |
+| `figure_size` | `src/visualization/figure_style.py` | Configured (width, height) of a named figure, valid inside a style block |
 | `track_figure_style` | `src/visualization/figure_style.py` | The same for the track maps, with their line/marker sizes; draw tracks with `plot_track_line`, `plot_focus_points`, `draw_floor_shadow` |
 
 ---
