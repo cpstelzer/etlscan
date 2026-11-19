@@ -109,6 +109,14 @@ def _node_limit(node: Any, name: str) -> Optional[float]:
     return None if value is None else float(value)
 
 
+def _resulting_frame_rate(camera: Any) -> Optional[float]:
+    """The frame rate the camera achieves with its current settings, or None if it does not report one."""
+    try:
+        return float(camera.ResultingFrameRate.GetValue())
+    except Exception:  # noqa: BLE001 - node absent on this camera model
+        return None
+
+
 def set_exposure(camera: Any, exposure_us: float, emit: Emit = print) -> float:
     """Set the exposure time, clamped to the camera's range and increment; return the active value."""
     exposure_to_set = exposure_us
@@ -207,27 +215,21 @@ def configure_camera(
 def set_frame_rate(camera: Any, desired_fps: float, emit: Emit = print) -> float:
     """Set the free-run frame rate, limited to what the camera can deliver; return the active rate.
 
+    The rate is capped at the ``AcquisitionFrameRate`` node's maximum. That maximum is the
+    node's range, not what the camera achieves with the current exposure, ROI and link (a
+    Basler ace 2 reports 1e6 fps), so afterwards ``ResultingFrameRate`` is read as well: when
+    the camera achieves less than the set rate, the rate is lowered to the whole number of
+    frames per second it does achieve. The returned rate is therefore the one frames arrive at.
+
     Raises:
         ValueError: the camera cannot deliver a positive frame rate.
     """
     emit("Configuring camera frame rate...")
-    max_possible_fps = None
     try:
         camera.AcquisitionFrameRateEnable.SetValue(True)
         emit(f"  Attempting to set desired FPS: {desired_fps:.2f}")
-        try:
-            if hasattr(camera, "AcquisitionFrameRate") and camera.AcquisitionFrameRate.HasMax:
-                max_possible_fps = camera.AcquisitionFrameRate.Max
-                emit(f"  Camera's AcquisitionFrameRate.Max: {max_possible_fps:.2f} FPS")
-            elif hasattr(camera, "ResultingFrameRate") and camera.ResultingFrameRate.IsReadable():
-                max_possible_fps = camera.ResultingFrameRate.Value
-                emit(f"  Camera's current ResultingFrameRate: {max_possible_fps:.2f} FPS")
-            else:
-                emit(f"  Warning: Cannot directly query max FPS. Will attempt to set desired FPS "
-                     f"({desired_fps:.2f}) and read back.")
-        except Exception as e_fps_query:  # noqa: BLE001 - set the desired rate and read it back
-            emit(f"  Warning: Error querying max FPS capabilities: {e_fps_query}. Proceeding cautiously.")
-            max_possible_fps = None
+        # pypylon float nodes have Min/Max but no HasMax attribute: read the limit directly.
+        max_possible_fps = _node_limit(camera.AcquisitionFrameRate, 'Max')
 
         fps_to_set = desired_fps
         if max_possible_fps is not None and desired_fps > max_possible_fps:
@@ -246,6 +248,21 @@ def set_frame_rate(camera: Any, desired_fps: float, emit: Emit = print) -> float
         if abs(final_fps - desired_fps) > 0.1 and (max_possible_fps is None or desired_fps <= max_possible_fps):
             emit(f"  Note: Final FPS ({final_fps:.2f}) differs slightly from desired ({desired_fps:.2f}) "
                  "due to camera constraints.")
+        achievable_fps = _resulting_frame_rate(camera)
+        if achievable_fps is not None and achievable_fps < final_fps - 0.1:
+            # The returned rate is logged as the recording's frame rate (metadata_log.csv), which
+            # the pipeline uses: it must be the rate the frames really arrive at.
+            fps_to_set = math.floor(achievable_fps)
+            emit(f"Warning: with the current exposure and ROI the camera delivers only {achievable_fps:.2f} FPS "
+                 f"(ResultingFrameRate), not the {final_fps:.2f} FPS set. Adjusting FPS to {fps_to_set:.2f} FPS.")
+            if fps_to_set <= 0:
+                raise ValueError(
+                    f"The camera delivers only {achievable_fps:.2f} FPS with these settings: "
+                    "no whole frame rate is possible."
+                )
+            camera.AcquisitionFrameRate.SetValue(fps_to_set)
+            final_fps = camera.AcquisitionFrameRate.GetValue()
+            emit(f"  Final Acquisition Frame Rate set to: {final_fps:.2f} FPS")
     except ValueError:
         raise
     except Exception as e:  # noqa: BLE001 - keep the rate the camera has, if it has one

@@ -100,10 +100,43 @@ def test_exposure_is_set_on_the_camera_increment(sim):
 
 def test_frame_rate_above_the_camera_maximum_is_reduced(sim):
     pylon, _ = sim
-    camera = hardware_setup.open_first_camera(pylon, emit=lambda line: None)   # simulated maximum: 27 fps
+    camera = hardware_setup.open_first_camera(pylon, emit=lambda line: None)   # node maximum: 27 fps
+    camera.ResultingFrameRate.Value = 27.0                                     # and achieved at full ROI
 
     assert hardware_setup.set_frame_rate(camera, 25.0, emit=lambda line: None) == 25.0
     assert hardware_setup.set_frame_rate(camera, 40.0, emit=lambda line: None) == 27.0
+
+
+def test_frame_rate_node_without_has_max_is_read_like_pypylon(sim):
+    """pypylon float nodes have Max but no HasMax (seen on the a2A4504-27g5m): no error, rate set."""
+    pylon, _ = sim
+    camera = hardware_setup.open_first_camera(pylon, emit=lambda line: None)
+    del camera.AcquisitionFrameRate.HasMax
+    lines, emit = _messages()
+
+    assert hardware_setup.set_frame_rate(camera, 25.0, emit=emit) == 25.0
+    assert not any("Warning" in line or "Error" in line for line in lines)
+
+
+def test_rate_the_camera_cannot_achieve_is_lowered_to_what_it_achieves(sim):
+    """The node range allows 27 fps, but ResultingFrameRate says the camera delivers 25: the
+    returned rate (logged as the recording's frame rate) must be the achieved one."""
+    pylon, _ = sim
+    camera = hardware_setup.open_first_camera(pylon, emit=lambda line: None)
+    lines, emit = _messages()
+
+    assert hardware_setup.set_frame_rate(camera, 27.0, emit=emit) == 25.0
+    assert camera.AcquisitionFrameRate.GetValue() == 25.0
+    assert any("delivers only 25.00 FPS" in line for line in lines)
+
+
+def test_rate_the_camera_cannot_achieve_at_all_fails(sim):
+    pylon, _ = sim
+    camera = hardware_setup.open_first_camera(pylon, emit=lambda line: None)
+    camera.ResultingFrameRate.Value = 0.5          # e.g. a very long exposure
+
+    with pytest.raises(ValueError, match="delivers only 0.50 FPS"):
+        hardware_setup.set_frame_rate(camera, 25.0, emit=lambda line: None)
 
 
 def test_frame_rate_the_camera_cannot_deliver_fails(sim):
