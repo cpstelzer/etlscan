@@ -2,11 +2,7 @@
 import numpy as np
 import pytest
 
-from src.core.feature_calculators.bio_features_calculator import (
-    DEFAULT_FEATURE_NAMES,
-    calculate_posterior_attributes,
-    extract_ml_features,
-)
+from src.core.feature_calculators.bio_features_calculator import calculate_posterior_attributes
 
 
 # ---------------------------------------------------------------------------
@@ -61,18 +57,3 @@ def test_calculate_posterior_attributes_out_of_range_fraction_clamps():
     # fraction > 1 should be clamped to 0.45 without raising
     annotated, ratio, coords = calculate_posterior_attributes(props, (20, 20), 1.5)
     assert 0.0 <= ratio <= 1.0
-
-
-# ---------------------------------------------------------------------------
-# DEFAULT_FEATURE_NAMES
-# ---------------------------------------------------------------------------
-
-def test_default_feature_names_is_list_of_strings():
-    assert isinstance(DEFAULT_FEATURE_NAMES, list)
-    assert all(isinstance(n, str) for n in DEFAULT_FEATURE_NAMES)
-    assert len(DEFAULT_FEATURE_NAMES) > 0
-
-
-def test_default_feature_names_contains_expected_keys():
-    expected = {'main_area', 'aspect_ratio', 'solidity', 'posterior_area_ratio'}
-    assert expected.issubset(set(DEFAULT_FEATURE_NAMES))

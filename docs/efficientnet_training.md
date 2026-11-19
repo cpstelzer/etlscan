@@ -48,7 +48,8 @@ python scripts/train_efficientnet_model.py \
 Key flags:
 
 * `--dataset-dir`: folder containing the class subfolders. Defaults to `data/training_data` if omitted.
-* `--epochs`, `--batch-size`, `--learning-rate`, `--weight-decay`, `--val-split`, `--mixup-alpha`: optional training hyperparameters.
+* `--epochs`, `--batch-size`, `--learning-rate`, `--weight-decay`, `--mixup-alpha`: override, for one run, the values in `stage_03_filtering_and_classification.training_params.efficient_net_training` of `config/config.yml` (`default_epochs`, `default_batch_size`, `learning_rate`, `weight_decay`, `mixup_alpha`).
+* `--val-split`: fraction of the dataset held out for validation (default 0.2).
 * `--device`: `auto` (default, prefers CUDA if available), `cuda`, or `cpu`.
 
 The script saves the best-performing checkpoint (by validation accuracy) to `models/<checkpoint_filename>`.

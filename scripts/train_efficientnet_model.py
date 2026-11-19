@@ -186,10 +186,10 @@ def parse_args():
     )
     parser.add_argument('--epochs', type=int, default=None, help='Override training epochs (defaults from config).')
     parser.add_argument('--batch-size', type=int, default=None, help='Override batch size (defaults from config).')
-    parser.add_argument('--learning-rate', type=float, default=1e-3)
-    parser.add_argument('--weight-decay', type=float, default=1e-4)
+    parser.add_argument('--learning-rate', type=float, default=None, help='Override learning rate (defaults from config).')
+    parser.add_argument('--weight-decay', type=float, default=None, help='Override weight decay (defaults from config).')
     parser.add_argument('--val-split', type=float, default=0.2)
-    parser.add_argument('--mixup-alpha', type=float, default=0.4)
+    parser.add_argument('--mixup-alpha', type=float, default=None, help='Override mixup alpha (defaults from config).')
     parser.add_argument(
         '--device',
         default='auto',
@@ -203,21 +203,14 @@ def main():
     """Train EfficientNet-B0 using curated crops and save the best checkpoint."""
     args = parse_args()
     config = load_config_once(args.config)
-    s3_config = config.get('stage_03_filtering_and_classification', {})
-    eff_cfg = s3_config.get('efficient_net_model', {})
-    if not eff_cfg:
-        raise ConfigError("Add an 'efficient_net_model' section to the Stage 3 config to control filenames and labels.")
+    s3_config = config['stage_03_filtering_and_classification']
+    eff_cfg = s3_config['efficient_net_model']
 
-    checkpoint_filename = eff_cfg.get('checkpoint_filename', 'efficientnet_b0_best.pt')
-    input_size = int(eff_cfg.get('input_size', 224))
-    positive_label = eff_cfg.get('positive_label', 'good')
-    training_cfg = (
-        s3_config.get('training_params', {})
-        .get('efficient_net_training', {})
-    )
-    default_epochs = int(training_cfg.get('default_epochs', 15))
-    default_batch_size = int(training_cfg.get('default_batch_size', 32))
-    dataset_subdir = training_cfg.get('dataset_subdir', '') or ''
+    checkpoint_filename = eff_cfg['checkpoint_filename']
+    input_size = int(eff_cfg['input_size'])
+    positive_label = eff_cfg['positive_label']
+    training_cfg = s3_config['training_params']['efficient_net_training']
+    dataset_subdir = training_cfg['dataset_subdir']
     models_dir = get_models_dir(config)
     os.makedirs(models_dir, exist_ok=True)
 
@@ -244,8 +237,12 @@ def main():
     train_dataset, val_dataset = random_split(full_dataset, [train_size, val_size])
     val_dataset.dataset.transform = val_tfms
 
-    epochs = args.epochs or default_epochs
-    batch_size = args.batch_size or default_batch_size
+    # A command-line option overrides the config value for this run only.
+    epochs = args.epochs if args.epochs is not None else int(training_cfg['default_epochs'])
+    batch_size = args.batch_size if args.batch_size is not None else int(training_cfg['default_batch_size'])
+    learning_rate = args.learning_rate if args.learning_rate is not None else float(training_cfg['learning_rate'])
+    weight_decay = args.weight_decay if args.weight_decay is not None else float(training_cfg['weight_decay'])
+    mixup_alpha = args.mixup_alpha if args.mixup_alpha is not None else float(training_cfg['mixup_alpha'])
 
     train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, num_workers=2)
     val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, num_workers=2)
@@ -260,8 +257,8 @@ def main():
         device = torch.device('cpu')
     model = build_model(num_classes).to(device)
     criterion = nn.CrossEntropyLoss()
-    optimizer = optim.AdamW(model.parameters(), lr=args.learning_rate, weight_decay=args.weight_decay)
-    mixup = MixupWrapper(alpha=args.mixup_alpha)
+    optimizer = optim.AdamW(model.parameters(), lr=learning_rate, weight_decay=weight_decay)
+    mixup = MixupWrapper(alpha=mixup_alpha)
 
     best_val_acc = 0.0
     best_checkpoint = None

@@ -492,14 +492,12 @@ stage_02_characterization:
 
 # -----------------------------------------------------------------------------
 # Stage 3: Filtering & Classification
-# (Indentation bug from pipeline_config.yml is fixed here: training_params,
-# test_split_size, random_state, rf_param_grid, efficient_net_training,
-# exclude_feature_prefixes are now correctly direct children of this stage.)
+# Inference settings are direct children of this stage; everything that only the
+# training scripts read (scripts/train_model.py, scripts/train_efficientnet_model.py)
+# lives under training_params.
 # -----------------------------------------------------------------------------
 stage_03_filtering_and_classification:
   model_type: "random_forest_model"
-  debug_output:
-    save_rejected_images: true
   random_forest_model:
     model_filename: "rf_fem_classifier.joblib"
     scaler_filename: "rf_fem_scaler.joblib"
@@ -510,33 +508,38 @@ stage_03_filtering_and_classification:
   size_invariant_features: false
   ml_filter:
     min_probability_threshold: 0.35
+  # Particles carrying these Stage-2 quality flags are removed before classification
+  # (batch Stage 3 and realtime Stage 3 share apply_quality_flag_filters).
   quality_flags_filter:
     filter_on_boundary: true
     filter_black_mask: true
-  sharpness_filter:
-    enabled: true
-    metric: "variance_laplacian"
-    min_threshold: 100
   training_params:
     good_data_subdir: "good"
     bad_data_subdir: "bad"
-  test_split_size: 0.2
-  random_state: 42
-  rf_param_grid:
-    n_estimators: [50, 100, 200]
-    max_depth: [null, 10, 20]
-    min_samples_split: [2, 5]
-    min_samples_leaf: [1, 3]
-    class_weight: ["balanced", null]
-  efficient_net_training:
-    dataset_subdir: ""
-    default_epochs: 15
-    default_batch_size: 32
-    learning_rate: 0.001
-    weight_decay: 0.0001
-    mixup_alpha: 0.4
-  exclude_feature_prefixes:
-    - "lbp_"
+    # Random-Forest training (scripts/train_model.py): all Stage-2 features incl. lbp_*
+    # (as in the current rf_fem_classifier), a 25 % test split, and one parameter set
+    # equal to the scikit-learn defaults.
+    test_split_size: 0.25
+    random_state: 42
+    # Feature columns whose name starts with one of these prefixes are not used for
+    # training (e.g. ["lbp_"] trains without the texture features).
+    exclude_feature_prefixes: []
+    # Grid searched by GridSearchCV; list several values per parameter to search them.
+    rf_param_grid:
+      n_estimators: [100]
+      max_depth: [null]
+      min_samples_split: [2]
+      min_samples_leaf: [1]
+      class_weight: [null]
+    # EfficientNet training (scripts/train_efficientnet_model.py); the command-line
+    # options of the same name override these values for one run.
+    efficient_net_training:
+      dataset_subdir: ""   # below data/training_data; "" = that directory itself
+      default_epochs: 15
+      default_batch_size: 32
+      learning_rate: 0.001
+      weight_decay: 0.0001
+      mixup_alpha: 0.4
 
 # -----------------------------------------------------------------------------
 # Stage 4: Biological Analysis
@@ -550,5 +553,3 @@ stage_04_biological_analysis:
     egg_max_area: 5000
     egg_min_solidity: 0.60
     egg_max_solidity: 0.99
-    egg_min_eccentricity: 0.2
-    orientation_diff_tolerance_deg: 85

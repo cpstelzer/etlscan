@@ -405,13 +405,13 @@ def main():
         print(f"FATAL: Error during setup: {e}")
         sys.exit(1)
 
-    s3_config = config.get('stage_03_filtering_and_classification', {})
-    s2_config = config.get('stage_02_characterization', {})
+    s3_config = config['stage_03_filtering_and_classification']
+    s2_config = config['stage_02_characterization']
     segmentation_params = get_unified_segmentation_params(config)
     logger.info(
         "Loaded unified segmentation parameters for training crops; aligns with Stage 02/04 processing."
     )
-    training_params = s3_config.get('training_params', {})
+    training_params = s3_config['training_params']
     
     csv_files: List[str] = args.csv_files or []
     use_image_mode = args.use_image_directories or not csv_files
@@ -431,8 +431,8 @@ def main():
             base_dir = directory_arg or os.path.join(training_data_dir, fallback_subdir)
             return base_dir
 
-        good_dir = _resolve_image_dir(args.good_image_dir, training_params.get('good_data_subdir', 'good'))
-        bad_dir = _resolve_image_dir(args.bad_image_dir, training_params.get('bad_data_subdir', 'bad'))
+        good_dir = _resolve_image_dir(args.good_image_dir, training_params['good_data_subdir'])
+        bad_dir = _resolve_image_dir(args.bad_image_dir, training_params['bad_data_subdir'])
 
         for label_name, dir_path in [('good', good_dir), ('bad', bad_dir)]:
             if not os.path.isdir(dir_path):
@@ -485,9 +485,8 @@ def main():
     # --- Model Training ---
     X, y = _normalize_feature_table(full_df, label_column='label')
 
-    size_invariant_enabled = bool(
-        training_params.get('size_invariant_features', s3_config.get('size_invariant_features', False))
-    )
+    # Shared with Stage-3 inference, so the model is trained on the features it is scored with.
+    size_invariant_enabled = bool(s3_config['size_invariant_features'])
     if size_invariant_enabled:
         X, dropped_raw_features = apply_size_invariant_feature_strategy(X, enabled=True)
         if dropped_raw_features:
@@ -501,8 +500,7 @@ def main():
             )
 
     
-    # --- MODIFICATION: Exclude features based on config ---
-    prefixes_to_exclude = training_params.get('exclude_feature_prefixes', [])
+    prefixes_to_exclude = training_params['exclude_feature_prefixes']
     if prefixes_to_exclude:
         cols_to_drop = []
         for prefix in prefixes_to_exclude:
@@ -512,16 +510,14 @@ def main():
         cols_to_drop = list(set(cols_to_drop))
         X.drop(columns=cols_to_drop, inplace=True)
         logger.info(f"Excluded {len(cols_to_drop)} features based on prefixes: {prefixes_to_exclude}")
-    # --- END OF MODIFICATION ---
     
     feature_names = X.columns.tolist()
     logger.info(f"Training model with {len(feature_names)} features.")
     
-    # ... (Rest of the script: train/test split, scaling, grid search, evaluation, and saving) ...
     X_train, X_test, y_train, y_test = train_test_split(
         X, y,
-        test_size=training_params.get('test_split_size', 0.25),
-        random_state=training_params.get('random_state', 42),
+        test_size=training_params['test_split_size'],
+        random_state=training_params['random_state'],
         stratify=y
     )
 
@@ -529,8 +525,8 @@ def main():
     X_train_scaled = scaler.fit_transform(X_train)
     X_test_scaled = scaler.transform(X_test)
 
-    rf = RandomForestClassifier(random_state=training_params.get('random_state', 42))
-    param_grid_raw = training_params.get('rf_param_grid', {})
+    rf = RandomForestClassifier(random_state=training_params['random_state'])
+    param_grid_raw = training_params['rf_param_grid']
     
     param_grid = {}
     for key, value_list in param_grid_raw.items():
@@ -568,8 +564,9 @@ def main():
         plot_feature_importances(importance_df, chart_path, top_n=20)
     logger.info(f"Feature importance chart saved to: {chart_path}")
 
-    model_filename = s3_config.get('model_filename', 'rf_fem_classifier.joblib')
-    scaler_filename = s3_config.get('scaler_filename', 'rf_fem_scaler.joblib')
+    rf_model_config = s3_config['random_forest_model']
+    model_filename = rf_model_config['model_filename']
+    scaler_filename = rf_model_config['scaler_filename']
     feature_names_filename = model_filename.replace(".joblib", "_feature_names.txt")
 
     joblib.dump(best_model, os.path.join(models_dir, model_filename))
